@@ -1,0 +1,12 @@
+{
+  "name": "binance-bot-9router-gateway",
+  "version": "1.0.0",
+  "description": "Internal 9Router AI Gateway for Binance Futures Bot (Port 8039)",
+  "main": "run_9router.js",
+  "scripts": {
+    "start": "node run_9router.js"
+  },
+  "dependencies": {
+    "9router": "^0.5.65"
+  }
+}
