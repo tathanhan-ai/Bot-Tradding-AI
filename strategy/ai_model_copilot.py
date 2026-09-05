@@ -34,6 +34,8 @@ class AICopilotVerdict:
     model_used: str = "9router/gemini"
     gateway_connected: bool = False
     timestamp: str = ""
+    order_id: str = ""
+    snapshot_id: str = ""
 
 
 class AIModelCopilot:
@@ -228,7 +230,8 @@ class AIModelCopilot:
             "Tra ve DUY NHAT 1 JSON hop le dang: "
             "{\"decision\": \"APPROVE\"|\"VETO\"|\"ADJUST_ORDER\"|\"ROTATE_GRID\"|\"ROTATE_TREND\", "
             "\"confidence\": 85, \"market_regime_sentiment\": \"...\", \"shark_trap_warning\": \"...\", "
-            "\"thought_process\": \"...\", \"strategic_advice\": \"...\", \"user_instruction_feedback\": \"...\"}"
+            "\"thought_process\": \"...\", \"strategic_advice\": \"...\", \"user_instruction_feedback\": \"...\", "
+            "\"adjusted_margin\": number|null, \"adjusted_sl\": number|null, \"adjusted_tp\": number|null}"
         )
 
         user_content = "Context thi truong:\n" + json.dumps(context, ensure_ascii=False)
@@ -263,14 +266,26 @@ class AIModelCopilot:
                         raw_text = raw_text[:-3]
                     
                     parsed = json.loads(raw_text.strip())
+                    decision = str(parsed.get("decision", "ABSTAIN")).upper()
+                    if decision not in ("APPROVE", "VETO", "ADJUST_ORDER", "ROTATE_GRID", "ROTATE_TREND", "ABSTAIN"):
+                        decision = "ABSTAIN"
+                    def optional_number(name: str) -> Optional[float]:
+                        try:
+                            value = float(parsed[name])
+                            return value if value > 0 else None
+                        except (KeyError, TypeError, ValueError):
+                            return None
                     return AICopilotVerdict(
-                        decision=parsed.get("decision", "APPROVE"),
+                        decision=decision,
                         confidence=int(parsed.get("confidence", 85)),
                         market_regime_sentiment=parsed.get("market_regime_sentiment", "CHÂN TRỜI TÍCH LŨY"),
                         shark_trap_warning=parsed.get("shark_trap_warning", "Không có bẫy thanh khoản"),
                         thought_process=parsed.get("thought_process", "Mô hình AI 9Router đã thẩm định toàn bộ dữ liệu."),
                         strategic_advice=parsed.get("strategic_advice", "Thực thi lệnh theo dải đệm Carver."),
                         user_instruction_feedback=parsed.get("user_instruction_feedback", "Đã ghi nhận chỉ thị."),
+                        adjusted_margin=optional_number("adjusted_margin"),
+                        adjusted_sl=optional_number("adjusted_sl"),
+                        adjusted_tp=optional_number("adjusted_tp"),
                         model_used=f"9router/{self.default_model}",
                         gateway_connected=True,
                         timestamp=datetime.now().strftime("%H:%M:%S")
@@ -288,8 +303,9 @@ class AIModelCopilot:
         user_inst = context["user_instruction"]
 
         trap_warning = "Không phát hiện bẫy thanh khoản bất thường (An toàn)."
-        decision = "APPROVE"
-        confidence = 88
+        # An offline advisor may explain deterministic signals, never grant approval.
+        decision = "ABSTAIN"
+        confidence = 0
 
         if h > 0.60 and adx > 25.0:
             regime_sent = "SÓNG XU HƯỚNG MẠNH (Hurst Persistent Trending)"
@@ -330,7 +346,7 @@ class AIModelCopilot:
             thought = (
                 f"Hệ thống thẩm định đồng thuận: Hurst={h:.2f}, ADX={adx:.1f}, SMC={smc_bias}. "
                 f"Lệnh {side} quanh ${order['optimal_price']:,.1f} tại vùng cân bằng {vwap_stat} đạt R:R {order['rr_ratio']}:1. "
-                f"Phê duyệt lệnh thực thi."
+                f"Chỉ cung cấp nhận định; deterministic pipeline quyết định thực thi."
             )
 
         user_feedback = f"Đã tích hợp chỉ thị: '{user_inst}'" if user_inst else "Chưa có chỉ thị riêng từ bạn."

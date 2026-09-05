@@ -8,6 +8,8 @@ Tracks aggressive market orders (Taker Buy vs Taker Sell) directly from Binance 
 from collections import deque
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
+from threading import RLock
+import math
 import time
 
 
@@ -29,37 +31,66 @@ class OrderFlowVerdict:
     absorption_divergence: bool      # True if institutional absorption detected
     flow_rationale: str              # Human explanation
 
+    @property
+    def absorption_signal(self) -> str:
+        return {"ABSORPTION_BUY": "BULL_ABSORPTION", "ABSORPTION_SELL": "BEAR_ABSORPTION"}.get(self.delta_momentum, "NONE")
+
+    @property
+    def cvd_delta_60s(self) -> float:
+        return self.buy_volume_1m - self.sell_volume_1m
+
 
 class OrderFlowCVDEngine:
     def __init__(self, max_ticks: int = 2000, window_seconds: int = 60):
+        if not isinstance(window_seconds, (int, float)) or not math.isfinite(window_seconds) or window_seconds <= 0:
+            raise ValueError("CVD window must be finite and positive")
         self.max_ticks = max_ticks
         self.window_seconds = window_seconds
-        self.ticks = deque(maxlen=max_ticks)
+        # Bound by event age; a fixed tick cap silently truncates the 60s volume during busy markets.
+        self.ticks = deque()
         self.cumulative_delta = 0.0
         self.last_price_high = 0.0
         self.last_price_low = float('inf')
         self.last_cvd_high = 0.0
         self.last_cvd_low = float('inf')
+        self._lock = RLock()
+        self.last_trade_timestamp_ms = 0
 
     def add_trade(self, price: float, qty: float, is_buyer_maker: bool, timestamp_ms: int = 0):
         """Processes an incoming raw trade tick from Binance aggTrade WebSocket"""
         arrival_ms = int(time.time() * 1000)
-        tick = TradeTick(price=price, qty=qty, is_buyer_maker=is_buyer_maker, timestamp_ms=arrival_ms)
-        self.ticks.append(tick)
-
-        # Delta calculation: Taker buy adds to delta (+), Taker sell subtracts from delta (-)
-        delta_change = -qty if is_buyer_maker else qty
-        self.cumulative_delta += delta_change
+        if (not isinstance(is_buyer_maker, bool) or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0 for v in (price, qty))
+                or not math.isfinite(price * qty)):
+            return False
+        if not isinstance(timestamp_ms, (int, float)) or not math.isfinite(timestamp_ms) or timestamp_ms < 0:
+            return False
+        event_ms = arrival_ms if timestamp_ms == 0 else (timestamp_ms * 1000 if timestamp_ms < 1e11 else timestamp_ms)
+        if event_ms < arrival_ms - self.window_seconds * 1000 or event_ms > arrival_ms + 2000:
+            return False
+        tick = TradeTick(price=price, qty=qty, is_buyer_maker=is_buyer_maker, timestamp_ms=int(event_ms))
+        with self._lock:
+            delta = self.cumulative_delta + (-qty if is_buyer_maker else qty)
+            if not math.isfinite(delta):
+                return False
+            cutoff = arrival_ms - self.window_seconds * 1000
+            while self.ticks and self.ticks[0].timestamp_ms < cutoff:
+                self.ticks.popleft()
+            self.ticks.append(tick)
+            self.cumulative_delta = delta
+            self.last_trade_timestamp_ms = max(self.last_trade_timestamp_ms, tick.timestamp_ms)
+        return True
 
     def evaluate(self, current_price: float) -> OrderFlowVerdict:
         """Evaluates live order flow delta over recent window"""
         now_ms = time.time() * 1000
         cutoff_ms = now_ms - (self.window_seconds * 1000)
 
-        recent_ticks = [t for t in self.ticks if t.timestamp_ms >= cutoff_ms]
+        with self._lock:
+            recent_ticks = sorted((t for t in self.ticks if cutoff_ms <= t.timestamp_ms <= now_ms), key=lambda tick: tick.timestamp_ms)
+            cumulative_delta = self.cumulative_delta
         if not recent_ticks:
             return OrderFlowVerdict(
-                current_cvd=round(self.cumulative_delta, 3),
+                current_cvd=round(cumulative_delta, 3),
                 buy_volume_1m=0.0,
                 sell_volume_1m=0.0,
                 buy_ratio_pct=50.0,
@@ -108,7 +139,7 @@ class OrderFlowCVDEngine:
             rationale = f"Cân bằng dòng lệnh ({buy_ratio:.1f}% Mua / {100-buy_ratio:.1f}% Bán). Thị trường đang sideway chờ nhịp bứt phá."
 
         return OrderFlowVerdict(
-            current_cvd=round(self.cumulative_delta, 3),
+            current_cvd=round(cumulative_delta, 3),
             buy_volume_1m=round(buy_vol, 3),
             sell_volume_1m=round(sell_vol, 3),
             buy_ratio_pct=round(buy_ratio, 1),

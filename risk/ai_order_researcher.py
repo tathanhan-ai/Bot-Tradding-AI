@@ -17,6 +17,7 @@ from strategy.smart_money_concepts import SmartMoneyEngine, SMCAnalysisResult
 from strategy.institutional_vwap import InstitutionalVWAPEngine, VWAPBandResult
 from strategy.hummingbot_inventory_skew import HummingbotInventorySkewEngine, InventorySkewStatus
 from strategy.carver_systematic_engine import CarverSystematicEngine, CarverSystematicOutput
+from strategy.quant_skills_brain import QuantSkillsBrain
 from risk.structural_sl_tp import StructuralRiskCalculator, StructuralTradeSetup
 
 
@@ -121,7 +122,7 @@ class AIOrderResearcher:
                 vwap_res = None
 
         delta_momentum = getattr(order_flow_verdict, "delta_momentum", "BALANCED") if order_flow_verdict else "BALANCED"
-        absorption = getattr(order_flow_verdict, "absorption_divergence", "NONE") if order_flow_verdict else "NONE"
+        absorption = delta_momentum if delta_momentum in ("ABSORPTION_BUY", "ABSORPTION_SELL") else "NONE"
 
         radar_score = 0.0
         if isinstance(candle_confluence, dict):
@@ -133,15 +134,15 @@ class AIOrderResearcher:
         dir_score = (consensus_score * 0.40) + (radar_score * 0.25)
         
         # Factor CVD momentum
-        if delta_momentum == "AGGRESSIVE_BUYING":
+        if delta_momentum == "STRONG_BUY_PRESSURE":
             dir_score += 15.0
-        elif delta_momentum == "AGGRESSIVE_SELLING":
+        elif delta_momentum == "STRONG_SELL_PRESSURE":
             dir_score -= 15.0
             
         # Factor Absorption
-        if absorption == "BULLISH_ABSORPTION":
+        if absorption == "ABSORPTION_BUY":
             dir_score += 12.0
-        elif absorption == "BEARISH_ABSORPTION":
+        elif absorption == "ABSORPTION_SELL":
             dir_score -= 12.0
 
         # Factor VWAP discount/premium
@@ -243,7 +244,7 @@ class AIOrderResearcher:
 
         bb_width = indicators.get("bb_width", 0.04)
 
-        if abs(dir_score) >= 60.0 and delta_momentum in ("AGGRESSIVE_BUYING", "AGGRESSIVE_SELLING") and adx >= 28.0:
+        if abs(dir_score) >= 60.0 and delta_momentum in ("STRONG_BUY_PRESSURE", "STRONG_SELL_PRESSURE") and adx >= 28.0:
             opt_type = "MARKET"
             entry_price = current_price
             fee_tier = "TAKER (0.05%)"
@@ -360,7 +361,11 @@ class AIOrderResearcher:
         dual_sell = round(base_dual_sell - skew_offset, 1) if abs(skew_offset) > 0.1 else base_dual_sell
 
         # Also skew entry_price if scaling into the existing position
-        if skew_status and skew_status.current_position_side == opt_side:
+        is_scale_in = (skew_status and (
+            (skew_status.current_position_side == "LONG" and opt_side == "BUY") or
+            (skew_status.current_position_side == "SHORT" and opt_side == "SELL")
+        ))
+        if is_scale_in:
             if opt_side == "BUY" and entry_price > skew_status.reservation_price:
                 entry_price = round(min(entry_price, skew_status.reservation_price), 1)
             elif opt_side == "SELL" and entry_price < skew_status.reservation_price:
@@ -371,9 +376,16 @@ class AIOrderResearcher:
             skew_note = f" | ⚖️ Hummingbot Skew: {skew_status.current_position_side} (r=${skew_status.reservation_price:,.1f}, offset ${skew_status.price_skew_offset:+.1f})"
 
         # 10. Robert Carver Systematic Framework (7 Pillars: Scaling, Capping, Vol Target, Sizing, RDM, Risk Overlay, Buffer)
-        daily_vol_est = getattr(ai_verdict, "garman_klass_vol", 0.0) if ai_verdict else 0.0
-        if daily_vol_est <= 0.002:
-            daily_vol_est = (atr / current_price) if current_price > 0 else 0.015
+        annual_vol_pct = getattr(ai_verdict, "garman_klass_vol", 0.0) if ai_verdict else 0.0
+        if df_structure is not None and len(df_structure) >= 16:
+            annual_vol_pct = QuantSkillsBrain.calculate_garman_klass_volatility(
+                df_structure, timeframe=active_timeframe
+            ).garman_klass_annualized
+        # GK is an annual percentage; Carver consumes a daily fractional return.
+        daily_vol_est = float(annual_vol_pct) / 100.0 / np.sqrt(365.0)
+        if daily_vol_est <= 0:
+            bars_per_day = 86400.0 / QuantSkillsBrain.bar_seconds(df_structure, active_timeframe)
+            daily_vol_est = (atr / current_price) * np.sqrt(bars_per_day) if current_price > 0 else 0.015
 
         curr_contracts = 0.0
         if current_position:
@@ -444,6 +456,8 @@ class AIOrderResearcher:
             win_prob = max(50, win_prob - 10)
 
         carver_dict = {
+            "raw_forecast": carver_out.raw_forecast,
+            "daily_price_vol_pct": carver_out.daily_price_vol_pct,
             "scaled_forecast": round(carver_out.scaled_forecast, 2),
             "capped_forecast": round(carver_out.capped_forecast, 2),
             "daily_cash_vol_target": round(carver_out.daily_cash_vol_target, 2),

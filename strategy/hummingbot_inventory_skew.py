@@ -39,6 +39,7 @@ class HummingbotInventorySkewEngine:
         atr: float,
         total_balance: float = 1000.0
     ) -> InventorySkewStatus:
+        atr = float(atr or 0.0)
         if not current_position or mid_price <= 0:
             return InventorySkewStatus(
                 current_position_side="FLAT",

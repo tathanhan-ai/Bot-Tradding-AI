@@ -3,6 +3,8 @@ Binance Futures Risk Management Engine
 Controls position sizing, leverage limits, liquidation distance, and daily drawdown circuit breakers.
 """
 from dataclasses import dataclass
+import math
+from datetime import datetime, timezone
 from typing import Optional, Tuple
 from config.settings import RiskConfig, DEFAULT_RISK
 from risk.antigravity_risk_officer import AntigravityRiskOfficer, AIRiskVerdict
@@ -32,12 +34,35 @@ class FuturesRiskManager:
         self.current_balance: float = config.initial_balance
         self.circuit_breaker_active: bool = False
         self.ai_cro = AntigravityRiskOfficer(initial_balance=config.initial_balance)
+        self.risk_day = datetime.now(timezone.utc).date().isoformat()
 
     def reset_daily_stats(self, new_balance: float):
         """Call at 00:00 UTC each day"""
         self.daily_start_balance = new_balance
         self.current_balance = new_balance
         self.circuit_breaker_active = False
+        self.ai_cro.daily_start_balance = new_balance
+        self.ai_cro.current_balance = new_balance
+        self.ai_cro.circuit_breaker = False
+        self.ai_cro.last_verdict = None
+        self.risk_day = datetime.now(timezone.utc).date().isoformat()
+
+    def sync_day(self):
+        if datetime.now(timezone.utc).date().isoformat() != self.risk_day:
+            self.reset_daily_stats(self.current_balance)
+
+    def export_state(self):
+        return {"risk_day": self.risk_day, "daily_start_balance": self.daily_start_balance,
+                "circuit_breaker_active": self.circuit_breaker_active, "cro_breaker": self.ai_cro.circuit_breaker}
+
+    def restore_state(self, saved):
+        if saved:
+            self.risk_day = saved["risk_day"]
+            self.daily_start_balance = float(saved["daily_start_balance"])
+            self.ai_cro.daily_start_balance = self.daily_start_balance
+            self.circuit_breaker_active = bool(saved["circuit_breaker_active"])
+            self.ai_cro.circuit_breaker = bool(saved["cro_breaker"])
+        self.sync_day()
 
     def update_balance(self, new_balance: float):
         self.current_balance = new_balance
@@ -76,10 +101,14 @@ class FuturesRiskManager:
         Evaluate and calculate safe position size based on account risk and Stop Loss distance.
         """
         used_leverage = leverage or self.config.default_leverage
-        used_leverage = min(used_leverage, self.config.max_leverage)
+        used_leverage = max(1, min(used_leverage, self.config.max_leverage))
+        if direction not in (-1, 1) or any(not math.isfinite(v) or v <= 0 for v in (entry_price, stop_loss, take_profit, self.current_balance)):
+            return PositionProposal(symbol, direction, entry_price, stop_loss, take_profit, 0, 0, 0, used_leverage, 0, 0, False, "Invalid price, balance or direction")
+        if (take_profit - entry_price) * direction <= 0:
+            return PositionProposal(symbol, direction, entry_price, stop_loss, take_profit, 0, 0, 0, used_leverage, 0, 0, False, "Take profit is on the wrong side")
 
         # 1. Check Circuit Breaker
-        if self.circuit_breaker_active:
+        if self.circuit_breaker_active or self.ai_cro.circuit_breaker or (self.ai_cro.last_verdict and self.ai_cro.last_verdict.circuit_breaker_active):
             return PositionProposal(
                 symbol=symbol, direction=direction, entry_price=entry_price,
                 stop_loss=stop_loss, take_profit=take_profit, units=0.0,
@@ -124,7 +153,8 @@ class FuturesRiskManager:
         # 5. Check Liquidation Safety Buffer
         liq_price = self.calculate_liquidation_price(entry_price, direction, used_leverage)
         # Ensure Stop Loss is triggered BEFORE liquidation price with a safe gap
-        if direction == 1 and stop_loss <= liq_price:
+        buffer = entry_price * 0.005
+        if direction == 1 and stop_loss <= liq_price + buffer:
             return PositionProposal(
                 symbol=symbol, direction=direction, entry_price=entry_price,
                 stop_loss=stop_loss, take_profit=take_profit, units=0.0,
@@ -132,7 +162,7 @@ class FuturesRiskManager:
                 risk_amount=0.0, est_liquidation_price=liq_price, approved=False,
                 rejection_reason=f"Cảnh báo rủi ro: Stop Loss ({stop_loss:.2f}) nằm dưới giá thanh lý ({liq_price:.2f})."
             )
-        elif direction == -1 and stop_loss >= liq_price:
+        elif direction == -1 and stop_loss >= liq_price - buffer:
             return PositionProposal(
                 symbol=symbol, direction=direction, entry_price=entry_price,
                 stop_loss=stop_loss, take_profit=take_profit, units=0.0,

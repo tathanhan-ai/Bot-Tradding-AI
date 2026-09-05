@@ -9,9 +9,14 @@ Supports 7 specialized order types:
 6. TWAP - Time-Weighted Average Price (chia nhỏ khối lượng theo thời gian giảm trượt giá)
 7. SCALE_RATIO - Đặt lệnh theo tỷ lệ bậc thang (DCA thang giá 20% - 30% - 50% tối ưu vị thế)
 """
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple
+from decimal import Decimal
+import copy
+import json
+import math
+import time
+from typing import Any, List, Dict, Optional, Tuple
 
 
 @dataclass
@@ -54,9 +59,27 @@ class FuturesOrder:
     cancel_reason: str = ""
     cancelled_at: str = ""
     age_ticks: int = 0
+    execution_group: str = ""
+    client_order_id: str = ""
+    exchange_order_id: str = ""
+    exchange_status: str = ""
+    group_type: str = ""
+    parent_intent_id: str = ""
+    child_index: int = 1
+    due_at: float = 0.0
+    submitted_at: float = 0.0
+    applied_quantity: float = 0.0
+    applied_quote: float = 0.0
+    exchange_executed_quantity: float = 0.0
+    exchange_cumulative_quote: float = 0.0
+    exchange_avg_price: float = 0.0
+    candidate_payload: dict = field(default_factory=dict)
+    decision_trace: dict = field(default_factory=dict)
 
 
 class OrderQueueManager:
+    OPEN_STATUSES = {"PENDING", "ACTIVE", "SUBMIT_PENDING", "SUBMIT_UNKNOWN", "EXCHANGE_ACK", "CANCEL_REQUESTED"}
+
     def __init__(self):
         self.orders: List[FuturesOrder] = []
         self._next_id = 1
@@ -79,15 +102,47 @@ class OrderQueueManager:
         note: str = "",
         best_bid: float = 0.0,
         best_ask: float = 0.0,
-        timeframe: str = "15m"
+        timeframe: str = "15m",
+        execution_group: str = "",
+        client_order_id: str = "",
+        quantity: Optional[float] = None,
+        candidate_payload: Optional[dict] = None,
+        decision_trace: Optional[dict] = None,
+        group_type: str = "",
+        due_at: Optional[float] = None,
+        twap_interval_seconds: Optional[float] = None,
     ) -> Tuple[Optional[FuturesOrder], str]:
         """
         Validates and places any of the 7 order types.
         Returns (order, message).
         """
+        for name, value in (("price", price), ("margin", margin), ("leverage", leverage), ("stop_loss", stop_loss), ("take_profit", take_profit),
+                            ("trigger_price", trigger_price), ("callback_pct", callback_pct)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                return None, f"Invalid {name}"
+        if side.upper() not in ("BUY", "SELL") or margin <= 0 or leverage < 1 or int(leverage) != leverage:
+            return None, "Invalid side/margin/leverage"
         direction = 1 if side.upper() == "BUY" else -1
         order_type_clean = order_type.upper()
+        if order_type_clean not in ("LIMIT", "POST_ONLY", "MARKET", "CONDITIONAL", "TRAILING_STOP", "TWAP", "TWAP_SLICE", "SCALE_RATIO"):
+            return None, "Unsupported order type"
         target_price = price if price > 0 else (best_ask if direction == 1 else best_bid)
+        if not math.isfinite(target_price) or target_price <= 0:
+            return None, "Invalid execution price"
+        total_units = quantity if quantity is not None else margin * leverage / target_price
+        if isinstance(total_units, bool) or not isinstance(total_units, (int, float)) or not math.isfinite(total_units) or total_units <= 0:
+            return None, "Invalid quantity"
+        existing = next((item for item in self.orders if client_order_id and
+                         (item.client_order_id == client_order_id or item.parent_intent_id == client_order_id)), None)
+        if existing:
+            return existing, "Existing idempotent intent"
+        try:
+            json.dumps({"candidate": candidate_payload or {}, "trace": decision_trace or {}}, allow_nan=False)
+        except (TypeError, ValueError):
+            return None, "Candidate/trace must be finite JSON data"
+        due_at = time.time() if due_at is None else due_at
+        if not isinstance(due_at, (int, float)) or not math.isfinite(due_at) or due_at < 0:
+            return None, "Invalid due_at"
 
         # 1. Validate POST_ONLY (Guaranteed Maker protection)
         if order_type_clean == "POST_ONLY":
@@ -96,78 +151,202 @@ class OrderQueueManager:
             elif direction == -1 and best_bid > 0 and price <= best_bid:
                 return None, f"❌ BỊ TỪ CHỐI BỞI POST-ONLY: Giá bán ${price:,.2f} <= Best Bid ${best_bid:,.2f} (Lệnh sẽ bị khớp Taker 0.05%). Đã bảo vệ phí Maker cho bạn!"
 
-        # 2. Handle SCALE_RATIO (Automatic 3-stage ladder scaling 20% - 30% - 50%)
-        if order_type_clean == "SCALE_RATIO":
-            ratios = [0.20, 0.30, 0.50]
-            step_offsets = [0.0, 0.005, 0.010]  # 0%, 0.5%, 1.0% deeper into support/resistance
-            created_orders = []
-            
-            for lvl, (r, offset) in enumerate(zip(ratios, step_offsets), 1):
-                lvl_price = price * (1.0 - offset) if direction == 1 else price * (1.0 + offset)
-                lvl_margin = margin * r
-                lvl_notional = lvl_margin * leverage
-                lvl_units = round(lvl_notional / lvl_price, 4) if lvl_price > 0 else 0.0
-                
-                order = FuturesOrder(
-                    order_id=self._next_id,
-                    symbol=symbol,
-                    order_type="SCALE_RATIO",
-                    side=side.upper(),
-                    direction=direction,
-                    price=round(lvl_price, 2),
-                    margin=round(lvl_margin, 2),
-                    leverage=leverage,
-                    units=lvl_units,
-                    status="PENDING",
-                    created_at=datetime.now().strftime("%H:%M:%S"),
-                    timeframe=timeframe,
-                    scale_level=lvl,
-                    scale_ratio_pct=round(r * 100, 1),
-                    stop_loss=round(stop_loss, 2),
-                    take_profit=round(take_profit, 2),
-                    note=f"Tầng {lvl}/3 ({round(r*100)}% vốn)"
-                )
-                self._next_id += 1
-                self.orders.append(order)
-                created_orders.append(order)
-                
-            return created_orders[0], f"Đã rải 3 tầng lệnh thang tỷ lệ 20% - 30% - 50% quanh ${price:,.2f} ({timeframe})"
+        is_twap = order_type_clean == "TWAP"
+        is_scale = order_type_clean == "SCALE_RATIO"
+        if is_twap and (not isinstance(twap_slices, int) or not 1 <= twap_slices <= 1000):
+            return None, "Invalid TWAP slice count"
+        count = twap_slices if is_twap else (3 if is_scale else 1)
+        # Legacy callers supplied ~500ms ticks; convert once to seconds, never count incoming ticks.
+        interval = twap_interval_seconds if twap_interval_seconds is not None else twap_interval_ticks * 0.5
+        if is_twap and (not isinstance(interval, (int, float)) or not math.isfinite(interval) or interval <= 0):
+            return None, "Invalid TWAP interval"
+        ratios = [.2, .3, .5] if is_scale else [1 / count] * count
+        units = [float(Decimal(str(total_units)) * Decimal(str(ratio))) for ratio in ratios[:-1]]
+        units.append(total_units - math.fsum(units))
+        while math.fsum(units) > total_units:
+            units[-1] = math.nextafter(units[-1], 0.0)
+        parent_id = client_order_id or f"intent-{self._next_id}"
+        kind = "TWAP" if is_twap else ("SCALE" if is_scale else (group_type.upper() or ("OCO" if execution_group.lower().startswith(("oco", "dual")) else "")))
+        group = execution_group or (parent_id if is_twap or is_scale else "")
+        created = []
+        for index, child_units in enumerate(units, 1):
+            child_price = target_price * (1 - direction * (index - 1) * .005) if is_scale else target_price
+            child_client_id = f"{parent_id}-{index}" if count > 1 else parent_id
+            if len(child_client_id) > 36:
+                return None, "Client order ID exceeds Binance 36-character limit"
+            order = FuturesOrder(
+                order_id=self._next_id + index - 1, symbol=symbol, order_type="TWAP_SLICE" if is_twap else order_type_clean,
+                side=side.upper(), direction=direction, price=child_price,
+                margin=child_units * child_price / leverage, leverage=leverage, units=child_units, status="PENDING",
+                created_at=datetime.now().isoformat(), timeframe=timeframe, trigger_price=trigger_price,
+                trigger_condition=trigger_condition.upper(), callback_pct=callback_pct, peak_price=target_price,
+                twap_total_slices=count if is_twap else 1, twap_interval_ticks=twap_interval_ticks,
+                scale_level=index, scale_ratio_pct=ratios[index - 1] * 100, stop_loss=stop_loss, take_profit=take_profit,
+                note=note or (f"{order_type_clean} child {index}/{count}" if count > 1 else ""),
+                execution_group=group, client_order_id=child_client_id, group_type=kind,
+                parent_intent_id=parent_id, child_index=index, due_at=due_at + (index - 1) * interval if is_twap else due_at,
+                candidate_payload=copy.deepcopy(candidate_payload or {}), decision_trace=copy.deepcopy(decision_trace or {}))
+            created.append(order)
+        self.orders.extend(created)
+        self._next_id += count
+        return created[0], f"Đã đặt {count} intent {order_type_clean}"
 
-        # Standard single order placement
-        notional = margin * leverage
-        units = round(notional / target_price, 4) if target_price > 0 else 0.0
+    def export_state(self) -> dict:
+        result = {"version": 1, "next_id": self._next_id, "orders": [asdict(order) for order in self.orders]}
+        json.dumps(result, allow_nan=False)
+        return result
 
-        order = FuturesOrder(
-            order_id=self._next_id,
-            symbol=symbol,
-            order_type=order_type_clean,
-            side=side.upper(),
-            direction=direction,
-            price=round(target_price, 2),
-            margin=round(margin, 2),
-            leverage=leverage,
-            units=units,
-            status="PENDING",
-            created_at=datetime.now().strftime("%H:%M:%S"),
-            timeframe=timeframe,
-            trigger_price=round(trigger_price, 2),
-            trigger_condition=trigger_condition.upper(),
-            callback_pct=callback_pct,
-            peak_price=target_price,
-            twap_total_slices=max(1, twap_slices) if order_type_clean == "TWAP" else 1,
-            twap_filled_slices=0,
-            twap_interval_ticks=twap_interval_ticks,
-            stop_loss=round(stop_loss, 2),
-            take_profit=round(take_profit, 2),
-            note=note
-        )
-        self._next_id += 1
-        self.orders.append(order)
-        return order, f"Đã đặt lệnh {order_type_clean} #{order.order_id} thành công"
+    def restore_state(self, payload: dict) -> None:
+        """Restore atomically. Interrupted submissions must be queried, never blindly resent."""
+        if not isinstance(payload, dict) or payload.get("version", 1) != 1 or not isinstance(payload.get("orders", []), list):
+            raise ValueError("Invalid execution journal")
+        json.dumps(payload, allow_nan=False)
+        restored = []
+        ids, clients = set(), set()
+        field_names = {item.name for item in fields(FuturesOrder)}
+        for raw in payload.get("orders", []):
+            order = FuturesOrder(**{key: copy.deepcopy(value) for key, value in raw.items() if key in field_names})
+            if not isinstance(order.order_id, int) or order.order_id <= 0 or order.order_id in ids:
+                raise ValueError("Duplicate/invalid local order ID")
+            if order.client_order_id and order.client_order_id in clients:
+                raise ValueError("Duplicate client order ID")
+            for value in (order.units, order.price, order.margin, order.due_at, order.applied_quantity,
+                          order.applied_quote, order.exchange_executed_quantity, order.exchange_cumulative_quote):
+                if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                    raise ValueError("Invalid execution journal quantity/price")
+            if order.side not in ("BUY", "SELL") or order.status not in self.OPEN_STATUSES | {"FILLED", "CANCELED", "REJECTED", "EXPIRED"}:
+                raise ValueError("Invalid execution journal side/status")
+            if order.applied_quantity > order.exchange_executed_quantity:
+                raise ValueError("Applied quantity exceeds confirmed exchange quantity")
+            if order.status == "SUBMIT_PENDING":
+                order.status = "SUBMIT_UNKNOWN"
+            ids.add(order.order_id)
+            if order.client_order_id:
+                clients.add(order.client_order_id)
+            restored.append(order)
+        next_id = payload.get("next_id", 1)
+        if not isinstance(next_id, int) or next_id < 1:
+            raise ValueError("Invalid next order ID")
+        self.orders = restored
+        self._next_id = max(next_id, max(ids, default=0) + 1)
+
+    def due_orders(self, now: Optional[float] = None) -> List[FuturesOrder]:
+        now = time.time() if now is None else now
+        return [order for order in self.orders if order.status in ("PENDING", "ACTIVE") and order.due_at <= now
+                and not order.exchange_order_id and not order.exchange_status]
+
+    def mark_submit_pending(self, order_id: int) -> bool:
+        order = next((item for item in self.orders if item.order_id == order_id), None)
+        if not order or order.status not in ("PENDING", "ACTIVE") or order.exchange_order_id or order.exchange_status:
+            return False
+        order.status = "SUBMIT_PENDING"
+        order.submitted_at = time.time()
+        return True
+
+    def mark_submit_unknown(self, order_id: int, reason: str = "Exchange outcome unknown; reconciliation required") -> bool:
+        order = next((item for item in self.orders if item.order_id == order_id), None)
+        if not order or order.status != "SUBMIT_PENDING":
+            return False
+        order.status = "SUBMIT_UNKNOWN"
+        order.note = reason
+        return True
+
+    def record_exchange_update(self, order_id: int, response: dict) -> bool:
+        """Save monotonic cumulative fill facts; applying them to a position is a separate durable step."""
+        order = next((item for item in self.orders if item.order_id == order_id), None)
+        if not order:
+            return False
+        try:
+            qty = float(response.get("executedQty", 0) or 0)
+            avg = float(response.get("avgPrice", 0) or 0)
+            quote = float(response.get("cumQuote", 0) or 0) or qty * avg
+            if any(not math.isfinite(value) or value < 0 for value in (qty, avg, quote)) or (qty > 0 and quote <= 0):
+                return False
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if qty < order.exchange_executed_quantity:
+            return False
+        status = str(response.get("status", "NEW")).upper()
+        if status not in {"NEW", "PARTIALLY_FILLED", "FILLED", "CANCELED", "EXPIRED", "REJECTED", "PENDING_TRIGGER"}:
+            return False
+        if order.status in ("FILLED", "CANCELED", "EXPIRED", "REJECTED") and status in ("NEW", "PARTIALLY_FILLED", "PENDING_TRIGGER"):
+            return False
+        if (qty > order.exchange_executed_quantity and quote <= order.exchange_cumulative_quote) or quote < order.applied_quote:
+            return False
+        if status == "FILLED" and qty <= 0:
+            return False
+        order.exchange_order_id = str(response.get("orderId") or order.exchange_order_id)
+        order.exchange_status = status
+        order.exchange_executed_quantity = qty
+        order.exchange_cumulative_quote = quote
+        order.exchange_avg_price = quote / qty if qty else 0.0
+        if status in ("FILLED", "CANCELED", "EXPIRED", "REJECTED"):
+            order.status = status
+        elif order.status != "CANCEL_REQUESTED":
+            order.status = "EXCHANGE_ACK"
+        if qty > 0:
+            self._cancel_oco_siblings(order)
+        return True
+
+    def pending_fill(self, order_id: int) -> Tuple[float, float]:
+        order = next((item for item in self.orders if item.order_id == order_id), None)
+        if not order or order.exchange_executed_quantity <= order.applied_quantity:
+            return 0.0, 0.0
+        quantity = order.exchange_executed_quantity - order.applied_quantity
+        return quantity, (order.exchange_cumulative_quote - order.applied_quote) / quantity
+
+    def mark_fill_applied(self, order_id: int) -> bool:
+        order = next((item for item in self.orders if item.order_id == order_id), None)
+        if not order:
+            return False
+        order.applied_quantity = order.exchange_executed_quantity
+        order.applied_quote = order.exchange_cumulative_quote
+        return True
+
+    def _cancel_oco_siblings(self, filled: FuturesOrder) -> List[FuturesOrder]:
+        cancelled = []
+        if filled.execution_group and filled.group_type == "OCO":
+            for sibling in self.orders:
+                if (sibling.order_id != filled.order_id and sibling.execution_group == filled.execution_group
+                        and sibling.group_type == "OCO" and sibling.side != filled.side and sibling.status in self.OPEN_STATUSES):
+                    sibling.status = "CANCEL_REQUESTED"
+                    sibling.cancel_reason = f"OCO sibling #{filled.order_id} filled"
+                    cancelled.append(sibling)
+        return cancelled
+
+    def mark_exchange_ack(self, order_id: int, exchange_order_id: str, client_order_id: str = "") -> bool:
+        """An ACK is an open exchange order, never a local fill."""
+        for order in self.orders:
+            if order.order_id == order_id and order.status in ("PENDING", "ACTIVE", "SUBMIT_PENDING", "SUBMIT_UNKNOWN"):
+                order.status = "EXCHANGE_ACK"
+                order.exchange_order_id = str(exchange_order_id)
+                order.client_order_id = client_order_id or order.client_order_id
+                order.exchange_status = "NEW"
+                return True
+        return False
+
+    def mark_exchange_fill(self, order_id: int) -> List[FuturesOrder]:
+        """Record a confirmed fill and request cancellation of OCO siblings."""
+        filled = next((order for order in self.orders if order.order_id == order_id), None)
+        if not filled or filled.status not in self.OPEN_STATUSES:
+            return []
+        filled.status = "FILLED"
+        filled.exchange_status = "FILLED"
+        return self._cancel_oco_siblings(filled)
+
+    def mark_exchange_cancelled(self, order_id: int, reason: str = "exchange cancellation") -> bool:
+        for order in self.orders:
+            if order.order_id == order_id and order.status in self.OPEN_STATUSES:
+                order.status = "CANCELED"
+                order.exchange_status = "CANCELED"
+                order.cancel_reason = reason
+                order.cancelled_at = datetime.now().strftime("%H:%M:%S")
+                return True
+        return False
 
     def cancel_order(self, order_id: int) -> bool:
         for o in self.orders:
-            if o.order_id == order_id and o.status in ("PENDING", "ACTIVE"):
+            if o.order_id == order_id and o.status in ("PENDING", "ACTIVE") and not o.exchange_order_id and not o.exchange_status:
                 o.status = "CANCELED"
                 return True
         return False
@@ -188,10 +367,17 @@ class OrderQueueManager:
         callback_pct: Optional[float] = None
     ) -> Tuple[bool, str]:
         """Modifies parameters of an active pending order."""
+        for value in (price, units, margin, trigger_price, stop_loss, take_profit, leverage, callback_pct):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0):
+                return False, "Invalid order update"
+        if side is not None and side.upper() not in ("BUY", "SELL"):
+            return False, "Invalid order side"
+        if leverage is not None and (leverage < 1 or int(leverage) != leverage):
+            return False, "Invalid order leverage"
         for o in self.orders:
-            if o.order_id == order_id and o.status in ("PENDING", "ACTIVE"):
+            if o.order_id == order_id and o.status in ("PENDING", "ACTIVE") and not o.exchange_order_id and not o.exchange_status:
                 if price is not None and price > 0:
-                    o.price = round(price, 2)
+                    o.price = price
                 if leverage is not None and leverage > 0:
                     o.leverage = int(leverage)
                 if timeframe:
@@ -214,16 +400,15 @@ class OrderQueueManager:
 
                 # Sync units and margin
                 if units is not None and units > 0:
-                    o.units = round(units, 4)
+                    o.units = units
                     if o.price > 0 and o.leverage > 0:
-                        o.margin = round((o.units * o.price) / o.leverage, 2)
+                        o.margin = (o.units * o.price) / o.leverage
                 elif margin is not None and margin > 0:
-                    o.margin = round(margin, 2)
+                    o.margin = margin
                     if o.price > 0 and o.leverage > 0:
-                        o.units = round((o.margin * o.leverage) / o.price, 4)
+                        o.units = (o.margin * o.leverage) / o.price
                 elif price is not None and price > 0:
-                    if o.margin > 0 and o.leverage > 0:
-                        o.units = round((o.margin * o.leverage) / o.price, 4)
+                    o.margin = (o.units * o.price) / o.leverage
 
                 # Reset age ticks so order isn't immediately aged out
                 o.age_ticks = 0
@@ -234,7 +419,7 @@ class OrderQueueManager:
     def force_execute_order(self, order_id: int, execution_price: float) -> Optional[FuturesOrder]:
         """Manually forces immediate market execution of a pending order"""
         for o in self.orders:
-            if o.order_id == order_id and o.status in ("PENDING", "ACTIVE"):
+            if o.order_id == order_id and o.status in ("PENDING", "ACTIVE") and not o.exchange_order_id and not o.exchange_status:
                 o.status = "FILLED"
                 o.note = f"THỦ CÔNG: VÀO LỆNH NGAY ⚡ (Khớp Market ${execution_price:,.1f})"
                 return o
@@ -271,7 +456,7 @@ class OrderQueueManager:
         }
 
         for o in self.orders:
-            if o.status not in ("PENDING", "ACTIVE"):
+            if o.status not in ("PENDING", "ACTIVE") or o.exchange_order_id or o.exchange_status or o.due_at > time.time():
                 continue
 
             o.age_ticks = getattr(o, "age_ticks", 0) + 1
@@ -340,19 +525,20 @@ class OrderQueueManager:
     def clean_stale_orders(self, current_price: float, max_dist_pct: float = 1.5, max_ticks: int = 50):
         return self.evaluate_and_clean_unsuitable_orders(current_price)
 
-    def match_orders(self, current_price: float, best_bid: float = 0.0, best_ask: float = 0.0) -> List[FuturesOrder]:
+    def match_orders(self, current_price: float, best_bid: float = 0.0, best_ask: float = 0.0, now: Optional[float] = None) -> List[FuturesOrder]:
         """
         Evaluates all pending orders on live sub-second price ticks:
         1. LIMIT & POST_ONLY: Fills when market crosses limit price
         2. CONDITIONAL: Triggers when price crosses trigger threshold, turns into Market fill
         3. TRAILING_STOP: Updates peak/trough; triggers when pullback >= callback_pct
-        4. TWAP: Fires 1 micro-slice every interval until total slices completed
+        4. TWAP: Match pre-created unique child intents only after their wall-clock due_at
         5. SCALE_RATIO: Fills individual ladder steps as price reaches them
         """
         filled_orders = []
+        now = time.time() if now is None else now
 
         for o in self.orders:
-            if o.status not in ("PENDING", "ACTIVE"):
+            if o.status not in ("PENDING", "ACTIVE") or o.exchange_order_id or o.exchange_status or o.due_at > now:
                 continue
 
             # -------------------------------------------------------------
@@ -416,35 +602,15 @@ class OrderQueueManager:
             # -------------------------------------------------------------
             # 4. TWAP (Khớp Từng Phần Theo Thời Gian)
             # -------------------------------------------------------------
-            elif o.order_type == "TWAP":
-                o.twap_tick_counter += 1
-                if o.twap_tick_counter >= o.twap_interval_ticks:
-                    o.twap_tick_counter = 0
-                    o.twap_filled_slices += 1
-                    
-                    # Create micro-slice order execution
-                    slice_margin = round(o.margin / o.twap_total_slices, 2)
-                    slice_units = round(o.units / o.twap_total_slices, 4)
-                    
-                    slice_suborder = FuturesOrder(
-                        order_id=o.order_id,
-                        symbol=o.symbol,
-                        order_type="TWAP_SLICE",
-                        side=o.side,
-                        direction=o.direction,
-                        price=current_price,
-                        margin=slice_margin,
-                        leverage=o.leverage,
-                        units=slice_units,
-                        status="FILLED",
-                        created_at=datetime.now().strftime("%H:%M:%S"),
-                        note=f"TWAP Lát Cắt {o.twap_filled_slices}/{o.twap_total_slices}"
-                    )
-                    filled_orders.append(slice_suborder)
-                    
-                    if o.twap_filled_slices >= o.twap_total_slices:
-                        o.status = "FILLED"
-                        o.note = f"Hoàn tất {o.twap_total_slices}/{o.twap_total_slices} lát cắt TWAP"
+            elif o.order_type in ("TWAP_SLICE", "MARKET"):
+                o.status = "FILLED"
+                o.price = (best_ask if o.side == "BUY" else best_bid) or current_price
+                o.margin = o.units * o.price / o.leverage
+                o.twap_filled_slices = 1
+                filled_orders.append(o)
+
+            if o.status == "FILLED":
+                self._cancel_oco_siblings(o)
 
         return filled_orders
 
@@ -471,9 +637,19 @@ class OrderQueueManager:
                 "note": o.note,
                 "cancel_reason": getattr(o, "cancel_reason", None),
                 "age_ticks": getattr(o, "age_ticks", 0),
-                "timeframe": getattr(o, "timeframe", "15m")
+                "timeframe": getattr(o, "timeframe", "15m"),
+                "execution_group": o.execution_group,
+                "client_order_id": o.client_order_id,
+                "exchange_order_id": o.exchange_order_id,
+                "exchange_status": o.exchange_status,
+                "group_type": o.group_type,
+                "parent_intent_id": o.parent_intent_id,
+                "child_index": o.child_index,
+                "due_at": o.due_at,
+                "applied_quantity": o.applied_quantity,
+                "exchange_executed_quantity": o.exchange_executed_quantity,
             }
-            for o in self.orders if o.status in ("PENDING", "ACTIVE")
+            for o in self.orders if o.status in self.OPEN_STATUSES or o.exchange_executed_quantity > o.applied_quantity
         ]
         recent_canceled = [
             {
@@ -505,4 +681,4 @@ class OrderQueueManager:
 
     @property
     def pending_orders(self) -> List[FuturesOrder]:
-        return [o for o in self.orders if o.status in ("PENDING", "ACTIVE")]
+        return [o for o in self.orders if o.status in self.OPEN_STATUSES or o.exchange_executed_quantity > o.applied_quantity]

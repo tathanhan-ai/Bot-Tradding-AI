@@ -3,10 +3,11 @@ Configuration settings for Binance USD(S)-M Futures Bot
 """
 from dataclasses import dataclass
 from pathlib import Path
+import os
 
 # Paths
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data" / "cache"
+DATA_DIR = Path(os.environ.get("BOT_DATA_CACHE", "D:/Codex/cache/binance-futures-bot" if os.name == "nt" else str(BASE_DIR / "data" / "cache")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 @dataclass

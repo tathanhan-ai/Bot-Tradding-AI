@@ -11,9 +11,10 @@ Guarantees zero data loss on browser refresh (F5) or server reboot.
 import json
 import sqlite3
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 
 class PersistentStorageManager:
@@ -30,10 +31,15 @@ class PersistentStorageManager:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
+    @contextmanager
+    def _get_connection(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(str(self.db_path), timeout=10.0)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_db(self):
         with self._get_connection() as conn:
@@ -104,6 +110,11 @@ class PersistentStorageManager:
                     updated_at TEXT
                 )
             """)
+            trade_columns = {row[1] for row in cursor.execute("PRAGMA table_info(trades)")}
+            for name in ("execution_id", "payload_json"):
+                if name not in trade_columns:
+                    cursor.execute(f"ALTER TABLE trades ADD COLUMN {name} TEXT")
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS trades_execution_id ON trades(execution_id)")
             conn.commit()
 
     # -------------------------------------------------------------
@@ -180,48 +191,75 @@ class PersistentStorageManager:
     # -------------------------------------------------------------
     # Trades Persistence
     # -------------------------------------------------------------
+    @staticmethod
+    def _insert_trade(cursor: sqlite3.Cursor, trade: dict) -> int:
+        now_str = str(trade.get("created_at") or datetime.now().isoformat())
+        execution_id = str(trade["execution_id"]) if trade.get("execution_id") else None
+        exit_time = str(trade.get("closed_at") or trade.get("exit_time", ""))
+        close_timestamp = trade.get("closed_at_ts", trade.get("timestamp"))
+        if close_timestamp is not None:
+            close_timestamp = float(close_timestamp)
+            exit_time = datetime.fromtimestamp(
+                close_timestamp / 1000.0 if close_timestamp > 1e11 else close_timestamp
+            ).isoformat()
+        cursor.execute("""
+            INSERT OR IGNORE INTO trades (
+                trade_id, symbol, timeframe, direction, entry_time,
+                entry_price, breakeven_price, exit_time, exit_price,
+                fee, reason, pnl, return_pct, created_at, execution_id, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            trade.get("id", trade.get("trade_id", 0)), trade.get("symbol", "BTCUSDT"),
+            trade.get("timeframe", "15m"), trade.get("direction", "LONG"),
+            str(trade.get("entry_time", "")), float(trade.get("entry_price", 0.0)),
+            float(trade.get("breakeven_price", 0.0)), exit_time,
+            float(trade.get("exit_price", 0.0)), float(trade.get("fee", 0.0)),
+            str(trade.get("reason", "")), float(trade.get("pnl", 0.0)),
+            float(trade.get("return_pct", 0.0)), now_str, execution_id,
+            json.dumps(trade, ensure_ascii=False, allow_nan=False),
+        ))
+        if cursor.rowcount:
+            return cursor.lastrowid
+        return 0
+
     def save_trade(self, trade: dict) -> int:
-        now_str = datetime.now().isoformat()
         with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO trades (
-                    trade_id, symbol, timeframe, direction, entry_time,
-                    entry_price, breakeven_price, exit_time, exit_price,
-                    fee, reason, pnl, return_pct, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                trade.get("id", 0),
-                trade.get("symbol", "BTCUSDT"),
-                trade.get("timeframe", "15m"),
-                trade.get("direction", "LONG"),
-                str(trade.get("entry_time", "")),
-                float(trade.get("entry_price", 0.0)),
-                float(trade.get("breakeven_price", 0.0)),
-                str(trade.get("exit_time", "")),
-                float(trade.get("exit_price", 0.0)),
-                float(trade.get("fee", 0.0)),
-                str(trade.get("reason", "")),
-                float(trade.get("pnl", 0.0)),
-                float(trade.get("return_pct", 0.0)),
-                now_str
-            ))
-            conn.commit()
-            inserted_id = cursor.lastrowid
+            inserted_id = self._insert_trade(conn.cursor(), trade)
 
         self._sync_to_json_backup()
         return inserted_id
+
+    def save_execution_runtime(self, payload: dict) -> int:
+        """Atomically checkpoint runtime plus new execution trades; return inserted row count."""
+        serialized = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+        inserted = 0
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            for trade in payload.get("trades", []):
+                if trade.get("execution_id"):
+                    inserted += bool(self._insert_trade(cursor, trade))
+            cursor.execute("""
+                INSERT INTO user_settings (key, value, updated_at) VALUES ('execution_runtime', ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+            """, (serialized, datetime.now().isoformat()))
+        self._sync_to_json_backup()
+        return inserted
+
+    def load_execution_runtime(self) -> Optional[dict]:
+        payload = self.get_setting("execution_runtime")
+        return payload if isinstance(payload, dict) else None
 
     def load_trades(self, limit: int = 200) -> List[dict]:
         trades: List[dict] = []
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT * FROM trades ORDER BY id ASC LIMIT ?
+                SELECT * FROM trades ORDER BY id DESC LIMIT ?
             """, (limit,))
             rows = cursor.fetchall()
-            for r in rows:
-                trades.append({
+            for r in reversed(rows):
+                payload = json.loads(r["payload_json"]) if r["payload_json"] else {}
+                trades.append({**payload,
                     "id": r["trade_id"] or r["id"],
                     "symbol": r["symbol"],
                     "timeframe": r["timeframe"] or "15m",
@@ -235,27 +273,28 @@ class PersistentStorageManager:
                     "reason": r["reason"],
                     "pnl": float(r["pnl"]),
                     "return_pct": float(r["return_pct"]),
-                    "created_at": r["created_at"] if "created_at" in r.keys() else ""
+                    "created_at": r["created_at"] if "created_at" in r.keys() else "",
+                    "execution_id": r["execution_id"],
                 })
         return trades
 
     def get_monthly_realized_pnl(self, year_month: str) -> float:
-        """
-        Calculates total realized PnL in USDT for the specified month (e.g. '2026-09').
-        Checks created_at, exit_time (both full ISO and MM-DD format), and entry_time.
-        """
+        """Sum by close month; legacy MM-DD dates require a persisted creation year."""
         try:
-            parts = year_month.split("-")
-            month_str = parts[1] if len(parts) > 1 else "01"
-            m_prefix = f"{month_str}-"
+            datetime.strptime(year_month, "%Y-%m")
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT COALESCE(SUM(pnl), 0.0) FROM trades
-                    WHERE created_at LIKE ?
-                       OR exit_time LIKE ?
-                       OR exit_time LIKE ?
-                """, (f"{year_month}%", f"{year_month}%", f"{m_prefix}%"))
+                    WHERE CASE
+                        WHEN date(substr(exit_time, 1, 10)) IS NOT NULL
+                            THEN substr(exit_time, 1, 7)
+                        WHEN exit_time GLOB '[0-9][0-9]-[0-9][0-9]*'
+                             AND date(substr(created_at, 1, 10)) IS NOT NULL
+                            THEN substr(created_at, 1, 4) || '-' || substr(exit_time, 1, 2)
+                        ELSE substr(created_at, 1, 7)
+                    END = ?
+                """, (year_month,))
                 res = cursor.fetchone()
                 return round(float(res[0]), 2) if res else 0.0
         except Exception as e:
@@ -303,10 +342,10 @@ class PersistentStorageManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT * FROM trade_memory_records ORDER BY id ASC LIMIT ?
+                SELECT * FROM trade_memory_records ORDER BY id DESC LIMIT ?
             """, (limit,))
             rows = cursor.fetchall()
-            for r in rows:
+            for r in reversed(rows):
                 records.append({
                     "trade_id": r["trade_id"],
                     "direction": r["direction"],
@@ -411,6 +450,7 @@ class PersistentStorageManager:
             cursor.execute("DELETE FROM trades")
             cursor.execute("DELETE FROM trade_memory_records")
             cursor.execute("DELETE FROM account_state")
+            cursor.execute("DELETE FROM user_settings WHERE key = 'execution_runtime'")
             conn.commit()
 
         self.save_account_state(
@@ -567,29 +607,7 @@ class PersistentStorageManager:
                             exists = True
 
                 if is_overwrite or not exists:
-                    cursor.execute("""
-                        INSERT INTO trades (
-                            trade_id, symbol, timeframe, direction, entry_time,
-                            entry_price, breakeven_price, exit_time, exit_price,
-                            fee, reason, pnl, return_pct, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        tid,
-                        t.get("symbol", "BTCUSDT"),
-                        t.get("timeframe", "15m"),
-                        t.get("direction", "LONG"),
-                        str(t.get("entry_time", "")),
-                        float(t.get("entry_price", 0.0)),
-                        float(t.get("breakeven_price", 0.0)),
-                        str(t.get("exit_time", "")),
-                        float(t.get("exit_price", 0.0)),
-                        float(t.get("fee", 0.0)),
-                        str(t.get("reason", "")),
-                        float(t.get("pnl", 0.0)),
-                        float(t.get("return_pct", 0.0)),
-                        datetime.now().isoformat()
-                    ))
-                    imported_trades += 1
+                    imported_trades += bool(self._insert_trade(cursor, t))
 
             # 2. Import Trade Memory Records
             memories = data.get("trade_memory_records") or data.get("ai_lessons") or []

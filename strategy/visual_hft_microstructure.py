@@ -8,7 +8,8 @@ Bao gồm 4 giải thuật vi mô tần số cao (HFT) cốt lõi:
 3. Market Resilience (Độ đàn hồi & Tốc độ tái tạo thanh khoản sau cú quét sổ lệnh)
 4. OTT Ratio & Spoofing Detector (Tỷ lệ lệnh đặt/hủy so với khớp lệnh)
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from threading import RLock
 from typing import List, Dict, Tuple, Optional, Any
 import time
 import math
@@ -35,9 +36,11 @@ class VolumeBucket:
 @dataclass
 class VisualHFTMetrics:
     # 1. VPIN
-    vpin: float = 0.35                      # [0.0, 1.0]
-    vpin_percentile: float = 40.0           # Phân vị lịch sử (0-100%)
-    toxicity_regime: str = "CLEAN"          # 'CLEAN' (<0.45), 'MODERATE' (0.45-0.65), 'TOXIC_INFORMED' (>0.65)
+    vpin: float = 0.0                       # Interpret only when vpin_ready=True.
+    vpin_ready: bool = False
+    completed_bucket_count: int = 0
+    vpin_percentile: float = 0.0           # No historical percentile estimated yet.
+    toxicity_regime: str = "WARMUP"
     is_toxic_flow: bool = False             # Cảnh báo khẩn cấp khi VPIN > 0.65
 
     # 2. Weighted LOB Imbalance
@@ -46,22 +49,23 @@ class VisualHFTMetrics:
     lob_imbalance_20: float = 0.0           # 20 tầng có trọng số khoảng cách [-1.0, 1.0]
     bid_depth_usdt: float = 0.0             # Tổng giá trị Bid 20 tầng (USDT)
     ask_depth_usdt: float = 0.0             # Tổng giá trị Ask 20 tầng (USDT)
-    book_pressure: str = "NEUTRAL"          # 'STRONG_BUY_PRESSURE', 'BUY_PRESSURE', 'NEUTRAL', 'SELL_PRESSURE', 'STRONG_SELL_PRESSURE'
+    depth_ready: bool = False
+    book_pressure: str = "WARMUP"
 
     # 3. Market Resilience
-    market_resilience_pct: float = 85.0     # [0, 100]% Tỷ lệ hồi phục thanh khoản sau cú quét
+    market_resilience_pct: float = 0.0      # Baseline is measured from valid L2 only.
     liquidity_drought_warning: bool = False # Cảnh báo khô cạn thanh khoản khi Resilience < 35%
-    avg_sweep_recovery_sec: float = 1.2     # Thời gian trung bình hồi phục độ sâu
+    avg_sweep_recovery_sec: float = 0.0     # No sweep recovery observed yet.
 
     # 4. OTT Ratio & Spoofing
-    ott_ratio: float = 12.0                 # Order-to-Trade Ratio
+    ott_ratio: float = 0.0                  # Order-to-Trade Ratio
     spoofing_detected: bool = False         # Tường thanh khoản ảo bị hủy bất thường
     spoofing_side: str = "NONE"             # 'BID_SPOOF', 'ASK_SPOOF', 'NONE'
 
     # 5. Composite Microstructure Score & Advice
     microstructure_score: float = 0.0       # [-100, +100] Tín hiệu tổng hợp vi mô
-    execution_safety_status: str = "SAFE"   # 'SAFE', 'CAUTION_SLIPPAGE', 'CRITICAL_TOXIC_AVOID'
-    hft_rationale: str = ""
+    execution_safety_status: str = "WARMUP"
+    hft_rationale: str = "Chờ ít nhất 5 volume buckets hoàn tất và L2 20 tầng hợp lệ."
 
 
 class VisualHFTMicrostructureEngine:
@@ -72,6 +76,9 @@ class VisualHFTMicrostructureEngine:
         toxic_vpin_threshold: float = 0.65,
         min_resilience_threshold: float = 35.0
     ):
+        if not math.isfinite(bucket_size_btc) or bucket_size_btc <= 0 or not isinstance(num_buckets, int) or num_buckets < 5:
+            raise ValueError("VPIN requires a positive finite bucket size and at least 5 buckets")
+        self._lock = RLock()
         self.bucket_size = bucket_size_btc
         self.num_buckets = num_buckets
         self.toxic_vpin_threshold = toxic_vpin_threshold
@@ -84,52 +91,66 @@ class VisualHFTMicrostructureEngine:
 
         # LOB Depth baseline history for Market Resilience
         self.depth_history: List[Tuple[float, float]] = []  # (timestamp, total_20_depth)
-        self.baseline_depth_usdt: float = 500_000.0         # Moving baseline depth
+        self.baseline_depth_usdt: float = 0.0               # Measured moving baseline
         self.last_sweep_time: float = 0.0
 
         # OTT Tracking (Updates vs Trades)
         self.book_update_count: int = 0
         self.trade_count: int = 0
         self.last_ott_calc_time: float = time.time()
-        self.current_ott: float = 8.0
+        self.current_ott: float = 0.0
 
         # Cached latest metrics
         self.latest_metrics: VisualHFTMetrics = VisualHFTMetrics()
 
     def update_trade(self, price: float, qty: float, is_buyer_maker: bool, timestamp: Optional[float] = None) -> VisualHFTMetrics:
+        with self._lock:
+            return replace(self._update_trade(price, qty, is_buyer_maker, timestamp))
+
+    def _update_trade(self, price: float, qty: float, is_buyer_maker: bool, timestamp: Optional[float]) -> VisualHFTMetrics:
         """
         Updates VPIN volume buckets from incoming trades.
         is_buyer_maker = True -> Maker was buyer -> Aggressor was SELLER (sell volume).
         is_buyer_maker = False -> Maker was seller -> Aggressor was BUYER (buy volume).
         """
-        now = timestamp or time.time()
+        if (not isinstance(is_buyer_maker, bool) or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0 for v in (price, qty))
+                or not math.isfinite(price * qty) or not math.isfinite(qty / self.bucket_size)):
+            return self.latest_metrics
+        now = time.time() if timestamp is None else timestamp
+        if not isinstance(now, (int, float)) or not math.isfinite(now) or now <= 0:
+            return self.latest_metrics
+        now = now / 1000 if now > 1e11 else now
         self.trade_count += 1
-
-        # If price indicates different asset size, adapt bucket size dynamically
-        if price > 20000 and self.bucket_size < 1.0:
-            self.bucket_size = 10.0  # BTC default 10 BTC
 
         remaining_qty = qty
         is_buy = not is_buyer_maker
 
         while remaining_qty > 0:
+            # A large aggTrade may contain many full one-sided buckets. Keep only the measured window.
+            if self.current_bucket.total_volume == 0 and remaining_qty >= self.bucket_size:
+                full_count, remainder = divmod(remaining_qty, self.bucket_size)
+                full_count = int(full_count)
+                if remainder >= self.bucket_size * (1 - 1e-12):
+                    full_count += 1
+                    remainder = 0.0
+                start_id = self.bucket_counter + max(0, full_count - self.num_buckets)
+                for bucket_id in range(start_id, self.bucket_counter + full_count):
+                    self.completed_buckets.append(VolumeBucket(bucket_id, self.bucket_size if is_buy else 0,
+                        0 if is_buy else self.bucket_size, now, now, True))
+                self.completed_buckets = self.completed_buckets[-self.num_buckets:]
+                self.bucket_counter += full_count
+                self.current_bucket = VolumeBucket(bucket_id=self.bucket_counter, start_time=now)
+                remaining_qty = remainder
+                continue
             current_fill = self.current_bucket.total_volume
             space_left = max(0.0, self.bucket_size - current_fill)
-
-            if remaining_qty <= space_left:
-                if is_buy:
-                    self.current_bucket.buy_volume += remaining_qty
-                else:
-                    self.current_bucket.sell_volume += remaining_qty
-                remaining_qty = 0.0
+            consumed = min(remaining_qty, space_left)
+            if is_buy:
+                self.current_bucket.buy_volume += consumed
             else:
-                # Fill current bucket to exactly bucket_size
-                if is_buy:
-                    self.current_bucket.buy_volume += space_left
-                else:
-                    self.current_bucket.sell_volume += space_left
-                remaining_qty -= space_left
-
+                self.current_bucket.sell_volume += consumed
+            remaining_qty -= consumed
+            if self.current_bucket.total_volume >= self.bucket_size * (1 - 1e-12):
                 # Finalize bucket
                 self.current_bucket.end_time = now
                 self.current_bucket.is_completed = True
@@ -151,15 +172,31 @@ class VisualHFTMicrostructureEngine:
         asks: List[List[float]],
         timestamp: Optional[float] = None
     ) -> VisualHFTMetrics:
+        with self._lock:
+            return replace(self._update_order_book(bids, asks, timestamp))
+
+    def _update_order_book(self, bids, asks, timestamp=None) -> VisualHFTMetrics:
         """
         Updates 20-Level Weighted LOB Imbalance, Market Resilience, and OTT Ratio.
         bids, asks: lists of [price, qty] sorted best to worst.
         """
-        now = timestamp or time.time()
+        now = time.time() if timestamp is None else timestamp
+        try:
+            bids = [(float(p), float(q)) for p, q in bids[:20]]
+            asks = [(float(p), float(q)) for p, q in asks[:20]]
+            valid = (isinstance(now, (int, float)) and math.isfinite(now) and now > 0 and len(bids) == len(asks) == 20
+                and all(math.isfinite(v) and v > 0 for level in bids + asks for v in level)
+                and all(math.isfinite(p * q) for p, q in bids + asks)
+                and math.isfinite(sum(q for _, q in bids + asks)) and math.isfinite(sum(p * q for p, q in bids + asks))
+                and all(bids[i][0] > bids[i + 1][0] and asks[i][0] < asks[i + 1][0] for i in range(19))
+                and bids[0][0] < asks[0][0])
+        except (TypeError, ValueError, OverflowError):
+            valid = False
+        self.latest_metrics.depth_ready = valid
+        if not valid:
+            return self._recompute_metrics()
+        now = now / 1000 if now > 1e11 else now
         self.book_update_count += 1
-
-        if not bids or not asks:
-            return self.latest_metrics
 
         # 1. Tầng 1 (Best Bid/Ask)
         best_bid_qty = bids[0][1] if len(bids) > 0 else 0.0
@@ -199,7 +236,7 @@ class VisualHFTMicrostructureEngine:
         # Keep last 60 seconds
         self.depth_history = [d for d in self.depth_history if (now - d[0]) <= 60.0]
 
-        if len(self.depth_history) >= 10:
+        if self.depth_history:
             recent_depths = [d[1] for d in self.depth_history]
             self.baseline_depth_usdt = sum(recent_depths) / len(recent_depths)
 
@@ -215,8 +252,8 @@ class VisualHFTMicrostructureEngine:
         if (now - self.last_ott_calc_time) >= 3.0:
             elapsed = max(1.0, now - self.last_ott_calc_time)
             updates_sec = self.book_update_count / elapsed
-            trades_sec = max(0.2, self.trade_count / elapsed)
-            self.current_ott = round(updates_sec / trades_sec, 1)
+            trades_sec = self.trade_count / elapsed
+            self.current_ott = round(updates_sec / trades_sec, 1) if trades_sec > 0 else 0.0
             self.book_update_count = 0
             self.trade_count = 0
             self.last_ott_calc_time = now
@@ -251,19 +288,21 @@ class VisualHFTMicrostructureEngine:
         m = self.latest_metrics
 
         # Compute VPIN
-        if len(self.completed_buckets) >= 5:
+        m.completed_bucket_count = len(self.completed_buckets)
+        m.vpin_ready = m.completed_bucket_count >= 5
+        if m.vpin_ready:
             total_abs_imbalance = sum(b.absolute_imbalance for b in self.completed_buckets)
             denom = len(self.completed_buckets) * self.bucket_size
-            raw_vpin = total_abs_imbalance / denom if denom > 0 else 0.35
-            m.vpin = round(min(0.99, max(0.01, raw_vpin)), 3)
+            raw_vpin = total_abs_imbalance / denom
+            m.vpin = round(min(1.0, max(0.0, raw_vpin)), 3)
         else:
-            if self.current_bucket.total_volume > 0:
-                m.vpin = round(min(0.99, max(0.15, self.current_bucket.absolute_imbalance / self.current_bucket.total_volume)), 3)
-            else:
-                m.vpin = 0.35
+            m.vpin = 0.0
 
         # Toxicity Regime
-        if m.vpin >= self.toxic_vpin_threshold:
+        if not m.vpin_ready:
+            m.toxicity_regime = "WARMUP"
+            m.is_toxic_flow = False
+        elif m.vpin >= self.toxic_vpin_threshold:
             m.toxicity_regime = "TOXIC_INFORMED"
             m.is_toxic_flow = True
         elif m.vpin >= 0.45:
@@ -275,7 +314,9 @@ class VisualHFTMicrostructureEngine:
 
         # Book Pressure label
         imb = m.lob_imbalance_20
-        if imb >= 0.40:
+        if not m.depth_ready:
+            m.book_pressure = "WARMUP"
+        elif imb >= 0.40:
             m.book_pressure = "STRONG_BUY_PRESSURE"
         elif imb >= 0.15:
             m.book_pressure = "BUY_PRESSURE"
@@ -293,6 +334,10 @@ class VisualHFTMicrostructureEngine:
             m.execution_safety_status = "CRITICAL_TOXIC_AVOID"
             base_score *= 0.5
             m.hft_rationale = f"⚠️ TOXIC FLOW VPIN={m.vpin:.2f} (> {self.toxic_vpin_threshold}): Cá mập/Insiders đang quét thanh khoản mạnh! Đề xuất hoãn lệnh Taker."
+        elif not m.vpin_ready or not m.depth_ready:
+            m.execution_safety_status = "WARMUP"
+            base_score = 0.0
+            m.hft_rationale = f"Chờ dữ liệu đo: {m.completed_bucket_count}/5 VPIN buckets; L2 20 tầng {'đủ' if m.depth_ready else 'thiếu/không hợp lệ'}."
         elif m.liquidity_drought_warning:
             m.execution_safety_status = "CAUTION_SLIPPAGE"
             m.hft_rationale = f"💧 KHÔ CẠN THANH KHOẢN (Resilience={m.market_resilience_pct:.0f}%): Độ sâu sổ lệnh bị lõm sau cú quét. Cẩn thận trượt giá sàn."
@@ -304,4 +349,5 @@ class VisualHFTMicrostructureEngine:
         return m
 
     def get_metrics(self) -> VisualHFTMetrics:
-        return self.latest_metrics
+        with self._lock:
+            return replace(self.latest_metrics)

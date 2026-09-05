@@ -801,7 +801,7 @@
               <span id="copilot-db-saved-badge" class="px-2 py-0.5 text-[10px] font-bold rounded bg-purple-950/80 text-purple-300 border border-purple-800/80 mono flex items-center gap-1" title="Mô hình được lưu tự động vĩnh viễn vào SQLite database">
                 <span>💾</span> <span id="copilot-db-saved-text">SQLite: Đã lưu</span>
               </span>
-              <span id="copilot-decision-badge" class="px-2.5 py-1 text-xs font-bold rounded bg-emerald-950 text-emerald-400 border border-emerald-700 mono">APPROVE 🛡️</span>
+              <span id="copilot-decision-badge" class="px-2.5 py-1 text-xs font-bold rounded bg-amber-950 text-amber-400 border border-amber-700 mono">ABSTAIN • chờ 9Router</span>
             </div>
           </div>
 
@@ -863,7 +863,7 @@
               <div>
                 <div class="font-bold text-gray-200 text-sm flex items-center gap-1.5">
                   <span>VISUALHFT VI MÔ THỊ TRƯỜNG & HỢP NHẤT QUYẾT ĐỊNH</span>
-                  <span id="hft-safety-badge" class="px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-950 text-emerald-400 border border-emerald-800 mono">SAFE (LÀNH MẠNH) 🟢</span>
+                  <span id="hft-safety-badge" class="px-2 py-0.5 text-[10px] font-bold rounded bg-amber-950 text-amber-400 border border-amber-800 mono">WARMUP</span>
                 </div>
                 <div class="text-[11px] text-gray-400">Trích xuất từ VisualHFT C#/.NET: VPIN, 20-Level LOB Imbalance, Market Resilience & Ma Trận Kiểm Duyệt 6 Cổng</div>
               </div>
@@ -884,10 +884,10 @@
                 <span class="text-gray-400 font-semibold flex items-center gap-1">
                   <span>📊</span> <span>VPIN (Toxic Flow):</span>
                 </span>
-                <span id="hft-vpin-badge" class="px-1.5 py-0.5 text-[10px] font-bold rounded bg-emerald-950 text-emerald-400 border border-emerald-800 mono">CLEAN</span>
+                <span id="hft-vpin-badge" class="px-1.5 py-0.5 text-[10px] font-bold rounded bg-amber-950 text-amber-400 border border-amber-800 mono">WARMUP</span>
               </div>
               <div class="flex items-baseline justify-between">
-                <span id="hft-vpin-val" class="text-xl font-extrabold text-cyan-400 mono">0.35</span>
+                <span id="hft-vpin-val" class="text-xl font-extrabold text-cyan-400 mono">--</span>
                 <span class="text-[10px] text-gray-500 mono">Ngưỡng: &gt;0.65</span>
               </div>
               <div class="w-full bg-gray-800 h-1.5 rounded-full overflow-hidden">
@@ -921,10 +921,10 @@
                 <span class="text-gray-400 font-semibold flex items-center gap-1">
                   <span>🛡️</span> <span>Market Resilience:</span>
                 </span>
-                <span id="hft-resilience-badge" class="px-1.5 py-0.5 text-[10px] font-bold rounded bg-emerald-950 text-emerald-400 border border-emerald-800 mono">ĐÀN HỒI CAO</span>
+                <span id="hft-resilience-badge" class="px-1.5 py-0.5 text-[10px] font-bold rounded bg-gray-800 text-gray-300 mono">WARMUP</span>
               </div>
               <div class="flex items-baseline justify-between">
-                <span id="hft-resilience-val" class="text-xl font-extrabold text-emerald-400 mono">85%</span>
+                <span id="hft-resilience-val" class="text-xl font-extrabold text-emerald-400 mono">--</span>
                 <span class="text-[10px] text-gray-500 mono">Min: 35%</span>
               </div>
               <div class="w-full bg-gray-800 h-1.5 rounded-full overflow-hidden">
@@ -939,10 +939,10 @@
                 <span class="text-gray-400 font-semibold flex items-center gap-1">
                   <span>🦈</span> <span>OTT Ratio & Spoof:</span>
                 </span>
-                <span id="hft-spoof-badge" class="px-1.5 py-0.5 text-[10px] font-bold rounded bg-gray-800 text-gray-300 mono">THẬT</span>
+                <span id="hft-spoof-badge" class="px-1.5 py-0.5 text-[10px] font-bold rounded bg-gray-800 text-gray-300 mono">CHƯA ĐÁNH GIÁ</span>
               </div>
               <div class="flex items-baseline justify-between">
-                <span id="hft-ott-val" class="text-xl font-extrabold text-amber-400 mono">12.0</span>
+                <span id="hft-ott-val" class="text-xl font-extrabold text-amber-400 mono">--</span>
                 <span class="text-[10px] text-gray-500 mono">Orders / Trades</span>
               </div>
               <div class="w-full bg-gray-800 h-1.5 rounded-full overflow-hidden">
@@ -953,61 +953,16 @@
 
           </div>
 
-          <!-- COHESIVE MULTI-GATE DECISION MATRIX (Chuỗi 6 Cổng Phối Hợp Quyết Định) -->
-          <div class="bg-[#121722] p-2.5 rounded-lg border border-gray-800 space-y-2">
-            <div class="flex items-center justify-between">
-              <div class="font-bold text-gray-200 flex items-center gap-1.5 text-xs">
-                <span>⚡</span> <span>MA TRẬN KIỂM DUYỆT 6 CỔNG ĐỒNG THUẬN (COHESIVE EXECUTION PIPELINE):</span>
-              </div>
-              <span id="gates-overall-status" class="px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-950 text-emerald-400 border border-emerald-800 mono">ĐỒNG THUẬN TOÀN BỘ 6/6 CỔNG ✅</span>
-            </div>
+          <div id="pipeline-summary" class="text-xs text-amber-300">Chưa có quyết định được kiểm chứng.</div>
 
-            <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-[11px]">
-              <!-- Gate 1 -->
-              <div class="bg-[#181f30] p-2 rounded border border-gray-800 space-y-1">
-                <div class="text-gray-400 text-[10px]">Cổng 1: Freqtrade</div>
-                <div id="gate-1-status" class="font-bold text-emerald-400 mono">PASS 🛡️</div>
-                <div class="text-[9px] text-gray-500">Bảo vệ vốn & Cooldown</div>
-              </div>
-              <!-- Gate 2 -->
-              <div class="bg-[#181f30] p-2 rounded border border-gray-800 space-y-1">
-                <div class="text-gray-400 text-[10px]">Cổng 2: VisualHFT</div>
-                <div id="gate-2-status" class="font-bold text-cyan-400 mono">PASS 🔬</div>
-                <div class="text-[9px] text-gray-500">VPIN & Resilience</div>
-              </div>
-              <!-- Gate 3 -->
-              <div class="bg-[#181f30] p-2 rounded border border-gray-800 space-y-1">
-                <div class="text-gray-400 text-[10px]">Cổng 3: OctoBot</div>
-                <div id="gate-3-status" class="font-bold text-purple-400 mono">PASS 🐙</div>
-                <div class="text-[9px] text-gray-500">Ma trận xúc tu đồng thuận</div>
-              </div>
-              <!-- Gate 4 -->
-              <div class="bg-[#181f30] p-2 rounded border border-gray-800 space-y-1">
-                <div class="text-gray-400 text-[10px]">Cổng 4: Jesse Kelly</div>
-                <div id="gate-4-status" class="font-bold text-amber-400 mono">PASS 📈</div>
-                <div class="text-[9px] text-gray-500">Kỳ vọng dương & Size</div>
-              </div>
-              <!-- Gate 5 -->
-              <div class="bg-[#181f30] p-2 rounded border border-gray-800 space-y-1">
-                <div class="text-gray-400 text-[10px]">Cổng 5: Rob Carver</div>
-                <div id="gate-5-status" class="font-bold text-blue-400 mono">PASS ⚖️</div>
-                <div class="text-[9px] text-gray-500">Dải trơ & Tiết kiệm phí</div>
-              </div>
-              <!-- Gate 6 -->
-              <div class="bg-[#181f30] p-2 rounded border border-gray-800 space-y-1">
-                <div class="text-gray-400 text-[10px]">Cổng 6: 9Router AI</div>
-                <div id="gate-6-status" class="font-bold text-emerald-400 mono">APPROVE 🤖</div>
-                <div class="text-[9px] text-gray-500">Phán quyết nhận thức sâu</div>
-              </div>
+          <div class="bg-[#121722] p-2.5 rounded-lg border border-cyan-900/70 space-y-2">
+            <div class="flex items-center justify-between text-xs">
+              <span class="font-bold text-cyan-200">🧾 7-STAGE DECISION TRACE</span>
+              <span id="pipeline-snapshot" class="mono text-[10px] text-gray-400">Chưa có candidate</span>
             </div>
-
-            <!-- Cohesive Coordination Rationale -->
-            <div class="pt-1.5 border-t border-gray-800/80 text-[11px] text-gray-300 flex items-start gap-1.5">
-              <span class="text-cyan-400 font-bold">💡 Hợp Nhất:</span>
-              <p id="hft-cohesive-rationale" class="text-gray-300 leading-snug">
-                Tất cả 6 phân hệ đang hoạt động đồng bộ: Jesse Kelly điều chỉnh tỷ trọng vốn, Carver khóa dải trơ chống phí rác, VisualHFT giám sát bẫy VPIN, và AI Copilot nắm giữ quyền phủ quyết tối cao.
-              </p>
-            </div>
+            <div id="pipeline-source-age" class="mono text-[10px] text-gray-400">Depth / CVD / candle: --</div>
+            <div id="pipeline-sizing" class="mono text-[10px] text-amber-300">Raw / final size: --</div>
+            <div id="pipeline-trace" class="space-y-1 text-[10px] text-gray-300"></div>
           </div>
 
         </div>
@@ -1561,7 +1516,7 @@
             <span class="text-xs font-bold text-white tracking-wide" data-i18n="ai_research_title">AI ORDER RESEARCHER:</span>
           </div>
           <span id="ai-recommended-order-badge" class="px-2 py-0.5 text-[10px] font-bold rounded bg-amber-950 text-amber-300 border border-amber-800 mono">
-            POST_ONLY BUY (85%)
+            WAIT — CHƯA CÓ QUYẾT ĐỊNH
           </span>
         </div>
 
@@ -1570,7 +1525,7 @@
             <span class="text-gray-400 text-[11px]" data-i18n="ai_lbl_rec">Lệnh đề xuất:</span>
             <div class="flex items-center gap-1.5">
               <span id="ai-res-horizon" class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800" data-i18n="ai_horizon_tight">SÁT SỔ LỆNH</span>
-              <b id="ai-res-type" class="text-amber-400 font-bold mono">POST_ONLY (BUY)</b>
+              <b id="ai-res-type" class="text-amber-400 font-bold mono">WAIT</b>
             </div>
           </div>
           <div class="flex justify-between items-center">
@@ -1582,7 +1537,7 @@
           </div>
           <div class="flex justify-between items-center">
             <span class="text-gray-400 text-[11px]" data-i18n="ai_lbl_margin_lev">Ký quỹ & Đòn bẩy:</span>
-            <span id="ai-res-margin" class="text-gray-200 mono font-bold">$100 (5x)</span>
+            <span id="ai-res-margin" class="text-gray-200 mono font-bold">--</span>
           </div>
           <div class="flex justify-between items-center text-[10px] mono">
             <span class="text-rose-300">SL: <b id="ai-res-sl">$0</b></span>
@@ -3448,7 +3403,6 @@
       let price = (res && res.dual_buy_price > 0) ? res.dual_buy_price :
                   (brain && brain.suggested_limit_buy > 0) ? brain.suggested_limit_buy :
                   (brain && brain.support_price > 0) ? brain.support_price : 0;
-      if (price <= 0 && lastPrice > 0) price = lastPrice * 0.995;
 
       if (price > 0) {
         const input = document.getElementById('order-price-input');
@@ -3470,7 +3424,6 @@
       let price = (res && res.dual_sell_price > 0) ? res.dual_sell_price :
                   (brain && brain.suggested_limit_sell > 0) ? brain.suggested_limit_sell :
                   (brain && brain.resistance_price > 0) ? brain.resistance_price : 0;
-      if (price <= 0 && lastPrice > 0) price = lastPrice * 1.005;
 
       if (price > 0) {
         const input = document.getElementById('order-price-input');
@@ -3527,13 +3480,11 @@
                        (brain && brain.suggested_limit_sell > 0) ? brain.suggested_limit_sell :
                        (brain && brain.resistance_price > 0) ? brain.resistance_price : 0;
 
-      if (longPrice <= 0 && price > 0) longPrice = price * 0.994;
-      if (shortPrice <= 0 && price > 0) shortPrice = price * 1.006;
 
       const longEl = document.getElementById('chart-long-price-val');
       if (longEl) {
         const distLong = price > 0 ? (((longPrice - price) / price) * 100).toFixed(2) : '0.00';
-        longEl.innerText = `$${longPrice.toLocaleString('en-US', {minimumFractionDigits: 1, maximumFractionDigits: 1})} (${distLong}%)`;
+        longEl.innerText = longPrice > 0 ? `$${longPrice.toLocaleString('en-US', {minimumFractionDigits: 1, maximumFractionDigits: 1})} (${distLong}%)` : 'WAIT';
       }
       const floatLong = document.getElementById('float-long-val');
       if (floatLong) floatLong.innerText = `$${longPrice.toFixed(1)}`;
@@ -3541,7 +3492,7 @@
       const shortEl = document.getElementById('chart-short-price-val');
       if (shortEl) {
         const distShort = price > 0 ? (((shortPrice - price) / price) * 100).toFixed(2) : '0.00';
-        shortEl.innerText = `$${shortPrice.toLocaleString('en-US', {minimumFractionDigits: 1, maximumFractionDigits: 1})} (+${distShort}%)`;
+        shortEl.innerText = shortPrice > 0 ? `$${shortPrice.toLocaleString('en-US', {minimumFractionDigits: 1, maximumFractionDigits: 1})} (+${distShort}%)` : 'WAIT';
       }
       const floatShort = document.getElementById('float-short-val');
       if (floatShort) floatShort.innerText = `$${shortPrice.toFixed(1)}`;
@@ -4309,7 +4260,7 @@
         if (marginEl) marginEl.innerText = `$${res.optimal_margin.toFixed(0)} (${res.optimal_leverage}x)`;
         if (feeEl) feeEl.innerText = `${res.fee_tier} (${t('fee_saved_prefix')} ~$${res.estimated_fee_saved_usdt.toFixed(2)})`;
         if (ratEl) ratEl.innerText = res.research_rationale;
-        if (badgeEl) badgeEl.innerText = `${t('ai_recommend_prefix')} ${res.recommended_type} ${res.recommended_side} (${res.win_probability}% ${t('win_rate_suffix')})`;
+        if (badgeEl) badgeEl.innerText = res.ready === false || !res.structural_sl || !res.structural_tp ? 'WAIT — CHƯA QUA DEFENSE GATES' : `${t('ai_recommend_prefix')} ${res.recommended_type} ${res.recommended_side} • score ${res.win_probability}/100 (chưa hiệu chuẩn OOS)`;
         if (slEl && res.structural_sl) slEl.innerText = `$${res.structural_sl.toLocaleString('en-US', {minimumFractionDigits: 1})}`;
         if (tpEl && res.structural_tp) tpEl.innerText = `$${res.structural_tp.toLocaleString('en-US', {minimumFractionDigits: 1})} (${res.rr_ratio || 1.8}R)`;
 
@@ -4327,7 +4278,7 @@
 
         // Auto-sync if user opted in
         const autoSync = document.getElementById('chk-auto-sync-ai');
-        if (autoSync && autoSync.checked) {
+        if (autoSync && autoSync.checked && res.ready !== false) {
           applyAiOrderResearch(false);
           const statusEl = document.getElementById('order-submit-status');
           if (statusEl) {
@@ -4432,12 +4383,59 @@
         menuDbInfo.innerText = `${tradeCount} lệnh | ${memCount} bài học`;
       }
 
+      if (data.pipeline) {
+        const pipe = data.pipeline;
+        const entries = pipe.last_trace?.entries || [];
+        const summary = document.getElementById('pipeline-summary');
+        const veto = entries.find(e => e.verdict === 'VETO');
+        if (summary) summary.textContent = pipe.execution_blocker || (veto ? `VETO • ${veto.stage}: ${veto.reason}` : (entries.length ? `${entries.length} verdicts recorded • later stages are not assumed PASS` : 'Chưa có candidate; chưa đánh giá gate.'));
+        const candidate = pipe.candidate;
+        const snapshot = document.getElementById('pipeline-snapshot');
+        if (snapshot) snapshot.innerText = pipe.last_trace ? `${pipe.last_trace.order_id} • ${pipe.last_trace.snapshot_id} • quyết định ${Math.max(0, Math.floor(Date.now()/1000 - (entries[0]?.timestamp || Date.now()/1000)))}s trước` : 'Chưa có candidate';
+        const sourceAge = document.getElementById('pipeline-source-age');
+        if (sourceAge) {
+          const ages = pipe.source_age_seconds || {};
+          sourceAge.innerText = `${pipe.data_environment} • L2 ${pipe.l2_levels?.bids || 0}/${pipe.l2_levels?.asks || 0} • depth ${ages.depth ?? '--'}s • CVD ${ages.agg_trade ?? '--'}s • 1m ${ages.kline_1m ?? '--'}s • clock offset ${pipe.clock_offset_ms?.toFixed(0) ?? '--'}ms`;
+        }
+        const sizing = document.getElementById('pipeline-sizing');
+        if (sizing && candidate) {
+          const raw = candidate.metadata?.raw_carver_contracts;
+          sizing.innerText = `Carver raw ${raw ?? '--'} • final ${candidate.quantity ?? 0} BTC • margin $${candidate.margin ?? 0} • ${candidate.leverage ?? 0}x • exchange ${candidate.metadata?.exchange_order_id || '--'}`;
+        }
+        const traceBox = document.getElementById('pipeline-trace');
+        const traceKey = JSON.stringify([pipe.last_trace, pipe.execution_intents]);
+        if (traceBox && traceBox.dataset.traceKey !== traceKey) {
+          traceBox.dataset.traceKey = traceKey;
+          traceBox.replaceChildren();
+          (pipe.last_trace?.entries || []).forEach(entry => {
+            const row = document.createElement('div');
+            const color = entry.verdict === 'VETO' ? 'text-rose-300' : (entry.verdict === 'LLM_UNAVAILABLE' ? 'text-amber-300' : 'text-emerald-300');
+            row.className = `flex gap-2 ${color}`;
+            row.textContent = `${entry.verdict} • ${entry.stage}: ${entry.reason}`;
+            traceBox.appendChild(row);
+            if (entry.details && Object.keys(entry.details).length) {
+              const details = document.createElement('details');
+              const label = document.createElement('summary');
+              label.textContent = 'Evidence / votes / sizing';
+              const content = document.createElement('pre');
+              content.className = 'whitespace-pre-wrap break-all text-gray-400';
+              content.textContent = JSON.stringify(entry.details, null, 2);
+              details.append(label, content);
+              traceBox.appendChild(details);
+            }
+          });
+          const exchange = document.createElement('div');
+          exchange.textContent = (pipe.execution_intents || []).slice(-8).map(o => `${o.client_order_id}: ${o.status} • exchange ${o.exchange_order_id || '--'} • filled ${o.applied_quantity || 0}`).join(' | ');
+          traceBox.appendChild(exchange);
+        }
+      }
+
       // AI Model Copilot (9Router Port 8039) Rendering
       // Update VisualHFT & Cohesive Multi-Gate System
       if (data.visual_hft) {
         const v = data.visual_hft;
         const vpinEl = document.getElementById('hft-vpin-val');
-        if (vpinEl) vpinEl.innerText = v.vpin.toFixed(2);
+        if (vpinEl) vpinEl.innerText = v.vpin_ready ? v.vpin.toFixed(2) : `WARMUP (${v.completed_bucket_count || 0}/5)`;
         const vpinBar = document.getElementById('hft-vpin-bar');
         if (vpinBar) {
           vpinBar.style.width = Math.min(100, Math.max(5, v.vpin * 100)) + '%';
@@ -4481,7 +4479,7 @@
         if (ottVal) ottVal.innerText = v.ott_ratio.toFixed(1);
         const spoofBadge = document.getElementById('hft-spoof-badge');
         if (spoofBadge) {
-          spoofBadge.innerText = v.spoofing_detected ? `SPOOF (${v.spoofing_side})` : 'THẬT';
+          spoofBadge.innerText = v.spoofing_detected ? `NGHI SPOOF (${v.spoofing_side})` : 'CHƯA PHÁT HIỆN';
           spoofBadge.className = v.spoofing_detected ? 'px-1.5 py-0.5 text-[10px] font-bold rounded bg-rose-950 text-rose-400 border border-rose-800 mono animate-pulse' : 'px-1.5 py-0.5 text-[10px] font-bold rounded bg-gray-800 text-gray-300 mono';
         }
 
@@ -4489,7 +4487,7 @@
         if (scoreVal) scoreVal.innerText = (v.microstructure_score > 0 ? '+' : '') + v.microstructure_score.toFixed(1);
         const safetyBadge = document.getElementById('hft-safety-badge');
         if (safetyBadge) {
-          safetyBadge.innerText = v.execution_safety_status === 'CRITICAL_TOXIC_AVOID' ? 'CRITICAL TOXIC 🔴' : (v.execution_safety_status === 'CAUTION_SLIPPAGE' ? 'CẨN TRỌNG TRƯỢT GIÁ 🟡' : 'SAFE (LÀNH MẠNH) 🟢');
+          safetyBadge.innerText = !v.vpin_ready || !v.depth_ready ? 'WARMUP — CHƯA ĐỦ DỮ LIỆU' : (v.execution_safety_status === 'CRITICAL_TOXIC_AVOID' ? 'CRITICAL TOXIC 🔴' : (v.execution_safety_status === 'CAUTION_SLIPPAGE' ? 'CẨN TRỌNG TRƯỢT GIÁ 🟡' : 'SAFE (LÀNH MẠNH) 🟢'));
           safetyBadge.className = v.execution_safety_status === 'CRITICAL_TOXIC_AVOID' ? 'px-2 py-0.5 text-[10px] font-bold rounded bg-rose-950 text-rose-400 border border-rose-800 mono animate-pulse' : (v.execution_safety_status === 'CAUTION_SLIPPAGE' ? 'px-2 py-0.5 text-[10px] font-bold rounded bg-amber-950 text-amber-400 border border-amber-800 mono' : 'px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-950 text-emerald-400 border border-emerald-800 mono');
         }
 
@@ -4591,8 +4589,13 @@
           const lc = vt.latest_council;
           const statusBadge = document.getElementById('vibe-council-status');
           if (statusBadge) {
-            statusBadge.innerText = lc.approved ? `ĐỒNG THUẬN (${lc.approved_votes}/${lc.total_votes}) ✅` : `BÁC BỎ (${lc.approved_votes}/${lc.total_votes}) 🛑`;
-            statusBadge.className = lc.approved ? 'px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-950 text-emerald-400 border border-emerald-800 mono' : 'px-2 py-0.5 text-[10px] font-bold rounded bg-rose-950 text-rose-400 border border-rose-800 mono animate-pulse';
+            if (!lc.available || lc.council_verdict === 'LLM_UNAVAILABLE') {
+              statusBadge.innerText = 'LLM_UNAVAILABLE • deterministic core';
+              statusBadge.className = 'px-2 py-0.5 text-[10px] font-bold rounded bg-amber-950 text-amber-400 border border-amber-800 mono';
+            } else {
+              statusBadge.innerText = lc.approved ? `ĐỒNG THUẬN (${lc.approved_votes}/${lc.total_votes}) ✅` : `BÁC BỎ (${lc.approved_votes}/${lc.total_votes}) 🛑`;
+              statusBadge.className = lc.approved ? 'px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-950 text-emerald-400 border border-emerald-800 mono' : 'px-2 py-0.5 text-[10px] font-bold rounded bg-rose-950 text-rose-400 border border-rose-800 mono animate-pulse';
+            }
           }
 
           if (lc.votes && Array.isArray(lc.votes)) {
@@ -4646,7 +4649,7 @@
           const gradeEl = document.getElementById('vibe-shadow-grade');
           if (gradeEl) gradeEl.innerText = `GRADE ${sa.discipline_grade}`;
           const scoreEl = document.getElementById('vibe-shadow-score');
-          if (scoreEl) scoreEl.innerText = `${sa.discipline_score}%`;
+          if (scoreEl) scoreEl.innerText = sa.analysis_available ? `${sa.discipline_score}%` : 'UNAVAILABLE';
           const premEl = document.getElementById('vibe-shadow-premature');
           if (premEl) premEl.innerText = sa.premature_exits_count;
           const lossEl = document.getElementById('vibe-shadow-loss');
@@ -4654,9 +4657,9 @@
           const revEl = document.getElementById('vibe-shadow-revenge');
           if (revEl) revEl.innerText = sa.revenge_trades_count;
           const missedEl = document.getElementById('vibe-shadow-missed');
-          if (missedEl) missedEl.innerText = `+$${sa.missed_alpha_usdt.toFixed(2)}`;
+          if (missedEl) missedEl.innerText = sa.counterfactual_available ? `$${sa.missed_alpha_usdt.toFixed(2)}` : 'UNMEASURED';
           const diagEl = document.getElementById('vibe-shadow-diag');
-          if (diagEl) diagEl.innerText = sa.behavioral_diagnostics;
+          if (diagEl) diagEl.innerText = sa.behavioral_diagnostics + (sa.counterfactual_available ? '' : ' ' + sa.counterfactual_reason);
         }
       }
 

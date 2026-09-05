@@ -122,7 +122,22 @@ class QuantSkillsBrain:
         )
 
     @staticmethod
-    def calculate_garman_klass_volatility(df: pd.DataFrame, window: int = 14) -> HighEfficiencyVolatilityResult:
+    def bar_seconds(df: Optional[pd.DataFrame] = None, timeframe: Optional[str] = None) -> float:
+        if timeframe is not None:
+            units = {"m": 60, "h": 3600, "d": 86400, "w": 604800, "M": 2592000}
+            seconds = float(timeframe[:-1]) * units[timeframe[-1]]
+        elif df is not None and isinstance(df.index, pd.DatetimeIndex) and len(df) > 1:
+            seconds = float(df.index.to_series().diff().dt.total_seconds().dropna().median())
+        else:
+            seconds = 900.0  # Preserve the original 15m default for unindexed callers.
+        if not np.isfinite(seconds) or seconds <= 0:
+            raise ValueError("candle duration must be positive")
+        return seconds
+
+    @staticmethod
+    def calculate_garman_klass_volatility(
+        df: pd.DataFrame, window: int = 14, timeframe: Optional[str] = None
+    ) -> HighEfficiencyVolatilityResult:
         """
         Đo lường độ biến động Garman-Klass (OHLC) và Parkinson (High-Low).
         Đạt hiệu quả thống kê gấp 8 lần so với phương sai close-to-close thông thường.
@@ -143,7 +158,7 @@ class QuantSkillsBrain:
         c = df['close'].astype(float)
 
         log_hl = np.log(np.maximum(h / np.maximum(l, 1e-8), 1.0))
-        log_co = np.log(np.maximum(c / np.maximum(o, 1e-8), 1.0))
+        log_co = np.log(np.maximum(c, 1e-8) / np.maximum(o, 1e-8))
         gk_series = 0.5 * (log_hl ** 2) - (2 * np.log(2) - 1) * (log_co ** 2)
         gk_bar = float(np.sqrt(np.maximum(0.0, gk_series.iloc[-window:].mean())))
 
@@ -152,7 +167,7 @@ class QuantSkillsBrain:
         returns = np.log(c / c.shift(1)).dropna()
         c2c_bar = float(returns.iloc[-window:].std(ddof=1)) if len(returns) >= window else gk_bar
 
-        annual_factor = np.sqrt(365 * 24 * 4)
+        annual_factor = np.sqrt(365 * 86400 / QuantSkillsBrain.bar_seconds(df, timeframe))
         gk_annualized = round(gk_bar * annual_factor * 100.0, 1)
 
         baseline_gk = float(np.sqrt(np.maximum(0.0, gk_series.iloc[-min(len(df), 50):].mean())))

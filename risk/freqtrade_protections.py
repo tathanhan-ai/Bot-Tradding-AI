@@ -166,6 +166,16 @@ class FreqtradeProtectionEngine:
         self.cooldown_guard = CooldownPeriod(default_cooldown_seconds=30.0)
         self.max_drawdown_guard.peak_balance = initial_balance
 
+    def export_state(self):
+        return {name: dict(vars(getattr(self, name))) for name in ("stoploss_guard", "max_drawdown_guard", "cooldown_guard")}
+
+    def restore_state(self, saved):
+        for name in ("stoploss_guard", "max_drawdown_guard", "cooldown_guard"):
+            guard = getattr(self, name)
+            for key in vars(guard):
+                if key in saved.get(name, {}):
+                    setattr(guard, key, saved[name][key])
+
     def on_trade_closed(self, trade: dict):
         pnl = trade.get("pnl", 0.0)
         reason = trade.get("reason", "")

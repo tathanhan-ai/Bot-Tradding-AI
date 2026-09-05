@@ -67,7 +67,7 @@ class MonthlyTargetGovernor:
 
         now = datetime.now()
         self.current_month_str = now.strftime("%Y-%m")
-        self.month_start_balance = 5000.0
+        self.month_start_balance = 0.0
         self.carried_deficit_pct = 0.0
 
         # Load persisted governor state if available
@@ -95,13 +95,18 @@ class MonthlyTargetGovernor:
 
             now_month = datetime.now().strftime("%Y-%m")
 
-            if val_month == now_month and val_start_bal is not None:
-                self.current_month_str = now_month
+            if val_month and val_start_bal is not None and float(val_start_bal) > 0:
+                self.current_month_str = val_month
                 self.month_start_balance = float(val_start_bal)
                 self.carried_deficit_pct = float(val_deficit) if val_deficit else 0.0
+                if val_month != now_month:
+                    self._handle_month_rollover(now_month, self.month_start_balance)
             else:
-                # Month rolled over or first initialization
-                self._handle_month_rollover(now_month, float(val_start_bal) if val_start_bal else 5000.0)
+                # First use has no prior target or deficit to carry forward.
+                balance = self._stored_balance(0.0)
+                if balance > 0:
+                    self.month_start_balance = max(1.0, balance - self._realized_pnl(now_month))
+                    self._save_state()
 
         except Exception as e:
             print(f"[MonthlyTargetGovernor] Error loading state: {e}", flush=True)
@@ -127,65 +132,55 @@ class MonthlyTargetGovernor:
 
     @staticmethod
     def _is_trade_in_month(t: dict, ym_str: str) -> bool:
-        """
-        Checks if trade occurred in 'YYYY-MM', e.g. '2026-09'.
-        Matches against created_at, exit_time (YYYY-MM or MM-DD), entry_time, or timestamp.
-        """
-        try:
-            parts = ym_str.split("-")
-            month_str = parts[1] if len(parts) > 1 else "01"
-            month_prefix = f"{month_str}-"
-
-            # 1. Check created_at (e.g. '2026-09-04T...')
-            c_at = str(t.get("created_at") or "")
-            if c_at.startswith(ym_str):
-                return True
-
-            # 2. Check exit_time (e.g. '2026-09-04...' or '09-04...')
-            e_time = str(t.get("exit_time") or "")
-            if e_time.startswith(ym_str) or e_time.startswith(month_prefix):
-                return True
-
-            # 3. Check entry_time
-            entry_time = str(t.get("entry_time") or "")
-            if entry_time.startswith(ym_str) or entry_time.startswith(month_prefix):
-                return True
-
-            # 4. Check timestamp if present
-            ts = t.get("timestamp") or t.get("closed_at") or t.get("time")
-            if ts:
+        """Assign realized PnL only to the close month, never the entry month."""
+        for key in ("closed_at_ts", "timestamp", "closed_at", "exit_time", "created_at"):
+            value = t.get(key)
+            if value is None or value == "":
+                continue
+            try:
+                ts = float(value)
+                dt = datetime.fromtimestamp(ts / 1000.0 if ts > 1e11 else ts)
+            except (TypeError, ValueError, OverflowError, OSError):
+                value = str(value)
+                if key == "exit_time" and len(value) >= 5 and value[2] == "-":
+                    created = str(t.get("created_at") or "")
+                    if len(created) < 10 or created[4] != "-":
+                        continue
+                    value = created[:4] + "-" + value
                 try:
-                    dt = datetime.fromtimestamp(float(ts))
-                    if dt.strftime("%Y-%m") == ym_str:
-                        return True
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+            return dt.strftime("%Y-%m") == ym_str
         return False
 
-    def _handle_month_rollover(self, new_month_str: str, prior_start_balance: float):
+    def _realized_pnl(self, year_month: str, trades: Optional[List[dict]] = None) -> float:
+        if self.storage and hasattr(self.storage, "get_monthly_realized_pnl"):
+            return float(self.storage.get_monthly_realized_pnl(year_month))
+        if trades is None and self.storage:
+            trades = self.storage.load_trades(limit=1000)
+        return sum(float(t.get("pnl", 0.0)) for t in (trades or []) if self._is_trade_in_month(t, year_month))
+
+    def _stored_balance(self, default: float) -> float:
+        if not self.storage:
+            return default
+        if hasattr(self.storage, "load_execution_runtime"):
+            runtime = self.storage.load_execution_runtime()
+            if runtime and "balance" in runtime:
+                return float(runtime["balance"])
+        return float((self.storage.load_account_state() or {}).get("current_balance", default))
+
+    def _handle_month_rollover(self, new_month_str: str, prior_start_balance: float,
+                               current_balance: Optional[float] = None, trades: Optional[List[dict]] = None):
         """
         Calculates whether previous month achieved target. If not, calculates deficit to carry over.
         """
-        now = datetime.now()
-        # Calculate last month's PnL from trades if storage exists
-        last_month_pnl_pct = 0.0
-        if self.storage and prior_start_balance > 0:
-            if hasattr(self.storage, "get_monthly_realized_pnl"):
-                last_month_pnl_usdt = self.storage.get_monthly_realized_pnl(self.current_month_str)
-            else:
-                trades = self.storage.load_trades(limit=1000)
-                last_month_trades = [
-                    t for t in trades 
-                    if self._is_trade_in_month(t, self.current_month_str)
-                ]
-                last_month_pnl_usdt = sum(float(t.get("pnl", 0.0)) for t in last_month_trades)
-            last_month_pnl_pct = (last_month_pnl_usdt / prior_start_balance) * 100.0
+        last_month_pnl_usdt = self._realized_pnl(self.current_month_str, trades)
+        last_month_pnl_pct = last_month_pnl_usdt / prior_start_balance * 100.0 if prior_start_balance > 0 else 0.0
 
         effective_prior_target = self.base_target_pct + self.carried_deficit_pct
 
-        if self.auto_compensate_deficit and (last_month_pnl_pct < effective_prior_target):
+        if self.auto_compensate_deficit and prior_start_balance > 0 and (last_month_pnl_pct < effective_prior_target):
             # Unachieved deficit: carries over to new month
             deficit = max(0.0, effective_prior_target - last_month_pnl_pct)
             # Amortize deficit safely (cap added deficit at 15% to prevent runaway targets)
@@ -196,8 +191,9 @@ class MonthlyTargetGovernor:
 
         self.current_month_str = new_month_str
         # New month baseline balance
-        current_bal = self.storage.load_account_state().get("current_balance", 5000.0) if self.storage else 5000.0
-        self.month_start_balance = current_bal
+        if current_balance is None:
+            current_balance = self._stored_balance(prior_start_balance + last_month_pnl_usdt)
+        self.month_start_balance = max(1.0, current_balance - self._realized_pnl(new_month_str, trades))
         self._save_state()
 
     def evaluate(self, current_balance: float, trades: Optional[List[dict]] = None) -> MonthlyGovernorStatus:
@@ -209,10 +205,11 @@ class MonthlyTargetGovernor:
 
         # Check if calendar month rolled over
         if now_month_str != self.current_month_str:
-            self._handle_month_rollover(now_month_str, self.month_start_balance)
+            self._handle_month_rollover(now_month_str, self.month_start_balance, current_balance, trades)
 
+        month_realized_pnl = self._realized_pnl(now_month_str, trades)
         if self.month_start_balance <= 0:
-            self.month_start_balance = max(100.0, current_balance)
+            self.month_start_balance = max(1.0, current_balance - month_realized_pnl)
             self._save_state()
 
         # Days calculations
@@ -220,18 +217,6 @@ class MonthlyTargetGovernor:
         days_in_month = calendar.monthrange(year, month)[1]
         day_of_month = now.day
         time_progress_pct = round((day_of_month / days_in_month) * 100.0, 1)
-
-        # Calculate realized PnL in current month
-        month_realized_pnl = 0.0
-        if self.storage and hasattr(self.storage, "get_monthly_realized_pnl"):
-            month_realized_pnl = self.storage.get_monthly_realized_pnl(self.current_month_str)
-        elif trades:
-            for t in trades:
-                if self._is_trade_in_month(t, self.current_month_str):
-                    month_realized_pnl += float(t.get("pnl", 0.0))
-        else:
-            # Approximation if trades list not supplied
-            month_realized_pnl = max(0.0, current_balance - self.month_start_balance)
 
         month_realized_pnl = round(month_realized_pnl, 2)
         current_pnl_pct = round((month_realized_pnl / self.month_start_balance) * 100.0, 2)

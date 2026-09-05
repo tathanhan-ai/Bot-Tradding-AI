@@ -36,6 +36,7 @@ class AIPositionCoordinator:
         fee_engine: Any,
         df_macro: Optional[Any] = None
     ) -> AIPositionDecision:
+        """Return an intent only; execution owns acknowledged position flags."""
         decision = self._evaluate_position_logic(pos, current_price, indicators, ai_verdict, fee_engine, df_macro)
 
         # Enforce strict Freqtrade Monotonic Ratchet invariant: Stoploss can NEVER regress backwards
@@ -123,39 +124,40 @@ class AIPositionCoordinator:
                     # SL must always be strictly below current price with at least 0.3 ATR breathing room
                     new_sl = round(min(breakeven, current_price - (0.3 * atr)), 2)
                     if new_sl > current_sl and new_sl < current_price:
-                        pos["is_risk_free"] = True
                         return AIPositionDecision(
                             action="LOCK_BREAKEVEN",
                             new_stop_loss=new_sl,
                             reason="DỜI SL VỀ ENTRY 🛡️ (Khóa Hòa Vốn Sau Phí - Lệnh Trở Thành Risk-Free)",
-                            status_display="🛡️ ĐÃ KHÓA HÒA VỐN (RISK-FREE TRADE)"
+                            status_display="⏳ Đề xuất khóa hòa vốn — chờ xác nhận"
                         )
                 elif direction == -1 and current_sl > breakeven:
                     new_sl = round(max(breakeven, current_price + (0.3 * atr)), 2)
                     if new_sl < current_sl and new_sl > current_price:
-                        pos["is_risk_free"] = True
                         return AIPositionDecision(
                             action="LOCK_BREAKEVEN",
                             new_stop_loss=new_sl,
                             reason="DỜI SL VỀ ENTRY 🛡️ (Khóa Hòa Vốn Sau Phí - Lệnh Trở Thành Risk-Free)",
-                            status_display="🛡️ ĐÃ KHÓA HÒA VỐN (RISK-FREE TRADE)"
+                            status_display="⏳ Đề xuất khóa hòa vốn — chờ xác nhận"
                         )
 
         # =========================================================================
         # 1.5 MILESTONE 1.5: CHỐT LỜI TỪNG PHẦN 50/50 (PARTIAL TAKE PROFIT) TẠI TP1
         # =========================================================================
-        if not pos.get("partial_tp_done", False):
+        staged = pos.get("staged_take_profits") or {}
+        staged_budget = any(staged.get(stage, 0) > 0 and staged.get(f"{stage}_ratio", 0) > 0
+                            for stage in ("tp1", "tp2"))
+        # The execution lifecycle owns OctoBot's fixed stage quantities. A second
+        # independent 50% exit would consume that inventory twice.
+        if not staged_budget and not pos.get("partial_tp_done", False):
             dist_to_tp = abs(current_tp - entry)
             progress_pct = (abs(current_price - entry) / max(dist_to_tp, 1.0)) if dist_to_tp > 0 else 0.0
-            if r_multiple >= 1.2 or progress_pct >= 0.60:
-                pos["partial_tp_done"] = True
-                pos["is_risk_free"] = True
+            if gain_usdt > 0 and (r_multiple >= 1.2 or progress_pct >= 0.60):
                 safe_sl = max(current_sl, breakeven) if direction == 1 else min(current_sl, breakeven)
                 return AIPositionDecision(
                     action="PARTIAL_TAKE_PROFIT",
                     new_stop_loss=safe_sl,
                     reason=f"CHỐT LỜI 50% TẠI TP1 💰 (${current_price:,.2f} | +{r_multiple:.2f}R)",
-                    status_display="💰 ĐÃ CHỐT 50% | 50% CÒN LẠI GỒNG RISK-FREE"
+                    status_display="⏳ Đề xuất chốt 50% — chờ xác nhận"
                 )
 
         # =========================================================================
@@ -163,7 +165,7 @@ class AIPositionCoordinator:
         # =========================================================================
         # When price reaches >= 85% of initial TP, check if momentum supports riding big trend
         dist_total = abs(current_tp - entry)
-        curr_progress = (current_price - entry) / dist_total if dist_total > 0 else 0.0
+        curr_progress = (current_price - entry) * direction / dist_total if dist_total > 0 else 0.0
 
         if not tp_expanded and curr_progress >= 0.85:
             # Check momentum: Not extremely exhausted yet (RSI between 55-72 for Long, 28-45 for Short)
@@ -183,7 +185,6 @@ class AIPositionCoordinator:
                     new_tp = round(min(current_tp - (2.5 * atr), macro_target * 1.002), 2) if macro_target > 0 else round(current_tp - (2.5 * atr), 2)
                     locked_sl = round(entry - (0.7 * initial_risk), 2)
 
-                pos["tp_expanded"] = True
                 return AIPositionDecision(
                     action="EXPAND_TAKE_PROFIT",
                     new_stop_loss=locked_sl,

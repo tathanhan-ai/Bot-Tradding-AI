@@ -35,6 +35,7 @@ class AntigravityRiskOfficer:
         self.consecutive_losses = 0
         self.consecutive_wins = 0
         self.circuit_breaker = False
+        self.current_drawdown_pct = 0.0
         self.user_risk_pct: Optional[float] = None
         self.last_verdict: Optional[AIRiskVerdict] = None
 
@@ -62,9 +63,10 @@ class AntigravityRiskOfficer:
 
         # 1. Daily Drawdown calculation
         daily_loss_pct = ((self.daily_start_balance - self.current_balance) / self.daily_start_balance) * 100.0
+        self.current_drawdown_pct = max(0.0, daily_loss_pct / 100.0)
         if daily_loss_pct >= 4.0:
             self.circuit_breaker = True
-            return AIRiskVerdict(
+            self.last_verdict = AIRiskVerdict(
                 risk_per_trade_pct=0.0,
                 max_margin_utilization_pct=0.0,
                 max_risk_amount_usdt=0.0,
@@ -76,6 +78,7 @@ class AntigravityRiskOfficer:
                 defense_status="CIRCUIT_BREAKER_LOCKED",
                 updated_at=now_str
             )
+            return self.last_verdict
 
         # 2. Base Risk Calculation based on Volatility (ATR) & Regime
         base_risk = (self.user_risk_pct / 100.0) if self.user_risk_pct else 0.015  # Default 1.5%

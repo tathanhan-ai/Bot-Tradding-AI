@@ -31,6 +31,7 @@ class TradeContextProfile:
     outcome: str                # "WIN" or "LOSS"
     failure_reason: str = ""    # e.g., "Bought at resistance into Bearish Absorption"
     timestamp: float = field(default_factory=time.time)
+    absorption_signal: str = "NONE"
 
 
 @dataclass
@@ -138,14 +139,15 @@ class EpisodicTradeMemoryBank:
             vwap_status=vwap_data.get("vwap_status", "EQUILIBRIUM_FAIR") if vwap_data else "EQUILIBRIUM_FAIR",
             net_pnl=net_pnl,
             outcome=outcome,
-            failure_reason=failure_reason
+            failure_reason=failure_reason,
+            absorption_signal=absorption,
         )
 
         self.memory_records.append(profile)
         if len(self.memory_records) > self.max_records:
             self.memory_records.pop(0)
 
-        print(f"🧠 [TRADE MEMORY GHI NHỚ] Lệnh #{trade_id} ({outcome}) ${net_pnl:+.2f}. Bài học: {failure_reason}", flush=True)
+        # Logging must not interrupt an already-realized fill on legacy Windows encodings.
 
     def query_similarity_against_losses(
         self,
@@ -179,8 +181,7 @@ class EpisodicTradeMemoryBank:
                 sim += 0.35
 
             # 3. Absorption trap match (max 0.35)
-            if (candidate_direction == 1 and candidate_absorption == "BEAR_ABSORPTION") or \
-               (candidate_direction == -1 and candidate_absorption == "BULL_ABSORPTION"):
+            if candidate_absorption != "NONE" and candidate_absorption == rec.absorption_signal:
                 sim += 0.35
 
             if sim > highest_sim:

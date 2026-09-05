@@ -178,11 +178,16 @@ class TestVibeTrading(unittest.TestCase):
         # Penalties: 6 (premature) + 10 (loss) + 14 (revenge) = 30 -> 100 - 30 = 70
         self.assertEqual(report.discipline_score, 70)
         self.assertEqual(report.discipline_grade, "B")
-        self.assertGreater(report.missed_alpha_usdt, 0.0)
+        self.assertFalse(report.counterfactual_available)
+        self.assertEqual(report.missed_alpha_usdt, 0.0)
         self.assertTrue(len(report.behavioral_diagnostics) > 5)
 
     def test_persistent_storage_vibe_config(self):
-        storage = PersistentStorageManager(db_path="data/trading_platform_test.db")
+        import tempfile
+        from pathlib import Path
+        temp = tempfile.TemporaryDirectory(dir="D:/Codex", prefix="vibe-test-")
+        self.addCleanup(temp.cleanup)
+        storage = PersistentStorageManager(db_path=Path(temp.name) / "test.db", json_backup_path=Path(temp.name) / "backup.json")
         cfg = storage.save_vibe_config(
             enabled=True,
             min_votes=4,

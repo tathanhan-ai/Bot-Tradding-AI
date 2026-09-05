@@ -21,6 +21,15 @@ import pandas as pd
 from config.settings import DATA_DIR, DEFAULT_SYSTEM
 
 
+def discard_forming_candle(frame: pd.DataFrame, interval_seconds: int, now: Optional[float] = None) -> pd.DataFrame:
+    """Keep only bars whose Binance close time must already have elapsed."""
+    if frame.empty:
+        return frame
+    now = time.time() if now is None else now
+    cutoff = pd.Timestamp(now - interval_seconds, unit="s")
+    return frame.loc[frame.index <= cutoff].copy()
+
+
 class BinanceDataFetcher:
     def __init__(self, base_url: Optional[str] = None):
         self.base_url = base_url or DEFAULT_SYSTEM.binance_fapi_url
@@ -36,17 +45,19 @@ class BinanceDataFetcher:
         Fetch historical candles with pagination and local caching.
         interval: '1m', '5m', '15m', '1h', '4h', '1d'
         """
-        cache_file = DATA_DIR / f"{symbol.upper()}_{interval}_{total_candles}.csv"
+        environment = "testnet" if "demo-" in self.base_url or "testnet" in self.base_url else "mainnet"
+        cache_file = DATA_DIR / f"{environment}_{symbol.upper()}_{interval}_{total_candles}.csv"
 
         if use_cache and cache_file.exists():
             # Check if cache is reasonably fresh (< 1 day old)
             file_age = time.time() - cache_file.stat().st_mtime
-            if file_age < 86400:
+            if file_age < 30:
                 print(f"[Data] Đọc dữ liệu từ cache: {cache_file.name}")
                 df = pd.read_csv(cache_file)
                 df["timestamp"] = pd.to_datetime(df["timestamp"])
                 df.set_index("timestamp", inplace=True)
-                return df
+                seconds = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400, "1w": 604800, "1M": 2592000}.get(interval, 60)
+                return discard_forming_candle(df, seconds)
 
         print(f"[Data] Đang tải {total_candles} nến {interval} của {symbol} từ Binance Futures API...")
         all_data = []
@@ -107,6 +118,7 @@ class BinanceDataFetcher:
         # Drop duplicates if any due to batch overlap
         df.drop_duplicates(subset=["open_time"], inplace=True)
         df.sort_values(by="open_time", inplace=True)
+        df = df[df["close_time"].astype(float) <= time.time() * 1000.0]
 
         df["timestamp"] = pd.to_datetime(df["open_time"], unit="ms")
         for col in ["open", "high", "low", "close", "volume", "quote_volume"]:
