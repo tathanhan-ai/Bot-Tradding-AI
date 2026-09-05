@@ -21,7 +21,7 @@ class PersistentStorageManager:
     def __init__(self, db_path: Optional[Union[str, Path]] = None, json_backup_path: Optional[Union[str, Path]] = None, secret_provider: Optional[Any] = None):
         if db_path is None:
             base_dir = Path(__file__).resolve().parent
-            db_path = base_dir / "trading_state.sqlite"
+            db_path = base_dir / "bot_database.db"
         if json_backup_path is None:
             base_dir = Path(__file__).resolve().parent
             json_backup_path = base_dir / "persistent_state.json"
