@@ -79,9 +79,15 @@
           <option value="SOLUSDT">SOLUSDT</option>
           <option value="DOGEUSDT">DOGEUSDT</option>
         </select>
-        <div id="price-box" class="shrink-0 px-2 py-1 rounded-md transition-all duration-200 inline-flex items-center gap-1.5 bg-[#141b2b] border border-gray-700" title="Giá mid hiện tại">
+        <div id="price-box" class="shrink-0 px-2 py-1 rounded-md transition-all duration-200 inline-flex items-center gap-1.5 bg-[#141b2b] border border-gray-700" title="Giá Hợp đồng tương lai vĩnh cửu USDT-M (Binance Futures)">
+          <span class="px-1.5 py-0.5 text-[9px] font-bold bg-amber-950/90 text-amber-300 border border-amber-800 rounded mono" title="Hợp đồng tương lai vĩnh cửu USDT-M">FUTURES</span>
           <span class="text-sm font-extrabold mono text-white tracking-wide" id="live-price">$0.00</span>
           <span id="price-arrow" class="text-[10px] font-bold"></span>
+        </div>
+        <div id="spot-basis-box" class="hidden sm:inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-[#141b2b] border border-gray-700 text-[10px] mono text-gray-400" title="Giá giao ngay Binance Spot và chênh lệch Basis (Futures - Spot)">
+          <span>Spot: <b id="spot-price" class="text-sky-300">--</b></span>
+          <span class="text-gray-600">|</span>
+          <span>Basis: <b id="price-basis" class="text-amber-300">--</b></span>
         </div>
         <span id="price-source" class="min-w-0 truncate text-[9px] mono text-cyan-300" title="Nguồn báo giá và tuổi dữ liệu">Data: --</span>
         <div class="hidden lg:flex items-center gap-1.5 text-[10px] mono text-gray-400 whitespace-nowrap" title="Best bid, ask và spread từ sổ lệnh">
@@ -3827,6 +3833,18 @@
 
         priceEl.innerText = `$${price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
         lastPrice = price;
+
+        if (data.spot_price) {
+          const spotEl = document.getElementById('spot-price');
+          if (spotEl) spotEl.innerText = `$${Number(data.spot_price).toLocaleString('en-US', {minimumFractionDigits: 1, maximumFractionDigits: 1})}`;
+          const basisEl = document.getElementById('price-basis');
+          if (basisEl) {
+            const b = Number(data.basis || 0);
+            const bPct = Number(data.basis_pct || 0);
+            basisEl.innerText = `${b >= 0 ? '+' : ''}$${b.toFixed(1)} (${bPct >= 0 ? '+' : ''}${bPct.toFixed(2)}%)`;
+            basisEl.className = b >= 0 ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold';
+          }
+        }
 
         const quote = data.market_quote || {};
         const source = document.getElementById('price-source');

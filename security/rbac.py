@@ -66,16 +66,37 @@ class AuthManager:
         operator_tok = os.environ.get("DESK_OPERATOR_TOKEN")
         viewer_tok = os.environ.get("DESK_VIEWER_TOKEN")
 
+        tokens_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", ".desk_tokens.json")
+        saved_tokens = {}
+        if os.path.exists(tokens_file):
+            try:
+                with open(tokens_file, "r", encoding="utf-8") as f:
+                    saved_tokens = json.load(f)
+            except Exception:
+                pass
+
         if not admin_tok:
-            admin_tok = "admin-" + secrets.token_hex(16)
+            admin_tok = saved_tokens.get("admin") or ("admin-" + secrets.token_hex(16))
         if not operator_tok:
-            operator_tok = "operator-" + secrets.token_hex(16)
+            operator_tok = saved_tokens.get("operator") or ("operator-" + secrets.token_hex(16))
         if not viewer_tok:
-            viewer_tok = "viewer-" + secrets.token_hex(16)
+            viewer_tok = saved_tokens.get("viewer") or ("viewer-" + secrets.token_hex(16))
+
+        try:
+            os.makedirs(os.path.dirname(tokens_file), exist_ok=True)
+            with open(tokens_file, "w", encoding="utf-8") as f:
+                json.dump({"admin": admin_tok, "operator": operator_tok, "viewer": viewer_tok}, f, indent=2)
+        except Exception:
+            pass
 
         self.register_token(admin_tok, "admin-user", Role.ADMIN)
         self.register_token(operator_tok, "operator-user", Role.OPERATOR)
         self.register_token(viewer_tok, "viewer-user", Role.VIEWER)
+
+        for k, v in saved_tokens.items():
+            if isinstance(v, str) and v not in self.sessions:
+                role = Role.ADMIN if "admin" in k else (Role.OPERATOR if "operator" in k else Role.VIEWER)
+                self.register_token(v, f"{k}-user", role)
 
     def create_session(self, user_id: str, role: Role) -> str:
         token = f"{role.value.lower()}-{secrets.token_hex(16)}"

@@ -441,11 +441,19 @@ class LiveTradingState:
         def on_latency(latency_ms: float):
             self.ws_latency_ms = latency_ms
 
+        def on_spot_ticker(spot_mid: float):
+            self.spot_price = spot_mid
+            self.basis = round(self.live_price - spot_mid, 2)
+            self.basis_pct = round((self.live_price - spot_mid) / max(1.0, spot_mid) * 100.0, 3)
+
         callbacks = dict(symbol=self.symbol, on_depth=on_depth, on_agg_trade=on_agg_trade,
-                         on_kline=on_kline, on_latency_update=on_latency)
+                         on_kline=on_kline, on_latency_update=on_latency, on_spot_ticker=on_spot_ticker)
         if self.active_exchange == "mexc":
             stream_url = self.mexc_api.base_url.replace("https://", "wss://").replace("http://", "ws://") + "/edge"
-            self.ws_engine = MEXCFuturesWebSocketEngine(**callbacks, base_url=stream_url)
+            self.ws_engine = MEXCFuturesWebSocketEngine(
+                symbol=self.symbol, on_depth=on_depth, on_agg_trade=on_agg_trade,
+                on_kline=on_kline, on_latency_update=on_latency, base_url=stream_url
+            )
         else:
             self.ws_engine = BinanceFuturesWebSocketEngine(
                 **callbacks, on_book_ticker=on_book_ticker,
@@ -1413,6 +1421,10 @@ class LiveTradingState:
             "closed_pnl": round(closed_pnl, 2),
             "is_running": self.is_running,
             "live_price": self.live_price,
+            "futures_price": self.live_price,
+            "spot_price": round(getattr(self, "spot_price", self.live_price) or self.live_price, 2),
+            "basis": round(self.live_price - (getattr(self, "spot_price", self.live_price) or self.live_price), 2),
+            "basis_pct": round((self.live_price - (getattr(self, "spot_price", self.live_price) or self.live_price)) / max(1.0, (getattr(self, "spot_price", self.live_price) or self.live_price)) * 100.0, 3),
             "price_history": self.price_history,
             "chart_klines": deepcopy(self.chart_klines),
             "position": self.current_position,

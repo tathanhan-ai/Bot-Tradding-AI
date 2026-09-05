@@ -64,6 +64,7 @@ class BinanceFuturesWebSocketEngine:
         on_agg_trade: Optional[Callable[[float, float, bool, int], None]] = None,
         on_kline: Optional[Callable[[Dict[str, Any]], None]] = None,
         on_latency_update: Optional[Callable[[float], None]] = None,
+        on_spot_ticker: Optional[Callable[[float], None]] = None,
         kline_intervals: Optional[List[str]] = None,
         is_testnet: bool = False,
     ):
@@ -75,6 +76,7 @@ class BinanceFuturesWebSocketEngine:
         self.on_agg_trade = on_agg_trade
         self.on_kline = on_kline
         self.on_latency_update = on_latency_update
+        self.on_spot_ticker = on_spot_ticker
         self.kline_intervals = kline_intervals or ["1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"]
         self.last_message_at: Dict[str, float] = {}
         self.last_error: Dict[str, str] = {}
@@ -97,6 +99,8 @@ class BinanceFuturesWebSocketEngine:
         self._tasks.append(asyncio.create_task(self._run_depth_loop()))
         self._tasks.append(asyncio.create_task(self._run_agg_trade_loop()))
         self._tasks.append(asyncio.create_task(self._run_kline_loop()))
+        if self.on_spot_ticker:
+            self._tasks.append(asyncio.create_task(self._run_spot_ticker_loop()))
 
     async def stop(self):
         self.is_running = False
@@ -161,6 +165,28 @@ class BinanceFuturesWebSocketEngine:
                 break
             except Exception as e:
                 self.last_error["book_ticker"] = f"{type(e).__name__}: {e}"
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 1.5, 10.0)
+
+    async def _run_spot_ticker_loop(self):
+        url = f"wss://stream.binance.com:9443/ws/{self.symbol}@bookTicker"
+        backoff = 1.0
+        while self.is_running:
+            try:
+                async with websockets.connect(url, ping_interval=20, ping_timeout=10, max_size=2**20) as ws:
+                    backoff = 1.0
+                    while self.is_running:
+                        raw = await asyncio.wait_for(ws.recv(), 15)
+                        data = json.loads(raw)
+                        bid = float(data.get("b", 0.0))
+                        ask = float(data.get("a", 0.0))
+                        mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else bid
+                        if self.on_spot_ticker and mid > 0:
+                            self.on_spot_ticker(mid)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.last_error["spot_ticker"] = f"{type(e).__name__}: {e}"
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 1.5, 10.0)
 

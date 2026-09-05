@@ -20,6 +20,7 @@ data/persistent_state.json
 *.db
 *.sqlite
 data/*.jsonl
+data/.desk_tokens.json
 *.jsonl
 
 # Virtual environments
