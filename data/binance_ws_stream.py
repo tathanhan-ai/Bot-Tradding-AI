@@ -86,6 +86,7 @@ class BinanceFuturesWebSocketEngine:
         self.is_running = False
         self._tasks: List[asyncio.Task] = []
         self.last_event_time = 0.0
+        self.last_book_event_time = 0.0
         self.current_latency_ms = 0.0
         self.total_ticks_received = 0
 
@@ -145,6 +146,7 @@ class BinanceFuturesWebSocketEngine:
                         self.total_ticks_received += 1
                         event_time_ms = data.get("E", 0)
                         if event_time_ms > 0:
+                            self.last_book_event_time = event_time_ms / 1000.0
                             now_ms = time.time() * 1000.0
                             self.current_latency_ms = round(now_ms + self.clock_offset_ms - event_time_ms, 1)
                             if self.on_latency_update and self.total_ticks_received % 25 == 0:

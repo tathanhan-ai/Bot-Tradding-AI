@@ -90,12 +90,36 @@ class SevenStagePipelineTest(unittest.TestCase):
             memory=passes("memory"),
         ).decide(candidate(), fresh_snapshot())
 
-        self.assertTrue(decision.approved)
-        self.assertEqual(calls, ["freqtrade", "visual", "jesse", "guard", "alpha", "council", "sizing", "memory"])
-        self.assertEqual(decision.candidate.quantity, 0.02)
+        # Under AI_REQUIRED (default fail-closed), unavailable LLM vetoes entry candidate
+        self.assertFalse(decision.approved)
+        self.assertEqual(calls, ["freqtrade", "visual", "jesse", "guard", "alpha", "council"])
         council_entry = next(entry for entry in decision.trace.entries if entry.stage == "Stage 3 / AI Council")
-        self.assertEqual(council_entry.verdict, "LLM_UNAVAILABLE")
-        self.assertNotIn("APPROVE", council_entry.reason.upper())
+        self.assertEqual(council_entry.verdict, "VETO")
+        self.assertIn("9Router timed out", council_entry.reason)
+
+        # Under DETERMINISTIC_ONLY mode, AI Council is bypassed and deterministic sizing proceeds
+        calls_det = []
+        def passes_det(name):
+            def gate(_candidate, _snapshot):
+                calls_det.append(name)
+                return StageOutcome.pass_(name)
+            return gate
+        def size_det(order, _snapshot):
+            calls_det.append("sizing")
+            return StageOutcome.pass_("clamped", quantity=0.02, margin=120.0, leverage=3)
+
+        decision_det = SevenStagePipeline(
+            defense_gates=[("Freqtrade", passes_det("freqtrade")), ("VisualHFT", passes_det("visual")), ("Jesse", passes_det("jesse"))],
+            stage2_gates=[("DeterministicGuard", passes_det("guard")), ("AlphaRegime", passes_det("alpha"))],
+            council=llm_unavailable,
+            sizing=size_det,
+            memory=passes_det("memory"),
+            decision_mode="DETERMINISTIC_ONLY",
+        ).decide(candidate(), fresh_snapshot())
+
+        self.assertTrue(decision_det.approved)
+        self.assertEqual(calls_det, ["freqtrade", "visual", "jesse", "guard", "alpha", "sizing", "memory"])
+        self.assertEqual(decision_det.candidate.quantity, 0.02)
 
     def test_stale_or_wrong_exchange_snapshot_cannot_open_order(self):
         calls = []

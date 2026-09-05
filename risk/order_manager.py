@@ -64,6 +64,7 @@ class FuturesOrder:
     exchange_order_id: str = ""
     exchange_status: str = ""
     group_type: str = ""
+    position_side: str = "BOTH"
     parent_intent_id: str = ""
     child_index: int = 1
     due_at: float = 0.0
@@ -109,6 +110,7 @@ class OrderQueueManager:
         candidate_payload: Optional[dict] = None,
         decision_trace: Optional[dict] = None,
         group_type: str = "",
+        position_side: str = "BOTH",
         due_at: Optional[float] = None,
         twap_interval_seconds: Optional[float] = None,
     ) -> Tuple[Optional[FuturesOrder], str]:
@@ -122,6 +124,10 @@ class OrderQueueManager:
                 return None, f"Invalid {name}"
         if side.upper() not in ("BUY", "SELL") or margin <= 0 or leverage < 1 or int(leverage) != leverage:
             return None, "Invalid side/margin/leverage"
+        if position_side not in ("BOTH", "LONG", "SHORT"):
+            return None, "Invalid position side"
+        if (position_side == "LONG" and side.upper() != "BUY") or (position_side == "SHORT" and side.upper() != "SELL"):
+            return None, "Position side conflicts with order side"
         direction = 1 if side.upper() == "BUY" else -1
         order_type_clean = order_type.upper()
         if order_type_clean not in ("LIMIT", "POST_ONLY", "MARKET", "CONDITIONAL", "TRAILING_STOP", "TWAP", "TWAP_SLICE", "SCALE_RATIO"):
@@ -184,6 +190,7 @@ class OrderQueueManager:
                 scale_level=index, scale_ratio_pct=ratios[index - 1] * 100, stop_loss=stop_loss, take_profit=take_profit,
                 note=note or (f"{order_type_clean} child {index}/{count}" if count > 1 else ""),
                 execution_group=group, client_order_id=child_client_id, group_type=kind,
+                position_side=position_side,
                 parent_intent_id=parent_id, child_index=index, due_at=due_at + (index - 1) * interval if is_twap else due_at,
                 candidate_payload=copy.deepcopy(candidate_payload or {}), decision_trace=copy.deepcopy(decision_trace or {}))
             created.append(order)

@@ -3,11 +3,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 import math
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
+
+
+class DecisionMode(str, Enum):
+    AI_REQUIRED = "AI_REQUIRED"
+    DETERMINISTIC_ONLY = "DETERMINISTIC_ONLY"
+    EXIT_ONLY = "EXIT_ONLY"
+
+    def __str__(self) -> str:
+        return self.value
 
 
 @dataclass
@@ -52,8 +62,11 @@ class MarketSnapshot:
     def freshness_issues(self, now: Optional[float] = None) -> List[str]:
         now = time.time() if now is None else now
         issues: List[str] = []
-        if self.exchange.lower() != "binance":
-            issues.append(f"exchange={self.exchange}; Binance Testnet is the only execution scope")
+        exchange = self.exchange.lower()
+        if exchange not in ("binance", "mexc"):
+            issues.append(f"unsupported exchange={self.exchange}")
+        if exchange == "mexc" and self.environment != "paper":
+            issues.append("MEXC market data is paper-only")
         if not math.isfinite(self.price) or self.price <= 0:
             issues.append("invalid price")
         if len(self.bids) < 20 or len(self.asks) < 20:
@@ -73,9 +86,12 @@ class MarketSnapshot:
             recent = frame.tail(50)
             ends = [candle_end(ts, tf) for ts in recent.index]
             now_ts = pd.Timestamp(now, unit="s")
-            if ends[-1] > now_ts + pd.Timedelta(seconds=5):
+            last_closed_at = ends[-1]
+            if last_closed_at > now_ts + pd.Timedelta(seconds=5):
                 issues.append(f"forming/future {tf} candle")
-            if candle_end(ends[-1], tf) < now_ts - pd.Timedelta(seconds=5):
+            tf_delta = candle_end(last_closed_at, tf) - last_closed_at
+            allowed_delay = pd.Timedelta(seconds=5)
+            if last_closed_at < now_ts - tf_delta - allowed_delay:
                 issues.append(f"stale {tf} history")
             if any(end != next_open for end, next_open in zip(ends, recent.index[1:])):
                 issues.append(f"gap in {tf} closed candles")
@@ -160,19 +176,42 @@ class SevenStagePipeline:
         council: Optional[StageGate] = None,
         sizing: Optional[StageGate] = None,
         memory: Optional[StageGate] = None,
+        decision_mode: str = DecisionMode.AI_REQUIRED,
     ):
         self.defense_gates = list(defense_gates)
         self.stage2_gates = list(stage2_gates)
         self.council = council
         self.sizing = sizing
         self.memory = memory
+        if isinstance(decision_mode, DecisionMode):
+            self.decision_mode = decision_mode
+        elif isinstance(decision_mode, str):
+            clean = decision_mode.replace("DecisionMode.", "")
+            try:
+                self.decision_mode = DecisionMode(clean)
+            except ValueError:
+                self.decision_mode = DecisionMode.AI_REQUIRED
+        else:
+            self.decision_mode = DecisionMode.AI_REQUIRED
 
     def decide(self, candidate: CandidateOrder, snapshot: MarketSnapshot, now: Optional[float] = None, trace: Optional[DecisionTrace] = None) -> PipelineDecision:
         trace = trace or DecisionTrace(candidate.order_id, snapshot.snapshot_id)
+        is_risk_reducing = (
+            candidate.metadata.get("is_exit") is True
+            or candidate.metadata.get("reduce_only") is True
+            or candidate.source == "exit"
+            or candidate.metadata.get("intent") in ("REDUCE", "EXIT", "CLOSE_ALL", "EMERGENCY_CLOSE")
+        )
+
+        if self.decision_mode == DecisionMode.EXIT_ONLY and not is_risk_reducing:
+            trace.add("Safety Governor", StageOutcome.veto("Pipeline in EXIT_ONLY mode; risk-increasing entries are prohibited"))
+            return PipelineDecision(candidate, trace)
+
         snapshot_issues = snapshot.freshness_issues(now)
         if candidate.symbol != snapshot.symbol:
             snapshot_issues.append("candidate and snapshot symbols differ")
-        if candidate.direction not in (-1, 1) and not (candidate.source == "auto" and candidate.direction == 0):
+        is_grid_plan = candidate.source == "manual-grid" and candidate.order_type == "GRID" and candidate.direction == 0
+        if candidate.direction not in (-1, 1) and not (candidate.source == "auto" and candidate.direction == 0) and not is_grid_plan:
             snapshot_issues.append("invalid candidate direction")
         if any(not math.isfinite(x) or x < 0 for x in (candidate.entry_price, candidate.stop_loss, candidate.take_profit)):
             snapshot_issues.append("non-finite or negative candidate price")
@@ -195,19 +234,25 @@ class SevenStagePipeline:
             if self._run_gate(trace, f"Stage 2 / {name}", gate, candidate, snapshot):
                 return PipelineDecision(candidate, trace)
 
-        if self.council is None:
-            trace.add("Stage 3 / AI Council", StageOutcome.unavailable("AI Council is disabled; deterministic core continues"))
+        if is_risk_reducing:
+            trace.add("Stage 3 / AI Council", StageOutcome.pass_("Risk-reducing operation; AI Council evaluation bypassed for safe exit"))
+        elif self.decision_mode == DecisionMode.DETERMINISTIC_ONLY:
+            trace.add("Stage 3 / AI Council", StageOutcome.pass_("DETERMINISTIC_ONLY mode active: AI Council bypassed"))
+        elif self.council is None:
+            trace.add("Stage 3 / AI Council", StageOutcome.veto("Fail-Closed: AI Council is required in AI_REQUIRED mode but not configured"))
+            return PipelineDecision(candidate, trace)
         else:
             try:
                 council_outcome = self.council(candidate, snapshot)
             except Exception as exc:
-                council_outcome = StageOutcome.unavailable(f"AI Council error: {type(exc).__name__}")
-            if council_outcome.verdict not in ("PASS", "LLM_UNAVAILABLE"):
-                council_outcome = StageOutcome.veto(council_outcome.reason or "AI Council rejected order")
+                council_outcome = StageOutcome.veto(f"Fail-Closed: AI Council error: {type(exc).__name__}")
+            if council_outcome.verdict != "PASS":
+                council_outcome = StageOutcome.veto(council_outcome.reason or "Fail-Closed: AI Council did not PASS", **council_outcome.details)
+                self._apply(candidate, council_outcome)
+                trace.add("Stage 3 / AI Council", council_outcome)
+                return PipelineDecision(candidate, trace)
             self._apply(candidate, council_outcome)
             trace.add("Stage 3 / AI Council", council_outcome)
-            if council_outcome.verdict == "VETO":
-                return PipelineDecision(candidate, trace)
 
         if self.sizing is None:
             trace.add("Stage 4 / Carver + Risk", StageOutcome.veto("sizing gate is not configured"))

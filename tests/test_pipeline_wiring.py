@@ -22,6 +22,7 @@ class PipelineWiringTests(unittest.TestCase):
         self.state = LiveTradingState(storage=PersistentStorageManager(root / "db.sqlite", root / "backup.json"))
         self.state.vibe_swarm.enabled = False
         self.state.monthly_governor.enabled = False
+        self.state.decision_mode = "DETERMINISTIC_ONLY"
         now = pd.Timestamp.now(tz="UTC").tz_localize(None).floor("min")
         for tf, rule in (("1m", "min"), ("5m", "5min"), ("15m", "15min"), ("1h", "h")):
             end = now.floor(rule) - pd.Timedelta(rule if rule[0].isdigit() else "1" + rule)
@@ -103,7 +104,7 @@ class PipelineWiringTests(unittest.TestCase):
         with patch.object(s, "analyze_snapshot"):
             decision = s.evaluate_candidate_pipeline(candidate())
         self.assertTrue(decision.approved, [(e.stage, e.reason, e.details) for e in decision.trace.entries])
-        self.assertTrue(any(e.verdict == "LLM_UNAVAILABLE" for e in decision.trace.entries))
+        self.assertTrue(any("AI Council" in e.stage for e in decision.trace.entries))
         self.assertGreater(decision.candidate.quantity, 0)
         self.assertLessEqual(decision.candidate.quantity * (500 + s.live_price * .0014), s.current_balance * .0025)
         # The same adverse ENTRY context must be recognized after sizing.
@@ -176,12 +177,28 @@ class PipelineWiringTests(unittest.TestCase):
         s = self.state
         s.binance_api.is_live_enabled = True
         s.binance_api.is_testnet = True
-        body = json.dumps([[1000, "100", "105", "95", "102", "4"]]).encode()
-        with patch.object(server, "state", s), patch("urllib.request.urlopen", return_value=io.BytesIO(body)) as request:
+        expected = float(s.data_map["1m"].iloc[-1]["close"])
+        with patch.object(server, "state", s), patch("urllib.request.urlopen") as request:
             response = server.get_klines(interval="1m")
-        self.assertTrue(request.call_args.args[0].full_url.startswith("https://demo-fapi.binance.com/"))
-        self.assertEqual(response["candles"][0]["close"], 102)
-        self.assertEqual(response["candles"][0]["volume"], 4)
+        request.assert_not_called()
+        self.assertEqual(response["exchange"], "binance")
+        self.assertEqual(response["candles"][-1]["close"], expected)
+        self.assertEqual(response["candles"][-1]["time"], int(s.data_map["1m"].index[-1].value // 1_000_000_000))
+
+    def test_dashboard_streams_exchange_forming_candle_without_polluting_closed_history(self):
+        s = self.state
+        closed_tail = float(s.data_map["15m"].iloc[-1].close)
+        s.chart_klines["15m"] = {
+            "time": 1_700_000_000, "open": 60_000.0, "high": 60_100.0, "low": 59_900.0,
+            "close": 60_050.0, "volume": 12.34, "quote_volume": 740_000.0,
+            "is_closed": False, "event_time": 1_700_000_060_000,
+        }
+
+        chart_candle = s.get_state_dict()["chart_klines"]["15m"]
+
+        self.assertEqual(chart_candle["volume"], 12.34)
+        self.assertFalse(chart_candle["is_closed"])
+        self.assertEqual(float(s.data_map["15m"].iloc[-1].close), closed_tail)
 
     def test_every_frame_consumed_by_ensemble_is_data_gated(self):
         s = self.state
@@ -204,6 +221,24 @@ class PipelineWiringTests(unittest.TestCase):
             s.process_execution_tick(62000)
         self.assertEqual(close.call_args.kwargs["tp_stage"], "tp2")
         self.assertAlmostEqual(close.call_args.args[0], .035/.06)
+
+    def test_grid_fills_keep_hedge_sides_separate_and_close_per_side(self):
+        s = self.state
+        long, _ = s.order_manager.place_order("BTCUSDT", "POST_ONLY", "BUY", s.live_price - 20, 60, 3,
+                                              quantity=.003, stop_loss=s.live_price - 500, take_profit=s.live_price + 100,
+                                              group_type="GRID", position_side="LONG", client_order_id="grid-long")
+        short, _ = s.order_manager.place_order("BTCUSDT", "POST_ONLY", "SELL", s.live_price + 20, 60, 3,
+                                               quantity=.003, stop_loss=s.live_price + 500, take_profit=s.live_price - 100,
+                                               group_type="GRID", position_side="SHORT", client_order_id="grid-short")
+        s.execution.apply_entry(long, .003, long.price)
+        s.execution.apply_entry(short, .003, short.price)
+        self.assertIsNone(s.current_position)
+        self.assertEqual(set(s.hedge_positions), {"LONG", "SHORT"})
+        self.assertEqual(s.hedge_positions["LONG"]["direction"], 1)
+        self.assertEqual(s.hedge_positions["SHORT"]["direction"], -1)
+        self.assertTrue(s.execution.request_close(1.0, "GRID_TEST_CLOSE", position_side="LONG"))
+        self.assertNotIn("LONG", s.hedge_positions)
+        self.assertIn("SHORT", s.hedge_positions)
 
 
 if __name__ == "__main__":

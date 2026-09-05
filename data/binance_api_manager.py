@@ -169,8 +169,8 @@ class BinanceAPIManager:
         self._clock_synced_at = time.monotonic()
         return True, {"offset_ms": self.server_time_offset_ms}
 
-    def prepare_testnet_trading(self, symbol: str, leverage: int) -> Tuple[bool, Any]:
-        """Use one-way positions and the exact final leverage before submitting an entry."""
+    def prepare_testnet_trading(self, symbol: str, leverage: int, hedge: bool = False) -> Tuple[bool, Any]:
+        """Confirm the requested Binance position mode and final leverage before entry."""
         error = self._write_error()
         if error:
             return False, error
@@ -183,8 +183,9 @@ class BinanceAPIManager:
             return False, mode
         if not isinstance(mode, dict) or mode.get("dualSidePosition") not in (True, False, "true", "false"):
             return False, {"code": -2, "msg": "Không xác nhận được Binance position mode."}
-        if mode["dualSidePosition"] in (True, "true"):
-            ok, changed = self._send_request("POST", "/fapi/v1/positionSide/dual", {"dualSidePosition": "false"})
+        current_hedge = mode["dualSidePosition"] in (True, "true")
+        if current_hedge != hedge:
+            ok, changed = self._send_request("POST", "/fapi/v1/positionSide/dual", {"dualSidePosition": "true" if hedge else "false"})
             if not ok:
                 return False, changed
         ok, margin = self._send_request("POST", "/fapi/v1/marginType", {"symbol": symbol.upper(), "marginType": "ISOLATED"})
@@ -370,6 +371,7 @@ class BinanceAPIManager:
         activation_price: Optional[float] = None,
         callback_rate: Optional[float] = None,
         close_position: bool = False,
+        position_side: str = "BOTH",
         response_type: Optional[str] = None,
         working_type: str = "MARK_PRICE",
     ) -> Tuple[bool, Any]:
@@ -390,6 +392,11 @@ class BinanceAPIManager:
             return False, {"code": -2, "msg": f"Loại lệnh Binance Futures không hợp lệ: {order_type}"}
         if str(side).upper() not in ("BUY", "SELL"):
             return False, {"code": -2, "msg": "side chỉ được là BUY hoặc SELL."}
+        position_side = str(position_side).upper()
+        if position_side not in ("BOTH", "LONG", "SHORT"):
+            return False, {"code": -2, "msg": "positionSide không hợp lệ."}
+        if (position_side == "LONG" and str(side).upper() != "BUY" and not close_position) or (position_side == "SHORT" and str(side).upper() != "SELL" and not close_position):
+            return False, {"code": -2, "msg": "positionSide không khớp side mở lệnh."}
         if not isinstance(symbol, str) or not re.fullmatch(r"[A-Z0-9_]{1,32}", symbol.upper()):
             return False, {"code": -2, "msg": "symbol không hợp lệ."}
         if not close_position and not self._positive(quantity):
@@ -398,13 +405,15 @@ class BinanceAPIManager:
             return False, {"code": -2, "msg": "price/stopPrice/activationPrice/callbackRate phải hữu hạn và lớn hơn 0."}
         if close_position and reduce_only:
             return False, {"code": -2, "msg": "closePosition không được dùng cùng reduceOnly."}
+        if position_side != "BOTH" and reduce_only:
+            return False, {"code": -2, "msg": "Hedge mode không hỗ trợ reduceOnly; dùng positionSide/closePosition."}
         if client_order_id and not re.fullmatch(r"[.A-Za-z0-9_:/-]{1,36}", str(client_order_id)):
             return False, {"code": -2, "msg": "newClientOrderId không hợp lệ."}
         if working_type not in ("MARK_PRICE", "CONTRACT_PRICE"):
             return False, {"code": -2, "msg": "workingType không hợp lệ."}
 
         conditional = exchange_type not in ("MARKET", "LIMIT")
-        params: Dict[str, Any] = {"symbol": symbol.upper(), "side": side.upper(), "type": exchange_type, "positionSide": "BOTH"}
+        params: Dict[str, Any] = {"symbol": symbol.upper(), "side": side.upper(), "type": exchange_type, "positionSide": position_side}
         if conditional:
             params["algoType"] = "CONDITIONAL"
         if not close_position:

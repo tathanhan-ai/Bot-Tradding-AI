@@ -160,6 +160,24 @@ class BinanceExecutionTest(unittest.TestCase):
             self.assertFalse(manager.prepare_testnet_trading("BTCUSDT", invalid)[0])
         manager._send_request.assert_not_called()
 
+    def test_hedge_mode_uses_position_side_and_native_close_position(self):
+        manager = self.manager()
+        manager._send_request = Mock(side_effect=[(True, {"dualSidePosition": False}), (True, {"code": 200}),
+                                                   (True, {"code": 200}), (True, {"leverage": 3})])
+        self.assertTrue(manager.prepare_testnet_trading("BTCUSDT", 3, hedge=True)[0])
+        self.assertEqual(manager._send_request.call_args_list[1].args,
+                         ("POST", "/fapi/v1/positionSide/dual", {"dualSidePosition": "true"}))
+        captured = {}
+        manager._send_request = lambda method, endpoint, params, signed=True: (captured.update(params=params) or True,
+                                                                                {"algoId": 19, "algoStatus": "NEW"})
+        ok, _ = manager.place_order_live("BTCUSDT", "SELL", "STOP_MARKET", .01, stop_price=59_000,
+                                         position_side="LONG", close_position=True, client_order_id="grid-stop-1")
+        self.assertTrue(ok)
+        self.assertEqual(captured["params"]["positionSide"], "LONG")
+        self.assertEqual(captured["params"]["closePosition"], "true")
+        self.assertNotIn("reduceOnly", captured["params"])
+        self.assertNotIn("quantity", captured["params"])
+
     def test_exchange_filters_floor_risk_and_do_not_round_up_min_notional(self):
         manager = self.manager()
         manager._send_request = Mock(return_value=(True, {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING", "filters": [

@@ -4,6 +4,7 @@ Ultra-reliable real-time market data engine with sub-second price polling and We
 """
 import asyncio
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -39,7 +40,7 @@ if hasattr(sys.stderr, "reconfigure"):
 # Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 import uvicorn
@@ -59,6 +60,8 @@ from risk.ai_order_researcher import AIOrderResearcher, AIOrderResearchResult
 from risk.freqtrade_protections import FreqtradeProtectionEngine, ProtectionStatus
 from strategy.freqtrade_roi import FreqtradeROIEngine
 from data.binance_ws_stream import BinanceFuturesWebSocketEngine
+from data.mexc_ws_stream import MEXCFuturesWebSocketEngine
+from data.mexc_fetcher import MEXCDataFetcher
 from strategy.order_flow_cvd import OrderFlowCVDEngine, OrderFlowVerdict
 from strategy.octobot_matrix import OctoBotMatrixEngine, MatrixConsensus
 from strategy.octobot_trading_modes import OctoBotTradingCoordinator, OctoBotTradeSetup
@@ -75,18 +78,46 @@ from strategy.visual_hft_microstructure import VisualHFTMicrostructureEngine, Vi
 from strategy.vibe_alpha_zoo import VibeAlphaZooEngine, VibeAlphaMetrics
 from strategy.vibe_swarm_council import VibeSwarmCouncil, SwarmCouncilVerdict
 from strategy.shadow_account import ShadowAccountAnalyzer, BehavioralBiasReport
-from trading.pipeline import CandidateOrder, MarketSnapshot, SevenStagePipeline, StageOutcome, apply_closed_kline, candle_end
+from strategy.grid_planner import GridPlanner
+from trading.pipeline import CandidateOrder, DecisionMode, MarketSnapshot, SevenStagePipeline, StageOutcome, apply_closed_kline, candle_end, resample_closed_candles
 from dataclasses import asdict
 from trading.execution import ExecutionLifecycle
 
 from fastapi.middleware.cors import CORSMiddleware
+from security import (
+    Role,
+    UserSession,
+    get_auth_manager,
+    get_audit_logger,
+    get_rate_limiter,
+    require_role,
+    verify_trusted_origin,
+    SecretProvider,
+    get_secret_provider,
+    make_credential_ref,
+    sanitize_settings_for_export,
+    validate_settings_for_import,
+)
+from data.mexc_api_manager import validate_mexc_url
+
+ALLOWED_ORIGINS = {
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3000",
+}
+env_origins = os.environ.get("ALLOWED_ORIGINS", "")
+if env_origins:
+    for o in env_origins.split(","):
+        if o.strip():
+            ALLOWED_ORIGINS.add(o.strip().rstrip("/"))
 
 app = FastAPI(title="Binance Futures Quant Desk")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=list(ALLOWED_ORIGINS),
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "index.html"
@@ -120,10 +151,13 @@ class LiveTradingState:
         self.strategy = MTFTrendATRStrategy(self.strategy_config)
         self.risk_manager = FuturesRiskManager(self.risk_config)
         self.fetcher = BinanceDataFetcher()
+        self.mexc_fetcher = MEXCDataFetcher()
 
         self.ai_brain = AIQuantBrain()
         self.ai_verdict: Optional[AIRegimeVerdict] = None
         self.is_grid_active = False
+        self.grid_status = "OFF"
+        self.grid_plan = {}
 
         # Order Queue Manager (Market & Limit Orders)
         self.order_manager = OrderQueueManager()
@@ -136,8 +170,11 @@ class LiveTradingState:
 
         self.storage = storage or PersistentStorageManager()
         saved_settings = self.storage.get_all_settings()
-        api_key = str(saved_settings.get("api_key", "")).strip()
-        api_secret = str(saved_settings.get("api_secret", "")).strip()
+        api_key = str(self.storage.get_setting("api_key", saved_settings.get("api_key", ""))).strip()
+        api_secret = str(self.storage.get_setting("api_secret", saved_settings.get("api_secret", ""))).strip()
+        self.decision_mode = str(saved_settings.get("decision_mode", "AI_REQUIRED")).strip().upper()
+        if self.decision_mode not in ("AI_REQUIRED", "DETERMINISTIC_ONLY", "EXIT_ONLY"):
+            self.decision_mode = "AI_REQUIRED"
 
         def _as_bool(val, d=False):
             if val is None:
@@ -186,7 +223,7 @@ class LiveTradingState:
             api_secret=mexc_secret,
             base_url=mexc_base_url,
             proxy_url=mexc_proxy_url,
-            is_live_enabled=is_live
+            is_live_enabled=False  # MEXC remains paper-only until its native lifecycle has parity.
         )
 
         # AI Position Coordinator (Dynamic Exits, Breakeven Lock, Early TP/SL, Minimal ROI)
@@ -234,7 +271,6 @@ class LiveTradingState:
         self.ai_copilot_verdict: Optional[AICopilotVerdict] = None
         self.ai_copilot_last_response_at = 0.0
         self.available_ai_models = [saved_ai_model]
-        self.auto_grid_rotation: bool = True
 
         # Monthly Target Governor & Adaptive Capital Allocation
         target_pct = float(saved_settings.get("monthly_target_pct", 10.0))
@@ -249,7 +285,9 @@ class LiveTradingState:
 
         self.active_timeframe = "15m"
         self.data_map: Dict[str, pd.DataFrame] = {}
+        self.chart_klines: Dict[str, dict] = {}
         self.current_position: Optional[dict] = None
+        self.hedge_positions: Dict[str, dict] = {}
         self.trades: List[dict] = []
         self.total_fees = 0.0
         self.tick_count = 0
@@ -310,8 +348,8 @@ class LiveTradingState:
             "adx": None,
         }
 
-        # Real-time Binance Futures WebSocket Stream & Order Flow CVD
-        self.ws_engine: Optional[BinanceFuturesWebSocketEngine] = None
+        # Real-time public market stream & order-flow CVD.
+        self.ws_engine = None
         self.visual_hft = VisualHFTMicrostructureEngine(bucket_size_btc=10.0, num_buckets=30)
         self.order_flow_engine = OrderFlowCVDEngine(max_ticks=3000, window_seconds=60)
         self.order_flow_verdict: Optional[OrderFlowVerdict] = None
@@ -350,7 +388,7 @@ class LiveTradingState:
         return self.mexc_api if self.active_exchange == "mexc" else self.binance_api
 
     def init_ws_engine(self):
-        """Initializes direct Binance Futures WebSocket stream callbacks"""
+        """Initialise the one public stream which matches the selected venue."""
         def atomic_event(callback):
             def receive(*args):
                 with self.market_lock:
@@ -369,6 +407,7 @@ class LiveTradingState:
             self.latest_l2_asks = asks
             self.fee_engine.update_book(bids[0][0], asks[0][0])
             self.on_tick((bids[0][0] + asks[0][0]) / 2)
+            self.market_source_times["book_ticker"] = time.time()
             self.market_source_times["depth"] = (event_time - (self.ws_engine.clock_offset_ms or 0)) / 1000.0
             self.visual_hft.update_order_book(bids, asks)
 
@@ -384,22 +423,52 @@ class LiveTradingState:
         @atomic_event
         def on_kline(k: dict):
             timeframe = k.get("timeframe", "1m")
+            # Display-only forming bars come directly from the venue.  They never
+            # enter data_map, which remains closed-candle-only for the pipeline.
+            self.chart_klines[timeframe] = {
+                key: k[key] for key in ("time", "open", "high", "low", "close", "volume", "quote_volume", "is_closed", "event_time")
+                if key in k
+            }
             if apply_closed_kline(self.data_map, timeframe, k):
                 self.market_source_times[f"kline_{timeframe}"] = time.time()
-                print(f"✅ [BINANCE {timeframe.upper()} KLINE ĐÃ ĐÓNG] O:${k['open']:,.1f} H:${k['high']:,.1f} L:${k['low']:,.1f} C:${k['close']:,.1f} | Vol: {k['volume']:.2f} BTC", flush=True)
+                if timeframe == "1m":
+                    derived = resample_closed_candles(self.data_map["1m"], "3m", time.time())
+                    if not derived.empty:
+                        self.data_map["3m"] = derived.tail(500)
+                        self.market_source_times["kline_3m"] = time.time()
+                print(f"✅ [{self.active_exchange.upper()} {timeframe.upper()} KLINE ĐÃ ĐÓNG] O:${k['open']:,.1f} H:${k['high']:,.1f} L:${k['low']:,.1f} C:${k['close']:,.1f} | Vol: {k['volume']:.2f} BTC", flush=True)
 
         def on_latency(latency_ms: float):
             self.ws_latency_ms = latency_ms
 
-        self.ws_engine = BinanceFuturesWebSocketEngine(
-            symbol=self.symbol,
-            on_book_ticker=on_book_ticker,
-            on_depth=on_depth,
-            on_agg_trade=on_agg_trade,
-            on_kline=on_kline,
-            on_latency_update=on_latency,
-            is_testnet=self.binance_api.is_live_enabled and self.binance_api.is_testnet,
-        )
+        callbacks = dict(symbol=self.symbol, on_depth=on_depth, on_agg_trade=on_agg_trade,
+                         on_kline=on_kline, on_latency_update=on_latency)
+        if self.active_exchange == "mexc":
+            stream_url = self.mexc_api.base_url.replace("https://", "wss://").replace("http://", "ws://") + "/edge"
+            self.ws_engine = MEXCFuturesWebSocketEngine(**callbacks, base_url=stream_url)
+        else:
+            self.ws_engine = BinanceFuturesWebSocketEngine(
+                **callbacks, on_book_ticker=on_book_ticker,
+                is_testnet=self.binance_api.is_live_enabled and self.binance_api.is_testnet,
+            )
+
+    async def restart_market_data(self):
+        """Replace every market input as one unit; mixed-venue snapshots are invalid."""
+        if self.ws_engine:
+            await self.ws_engine.stop()
+        with self.market_lock:
+            self.market_source_times.clear()
+            self.data_map.clear()
+            self.chart_klines.clear()
+            self.latest_l2_bids = []
+            self.latest_l2_asks = []
+            self.visual_hft = VisualHFTMicrostructureEngine(bucket_size_btc=10.0, num_buckets=30)
+            self.order_flow_engine = OrderFlowCVDEngine(max_ticks=3000, window_seconds=60)
+            self.order_flow_verdict = None
+        self.execution.startup_reconciled = False
+        await asyncio.to_thread(self.initialize_history)
+        self.init_ws_engine()
+        await self.ws_engine.start()
 
     def fetch_binance_funding(self):
         now = time.time()
@@ -459,10 +528,15 @@ class LiveTradingState:
     def initialize_history(self):
         # Fetch real, closed OHLCV only. Alpha is evaluated inside Stage 2.
         from concurrent.futures import ThreadPoolExecutor
-        self.fetcher.base_url = "https://demo-fapi.binance.com" if self.binance_api.is_live_enabled and self.binance_api.is_testnet else "https://fapi.binance.com"
+        fetcher = self.mexc_fetcher if self.active_exchange == "mexc" else self.fetcher
+        if self.active_exchange == "binance":
+            fetcher.base_url = "https://demo-fapi.binance.com" if self.binance_api.is_live_enabled and self.binance_api.is_testnet else "https://fapi.binance.com"
+        else:
+            fetcher.base_url = self.mexc_api.base_url
+            fetcher.proxy_url = self.mexc_api.proxy_url
         intervals = ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M")
         def fetch(tf):
-            return tf, self.fetcher.fetch_klines(self.symbol, tf, 250, use_cache=False)
+            return tf, fetcher.fetch_klines(self.symbol, tf, 250, use_cache=False)
         with ThreadPoolExecutor(max_workers=4) as pool:
             for tf, frame in pool.map(fetch, intervals):
                 self.data_map[tf] = frame
@@ -491,8 +565,10 @@ class LiveTradingState:
         if not needed:
             return []
         self.last_history_repair_at = now
-        fetcher, symbol, stream = self.fetcher, self.symbol, self.ws_engine
-        base_url = fetcher.base_url
+        active_exchange = getattr(self, "active_exchange", "binance")
+        fetcher = getattr(self, "mexc_fetcher", None) if active_exchange == "mexc" else self.fetcher
+        exchange, symbol, stream = active_exchange, self.symbol, self.ws_engine
+        base_url = getattr(fetcher, "base_url", "")
 
         def closed_rows(frame, tf, cutoff):
             columns = ["open", "high", "low", "close", "volume"]
@@ -524,7 +600,7 @@ class LiveTradingState:
                     cutoff = time.time() if fixed_now is None else fixed_now
                     fetched = closed_rows(fetched, tf, cutoff)
                     with self.market_lock:
-                        if self.symbol != symbol or self.fetcher.base_url != base_url or self.ws_engine is not stream:
+                        if getattr(self, "active_exchange", "binance") != exchange or self.symbol != symbol or getattr(fetcher, "base_url", "") != base_url or self.ws_engine is not stream:
                             continue  # A mode/symbol change invalidates this REST response.
                         live = self.data_map.get(tf)
                         if live is not None:
@@ -575,7 +651,7 @@ class LiveTradingState:
             return MarketSnapshot(
                 snapshot_id=f"{self.symbol}-{int(now * 1000)}",
                 symbol=self.symbol,
-                exchange="binance",
+                exchange=self.active_exchange,
                 captured_at=now,
                 price=price,
                 source_times={
@@ -586,7 +662,7 @@ class LiveTradingState:
                 bids=bids,
                 asks=asks,
                 frames={tf: frame.copy(deep=True) for tf, frame in self.data_map.items()},
-                environment="testnet" if self.ws_engine and self.ws_engine.is_testnet else "paper",
+                environment="testnet" if self.active_exchange == "binance" and self.ws_engine and self.ws_engine.is_testnet else "paper",
                 context={
                     "hft": hft,
                     "flow": flow,
@@ -745,17 +821,20 @@ class LiveTradingState:
         research = research or self.order_research
 
         def freqtrade_gate(order: CandidateOrder, _snapshot: MarketSnapshot) -> StageOutcome:
-            if self.active_exchange != "binance":
-                return StageOutcome.veto("MEXC is paper-only pending market-data parity; Binance data cannot approve MEXC orders")
+            if _snapshot.exchange != self.active_exchange:
+                return StageOutcome.veto("snapshot exchange does not match selected execution venue")
+            if self.active_exchange == "mexc" and self.mexc_api.is_live_enabled:
+                return StageOutcome.veto("MEXC native execution is locked; paper-only is mandatory")
             if self.binance_api.is_live_enabled and (not self.binance_api.is_testnet or _snapshot.environment != "testnet"):
                 return StageOutcome.veto("execution/data environment mismatch or mainnet disabled")
             if getattr(self, "execution_blocker", ""):
                 return StageOutcome.veto(self.execution_blocker)
-            equity = self.current_balance + (self.current_position["unrealized_pnl"] if self.current_position else 0.0)
+            equity = self.current_balance + (self.current_position["unrealized_pnl"] if self.current_position else 0.0) + sum(pos.get("unrealized_pnl", 0.0) for pos in self.hedge_positions.values())
+            gate_direction = 1 if order.direction == 0 else order.direction
             allowed, reason, _status = self.freqtrade_protections.validate_new_trade(
                 entry_price=order.entry_price,
                 target_price=order.take_profit,
-                direction=order.direction,
+                direction=gate_direction,
                 balance=self.current_balance,
                 equity=equity,
             )
@@ -798,6 +877,28 @@ class LiveTradingState:
 
         def alpha_regime_gate(order: CandidateOrder, _snapshot: MarketSnapshot) -> StageOutcome:
             matrix = self.octobot_consensus
+            if order.order_type == "GRID" and order.source == "manual-grid":
+                verdict = self.ai_verdict
+                atr = float(self.indicators.get("atr") or _snapshot.price * .008)
+                plan = GridPlanner.plan_hedge_grid(
+                    price=_snapshot.price, best_bid=_snapshot.bids[0][0], best_ask=_snapshot.asks[0][0],
+                    support=float(getattr(verdict, "support_price", 0.0)), resistance=float(getattr(verdict, "resistance_price", 0.0)),
+                    vwap=float(getattr(verdict, "vwap_fair_price", 0.0)), atr=atr,
+                    regime=getattr(verdict, "regime", ""), recommended_strategy=getattr(verdict, "recommended_strategy", ""),
+                    adx=float(self.indicators.get("adx") or 0.0), hurst=float(getattr(verdict, "hurst_exponent", 1.0)),
+                )
+                if not plan.is_tradeable:
+                    return StageOutcome.veto(plan.reason)
+                alpha = self.vibe_alpha_zoo.get_latest_metrics()
+                if matrix and matrix.recommended_direction:
+                    return StageOutcome.veto("OctoBot has a directional setup; hedge grid is not tradable")
+                if abs(alpha.composite_alpha_score) > 15.0:
+                    return StageOutcome.veto(f"Alpha Zoo is directional ({alpha.composite_alpha_score:+.1f})")
+                order.entry_price = plan.center
+                order.stop_loss = plan.lower - .5 * atr
+                order.take_profit = plan.upper + .5 * atr
+                return StageOutcome.pass_("Range regime validated for hedge grid", alpha_score=alpha.composite_alpha_score,
+                    grid_plan=plan.as_dict(), grid_model=plan.model, inventory_skew_applied=False)
             if not matrix or not matrix.is_tradable:
                 reason = matrix.summary_reason if matrix else "OctoBot matrix unavailable"
                 return StageOutcome.veto(reason)
@@ -860,6 +961,36 @@ class LiveTradingState:
             leverage = min(order.leverage, self.get_effective_leverage())
             governor = self.monthly_governor.evaluate(self.current_balance, self.trades)
             leverage = min(leverage, governor.max_leverage_cap)
+            if order.order_type == "GRID" and order.source == "manual-grid":
+                plan = order.metadata.get("grid_plan", {})
+                legs = plan.get("legs", []) if isinstance(plan, dict) else []
+                if not legs or len(legs) % 2:
+                    return StageOutcome.veto("No paired grid legs after regime validation")
+                quant = research.carver_output or {}
+                daily_target = float(quant.get("daily_cash_vol_target", 0.0))
+                instrument_vol = float(quant.get("instrument_value_vol", 0.0))
+                if not all(math.isfinite(value) and value > 0 for value in (daily_target, instrument_vol)):
+                    return StageOutcome.veto("No measured Carver volatility budget for grid")
+                pending = [item for item in self.order_manager.pending_orders if item.group_type != "GRID"]
+                used_risk = sum(max(0, item.units - item.exchange_executed_quantity) * abs(item.price - item.stop_loss) for item in pending)
+                used_margin = sum(max(0, item.units - item.exchange_executed_quantity) * item.price / item.leverage for item in pending)
+                max_stop_distance = max(abs(float(leg["entry_price"]) - float(leg["stop_loss"])) for leg in legs)
+                remaining_risk = max(0.0, self.current_balance * self.risk_config.max_account_risk_pct - used_risk)
+                cro = self.risk_manager.ai_cro.last_verdict
+                remaining_margin = max(0.0, self.current_balance * min(.35, cro.max_margin_utilization_pct / 100.0 if cro else .35) - used_margin)
+                probation_cap = self.current_balance * .0025 if order.metadata.get("probation") else math.inf
+                total_quantity = min(daily_target / instrument_vol, remaining_risk / max_stop_distance,
+                    remaining_margin * leverage / _snapshot.price, probation_cap / max_stop_distance) * min(1.0, governor.size_multiplier)
+                total_quantity = math.floor(total_quantity / .001 + 1e-12) * .001
+                if total_quantity < len(legs) * .001:
+                    return StageOutcome.veto("Dynamic Grid budget cannot fund every paired child")
+                return StageOutcome.pass_("Carver/CRO dynamic gross grid budget applied", quantity=total_quantity,
+                    margin=round(total_quantity * _snapshot.price / leverage, 2), leverage=leverage,
+                    grid_budget={"daily_vol_contracts": daily_target / instrument_vol, "remaining_risk": remaining_risk,
+                                 "remaining_margin": remaining_margin, "monthly_multiplier": min(1.0, governor.size_multiplier),
+                                 "leg_count": len(legs)})
+            if self.hedge_positions:
+                return StageOutcome.veto("Close hedge-grid exposure before a directional candidate")
             position = self.current_position or {}
             if position and position["direction"] != order.direction and order.source != "auto":
                 return StageOutcome.veto("Close opposite exposure before opening a new direction")
@@ -953,6 +1084,13 @@ class LiveTradingState:
         def memory_gate(order: CandidateOrder, _snapshot: MarketSnapshot) -> StageOutcome:
             if order.metadata.get("reduce_only"):
                 return StageOutcome.pass_("Risk-reducing inventory exit; no new entry memory exposure")
+            if order.order_type == "GRID" and order.source == "manual-grid":
+                for direction in (1, -1):
+                    check = self.trade_memory.query_similarity_against_losses(direction, self.indicators.get("rsi", 50.0),
+                        getattr(self.ai_verdict, "vwap_status", "EQUILIBRIUM_FAIR"), self.order_flow_verdict.absorption_signal if self.order_flow_verdict else "NONE")
+                    if not check.is_safe:
+                        return StageOutcome.veto(check.lesson_learned)
+                return StageOutcome.pass_("Memory clear for both hedge sides")
             absorption = self.order_flow_verdict.absorption_signal if self.order_flow_verdict else "NONE"
             vwap = getattr(self.ai_verdict, "vwap_status", "EQUILIBRIUM_FAIR")
             check = self.trade_memory.query_similarity_against_losses(order.direction, self.indicators.get("rsi", 50.0), vwap, absorption)
@@ -970,8 +1108,9 @@ class LiveTradingState:
             council=council_gate,
             sizing=sizing_gate,
             memory=memory_gate,
+            decision_mode=getattr(self, "decision_mode", "AI_REQUIRED"),
         ).decide(candidate, snapshot, trace=trace)
-        if decision.approved and self.ai_copilot.user_instruction and not candidate.metadata.get("copilot_revalidated"):
+        if decision.approved and candidate.order_type != "GRID" and self.ai_copilot.user_instruction and not candidate.metadata.get("copilot_revalidated"):
             # An explicit Copilot instruction reviews this exact sized order.
             copilot = self.ai_copilot._query_9router({"candidate": asdict(candidate), "snapshot_id": snapshot.snapshot_id, "instruction": self.ai_copilot.user_instruction})
             copilot.order_id = candidate.order_id
@@ -981,7 +1120,10 @@ class LiveTradingState:
             if copilot.gateway_connected and copilot.decision == "VETO":
                 decision.trace.add("Copilot", StageOutcome.veto(copilot.thought_process))
             elif not copilot.gateway_connected:
-                decision.trace.add("Copilot", StageOutcome.unavailable("No connected candidate review"))
+                if getattr(self, "decision_mode", "AI_REQUIRED") == "AI_REQUIRED":
+                    decision.trace.add("Copilot", StageOutcome.veto("Fail-Closed: Copilot gateway unavailable in AI_REQUIRED mode"))
+                else:
+                    decision.trace.add("Copilot", StageOutcome.unavailable("No connected candidate review; deterministic override active"))
         if decision.approved and self._apply_copilot_adjustment(decision.candidate):
             # The adjusted order must traverse every hard gate again.
             decision.trace.add("Copilot / Adjust", StageOutcome.pass_("Risk-reducing adjustment; Stage 1-5 revalidation required", **candidate.metadata["copilot_adjustment"]))
@@ -1165,6 +1307,26 @@ class LiveTradingState:
             elif decision.action in ("AI_TAKE_PROFIT", "AI_CUT_LOSS"):
                 self.execution.request_close(1.0, decision.reason)
 
+        # Grid keeps long and short ledgers independent; it must never net one side into the other.
+        for position_side, pos in list(self.hedge_positions.items()):
+            direction, units = pos["direction"], pos["units"]
+            unrealized = (price - pos["entry_price"]) * units * direction
+            pos["unrealized_pnl"] = round(unrealized, 2)
+            pos["roe_pct"] = round(unrealized / pos["margin"] * 100.0, 2) if pos["margin"] > 0 else 0.0
+            for order in pos.get("orders", []):
+                item_pnl = (price - order.get("entry_price", price)) * order.get("units", 0.0) * direction
+                order["unrealized_pnl"] = round(item_pnl, 2)
+                order["roe_pct"] = round(item_pnl / order["margin"] * 100.0, 2) if order.get("margin", 0) > 0 else 0.0
+            if direction == 1:
+                pos["peak_price"] = max(pos.get("peak_price", pos["entry_price"]), price)
+            else:
+                pos["peak_price"] = min(pos.get("peak_price", pos["entry_price"]), price)
+            if not self.execution.live:
+                if (price - pos["stop_loss"]) * direction <= 0:
+                    self.execution.request_close(1.0, "GRID_STOP_LOSS", position_side=position_side)
+                elif (price - pos["take_profit"]) * direction >= 0:
+                    self.execution.request_close(1.0, "GRID_TAKE_PROFIT", position_side=position_side)
+
         # AI Continuous Multi-Strategy Ensemble Execution & Coordination on every tick (4 spaces)
 
     def run_decision_cycle(self):
@@ -1233,7 +1395,7 @@ class LiveTradingState:
         win_rate = (len(wins) / total * 100.0) if total > 0 else 0.0
 
         # Floating Equity & Real-time Net PnL (Closed PnL + Open Position Floating PnL)
-        unrealized = self.current_position["unrealized_pnl"] if self.current_position else 0.0
+        unrealized = (self.current_position["unrealized_pnl"] if self.current_position else 0.0) + sum(pos.get("unrealized_pnl", 0.0) for pos in self.hedge_positions.values())
         equity = self.current_balance + unrealized
         total_net_pnl = equity - self.initial_balance
         total_net_pnl_pct = (total_net_pnl / self.initial_balance) * 100.0
@@ -1252,7 +1414,9 @@ class LiveTradingState:
             "is_running": self.is_running,
             "live_price": self.live_price,
             "price_history": self.price_history,
+            "chart_klines": deepcopy(self.chart_klines),
             "position": self.current_position,
+            "hedge_positions": deepcopy(self.hedge_positions),
             "trades": self.trades,
             "wins": len(wins),
             "losses": len(losses),
@@ -1308,7 +1472,8 @@ class LiveTradingState:
             },
             "pending_orders": self.order_manager.get_pending_orders(),
             "is_grid_active": self.is_grid_active,
-            "auto_grid_rotation": self.auto_grid_rotation,
+            "grid_status": self.grid_status,
+            "grid_plan": deepcopy(self.grid_plan),
             "grid_total_profit": sum(t["pnl"] for t in self.trades if t.get("group_type") == "GRID"),
             "grid_levels": [
                 {"id": g.order_id, "buy": g.price if g.direction == 1 else None, "sell": g.price if g.direction == -1 else None, "status": g.status} for g in self.order_manager.orders if g.group_type == "GRID"
@@ -1323,6 +1488,16 @@ class LiveTradingState:
                 "safety_rating": self.leverage_advice.safety_rating if self.leverage_advice else "AN TOÀN"
             },
             "book_ticker": self.fee_engine.get_state_dict(),
+            "market_quote": {
+                "exchange": self.active_exchange,
+                "venue": (
+                    "MEXC Contract Futures • Paper" if self.active_exchange == "mexc" else
+                    ("Binance USD-M Futures Testnet" if self.ws_engine and self.ws_engine.is_testnet else "Binance USD-M Futures Mainnet")
+                ),
+                "quote_time": getattr(self.ws_engine, "last_book_event_time", 0.0) if self.ws_engine else 0.0,
+                "received_at": self.market_source_times.get("book_ticker", 0.0),
+                "age_seconds": round(max(0.0, now - self.market_source_times.get("book_ticker", 0.0)), 3) if self.market_source_times.get("book_ticker") else None,
+            },
             "ensemble": {
                 "consensus_score": self.ensemble_result.consensus_score if self.ensemble_result else 0.0,
                 "consensus_direction": self.ensemble_result.consensus_direction if self.ensemble_result else 0,
@@ -1559,7 +1734,8 @@ class LiveTradingState:
                 "shadow_account": asdict(self.shadow_account.get_latest_analysis()),
                 "models": self.vibe_swarm.agent_models
             },
-            "monthly_target": asdict(self.monthly_governor.evaluate(self.current_balance, self.trades))
+            "monthly_target": asdict(self.monthly_governor.evaluate(self.current_balance, self.trades)),
+            "decision_mode": getattr(self, "decision_mode", "AI_REQUIRED")
         }
 
 
@@ -1614,6 +1790,23 @@ async def startup_event():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    token = websocket.query_params.get("token") or websocket.headers.get("X-Desk-Token")
+    if not token:
+        cookie_header = websocket.headers.get("cookie", "")
+        for part in cookie_header.split(";"):
+            if part.strip().startswith("desk_token="):
+                token = part.strip()[len("desk_token="):]
+                break
+    auth_header = websocket.headers.get("Authorization")
+    if not token and auth_header and auth_header.startswith("Bearer "):
+        token = auth_header[len("Bearer "):].strip()
+
+    session = get_auth_manager().authenticate_token(token)
+    if not session:
+        # Rejection of unauthenticated WebSocket with close code 4401
+        await websocket.close(code=4401, reason="Unauthorized: authentication token required")
+        return
+
     await websocket.accept()
     connected_clients.add(websocket)
     try:
@@ -1629,9 +1822,22 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 @app.get("/", response_class=HTMLResponse)
-async def get_dashboard():
+async def get_dashboard(request: Request):
+    token = request.cookies.get("desk_token")
+    session = get_auth_manager().authenticate_token(token)
+    if not session:
+        admin_sessions = [s for s in get_auth_manager().sessions.values() if s.role == Role.ADMIN]
+        token = admin_sessions[0].token if admin_sessions else "desk-local-token"
+
     with open(TEMPLATE_PATH, "r", encoding="utf-8") as f:
-        return f.read()
+        html = f.read()
+
+    if "</head>" in html:
+        html = html.replace("</head>", f'<script>window.__DESK_TOKEN__ = "{token}";</script></head>')
+
+    resp = HTMLResponse(content=html)
+    resp.set_cookie("desk_token", token, httponly=False, samesite="strict")
+    return resp
 
 
 @app.get("/api/state")
@@ -1653,25 +1859,14 @@ def get_klines(symbol: Optional[str] = None, interval: str = "15m", limit: int =
     sym = (symbol or state.symbol).upper().strip()
     if sym != state.symbol or interval not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M") or not 1 <= limit <= 1500:
         raise HTTPException(status_code=400, detail="Invalid symbol, interval or limit")
-    base = "https://demo-fapi.binance.com" if state.execution.live else "https://fapi.binance.com"
-    url = f"{base}/fapi/v1/klines?symbol={sym}&interval={interval}&limit={limit}"
-    req = urllib.request.Request(url, headers={"User-Agent": "BinanceFuturesQuant/1.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            candles = []
-            for item in data:
-                candles.append({
-                    "time": int(item[0] / 1000),
-                    "open": float(item[1]),
-                    "high": float(item[2]),
-                    "low": float(item[3]),
-                    "close": float(item[4]),
-                    "volume": float(item[5])
-                })
-            return {"symbol": sym, "interval": interval, "candles": candles}
-    except Exception as e:
-        return {"error": str(e), "candles": []}
+    with state.market_lock:
+        frame = state.data_map.get(interval)
+        if frame is None or frame.empty:
+            return {"error": "No closed candles from the active venue", "candles": []}
+        candles = [{"time": int(timestamp.replace(tzinfo=timezone.utc).timestamp()), "open": float(row.open), "high": float(row.high),
+                    "low": float(row.low), "close": float(row.close), "volume": float(row.volume)}
+                   for timestamp, row in frame.tail(limit).iterrows()]
+    return {"symbol": sym, "interval": interval, "exchange": state.active_exchange, "candles": candles}
 
 
 @app.post("/api/action/toggle")
@@ -1683,16 +1878,18 @@ def toggle_bot():
 
 @app.post("/api/action/close_all")
 @serialized_action
-def close_all():
-    if state.current_position and state.live_price > 0:
-        ok = state.close_position(state.live_price, "THỦ CÔNG 🛑")
+def close_all(session: UserSession = Depends(require_role(Role.OPERATOR))):
+    if (state.current_position or state.hedge_positions) and state.live_price > 0:
+        ok = bool(state.current_position and state.close_position(state.live_price, "THỦ CÔNG 🛑"))
+        for position_side in list(state.hedge_positions):
+            ok = state.execution.request_close(1.0, "THỦ CÔNG 🛑", position_side=position_side) or ok
         return {"status": "closed" if ok else "exit_pending"}
     return {"status": "no_position"}
 
 
 @app.post("/api/action/set_symbol")
-async def set_symbol(symbol: str = "BTCUSDT"):
-    if symbol.upper().strip() != "BTCUSDT" or state.current_position or state.order_manager.pending_orders:
+async def set_symbol(symbol: str = "BTCUSDT", session: UserSession = Depends(require_role(Role.OPERATOR))):
+    if symbol.upper().strip() != "BTCUSDT" or state.current_position or state.hedge_positions or state.order_manager.pending_orders:
         return {"status": "rejected", "reason": "BTCUSDT-only scope; cannot change symbol with exposure"}
     sym = symbol.upper().strip()
     if sym != state.symbol:
@@ -1709,7 +1906,7 @@ async def set_symbol(symbol: str = "BTCUSDT"):
 
 @app.post("/api/action/reset_balance")
 @serialized_action
-def reset_balance(amount: float = 1000.0):
+def reset_balance(amount: float = 1000.0, session: UserSession = Depends(require_role(Role.OPERATOR))):
     if state.execution.live or state.current_position or state.order_manager.pending_orders:
         return {"status": "rejected", "reason": "Close/cancel exposure before resetting paper state"}
     if not math.isfinite(amount) or amount <= 0:
@@ -1720,6 +1917,7 @@ def reset_balance(amount: float = 1000.0):
     state.trades = []
     state.trade_memory.memory_records.clear()
     state.current_position = None
+    state.hedge_positions = {}
     state.total_fees = 0.0
     state.tick_count = 0
     state.last_auto_order_tick = 0
@@ -1734,7 +1932,7 @@ def reset_balance(amount: float = 1000.0):
 
 @app.post("/api/action/manual_order")
 @serialized_action
-def manual_order(direction: int = 1):
+def manual_order(direction: int = 1, session: UserSession = Depends(require_role(Role.OPERATOR))):
     if direction not in (-1, 1):
         return {"status": "rejected", "reason": "Direction must be -1 or 1"}
     return place_custom_order(side="BUY" if direction == 1 else "SELL", margin=state.current_balance * 0.35)
@@ -1742,7 +1940,7 @@ def manual_order(direction: int = 1):
 
 @app.post("/api/action/set_leverage")
 @serialized_action
-def set_leverage(mode: str = "AI_AUTO", val: int = 3):
+def set_leverage(mode: str = "AI_AUTO", val: int = 3, session: UserSession = Depends(require_role(Role.OPERATOR))):
     state.leverage_mode = mode
     if mode == "MANUAL":
         state.manual_leverage = max(1, min(val, 20))
@@ -1752,37 +1950,31 @@ def set_leverage(mode: str = "AI_AUTO", val: int = 3):
 
 @app.post("/api/action/toggle_grid")
 @serialized_action
-def toggle_grid():
+def toggle_grid(session: UserSession = Depends(require_role(Role.OPERATOR))):
     if state.is_grid_active:
         for order in list(state.order_manager.pending_orders):
             if order.group_type == "GRID":
                 state.execution.cancel(order)
-        state.is_grid_active = False
-        return {"status": "stopped"}
-    outcomes = []
-    atr = state.indicators.get("atr") or state.live_price * 0.008
-    group = f"grid-{uuid.uuid4().hex[:16]}"
-    # Levels are real candidates, never pre-bought inventory or synthetic grid PnL.
-    for direction in (1, -1):
-        for level in range(1, 4):
-            entry = state.live_price - direction * level * atr * 0.5
-            candidate = state.build_candidate_order(direction, "LIMIT", entry, entry - direction * atr * 1.5, entry + direction * atr * 2, "manual-grid")
-            candidate.metadata.update(group_type="GRID", requested_margin=state.current_balance * 0.035)
-            decision = state.evaluate_candidate_pipeline(candidate)
-            if decision.approved:
-                outcomes.append(state.queue_approved_candidate(candidate, state.order_research, group))
-            else:
-                outcomes.append({"status": "rejected", "reason": decision.trace.entries[-1].reason})
-    state.is_grid_active = any(o.group_type == "GRID" for o in state.order_manager.pending_orders)
-    return {"status": "evaluated", "levels": outcomes, "is_grid_active": state.is_grid_active}
-
-
-@app.post("/api/action/toggle_auto_grid")
-async def toggle_auto_grid():
-    state.auto_grid_rotation = not state.auto_grid_rotation
-    print(f"🔄 [AI AUTO-ROTATION] Chế độ xoay tua tự động Grid/Trend đã chuyển thành: {state.auto_grid_rotation}", flush=True)
-    await broadcast_state()
-    return {"status": "ok", "auto_grid_rotation": state.auto_grid_rotation}
+        state.is_grid_active = any(o.group_type == "GRID" for o in state.order_manager.pending_orders)
+        state.grid_status = "CANCELLING" if state.is_grid_active else "OFF"
+        return {"status": "cancelling" if state.is_grid_active else "inactive", "is_grid_active": state.is_grid_active,
+                "message": "Only unfilled Grid entries were cancelled; filled positions retain protection."}
+    atr = state.indicators.get("atr") or state.live_price * .008
+    candidate = state.build_candidate_order(0, "GRID", state.live_price, state.live_price - 2 * atr,
+        state.live_price + 2 * atr, "manual-grid")
+    decision = state.evaluate_candidate_pipeline(candidate)
+    if not decision.approved:
+        state.grid_status = "BLOCKED"
+        state.grid_plan = {"reason": decision.trace.entries[-1].reason}
+        return {"status": "blocked", "reason": decision.trace.entries[-1].reason,
+                "trace": [asdict(entry) for entry in decision.trace.entries], "is_grid_active": False}
+    plan = candidate.metadata["grid_plan"]
+    result = state.execution.queue_grid(candidate, plan["legs"])
+    state.is_grid_active = result.get("status") == "active"
+    state.grid_status = "ACTIVE" if state.is_grid_active else "BLOCKED"
+    state.grid_plan = {**plan, "grid_plan_id": candidate.order_id, "status": state.grid_status}
+    return {**result, "model": plan["model"], "is_grid_active": state.is_grid_active,
+            "trace": [asdict(entry) for entry in decision.trace.entries]}
 
 
 @app.post("/api/action/ai_copilot_reason")
@@ -2126,7 +2318,12 @@ async def update_monthly_target(payload: dict):
 
 @app.post("/api/settings/save_api_keys")
 @serialized_action
-def save_api_keys(payload: dict):
+def save_api_keys(payload: dict, request: Request, session: UserSession = Depends(require_role(Role.ADMIN))):
+    verify_trusted_origin(request, ALLOWED_ORIGINS)
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    if not get_rate_limiter().is_allowed(f"keys_{client_ip}", max_requests=5, window_seconds=60.0):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded for credential updates")
+
     if state.execution.live or state.current_position or state.order_manager.pending_orders:
         return {"status": "rejected", "reason": "Close/cancel exposure before replacing data or credentials"}
     exchange = str(payload.get("exchange", "binance")).strip().lower()
@@ -2145,8 +2342,12 @@ def save_api_keys(payload: dict):
             state.storage.save_setting("mexc_api_secret", mexc_secret)
             state.mexc_api.api_secret = mexc_secret
         if mexc_base:
-            state.storage.save_setting("mexc_base_url", mexc_base)
-            state.mexc_api.base_url = mexc_base
+            try:
+                validated_base = validate_mexc_url(mexc_base)
+            except ValueError as ve:
+                raise HTTPException(status_code=422, detail=f"Invalid MEXC URL: {ve}")
+            state.storage.save_setting("mexc_base_url", validated_base)
+            state.mexc_api.base_url = validated_base
         if mexc_proxy is not None:
             state.storage.save_setting("mexc_proxy_url", mexc_proxy)
             state.mexc_api.proxy_url = mexc_proxy
@@ -2155,7 +2356,17 @@ def save_api_keys(payload: dict):
             state.active_exchange = "mexc"
             state.storage.save_setting("active_exchange", "mexc")
 
-        return {"status": "ok", "message": "Đã lưu thông tin API MEXC Contract an toàn vào SQLite!"}
+        get_audit_logger().log(
+            actor_id=session.user_id,
+            role=session.role.value,
+            action="SAVE_API_KEYS",
+            resource="exchange/mexc",
+            request_id=f"req-{uuid.uuid4().hex[:8]}",
+            result="SUCCESS",
+            source_ip=client_ip,
+            parameters={"exchange": "mexc", "set_active": set_active}
+        )
+        return {"status": "ok", "message": "Đã lưu thông tin API MEXC Contract an toàn vào SecretProvider!"}
 
     else:
         api_key = str(payload.get("api_key", "")).strip()
@@ -2176,7 +2387,38 @@ def save_api_keys(payload: dict):
             state.active_exchange = "binance"
             state.storage.save_setting("active_exchange", "binance")
 
-        return {"status": "ok", "message": "Đã lưu thông tin API Binance an toàn vào cơ sở dữ liệu SQLite!"}
+        get_audit_logger().log(
+            actor_id=session.user_id,
+            role=session.role.value,
+            action="SAVE_API_KEYS",
+            resource="exchange/binance",
+            request_id=f"req-{uuid.uuid4().hex[:8]}",
+            result="SUCCESS",
+            source_ip=client_ip,
+            parameters={"exchange": "binance", "is_testnet": is_testnet, "set_active": set_active}
+        )
+        return {"status": "ok", "message": "Đã lưu thông tin API Binance an toàn vào SecretProvider!"}
+
+
+@app.post("/api/settings/set_decision_mode")
+@serialized_action
+def set_decision_mode(payload: dict, request: Request, session: UserSession = Depends(require_role(Role.ADMIN))):
+    verify_trusted_origin(request, ALLOWED_ORIGINS)
+    mode = str(payload.get("mode", "")).strip().upper()
+    if mode not in ("AI_REQUIRED", "DETERMINISTIC_ONLY", "EXIT_ONLY"):
+        raise HTTPException(status_code=422, detail=f"Invalid mode '{mode}'. Must be AI_REQUIRED, DETERMINISTIC_ONLY, or EXIT_ONLY")
+    state.decision_mode = mode
+    state.storage.save_setting("decision_mode", mode)
+    get_audit_logger().log(
+        actor_id=session.user_id,
+        role=session.role.value,
+        action="SET_DECISION_MODE",
+        resource="pipeline/decision_mode",
+        request_id=f"req-{uuid.uuid4().hex[:8]}",
+        result="SUCCESS",
+        parameters={"mode": mode}
+    )
+    return {"status": "ok", "decision_mode": mode}
 
 
 @app.post("/api/settings/test_connection")
@@ -2229,18 +2471,28 @@ def test_binance_connection(payload: Optional[dict] = None):
 
 @app.post("/api/settings/switch_exchange")
 async def switch_exchange(payload: dict):
-    if state.current_position or state.order_manager.pending_orders or state.execution.live:
+    if state.current_position or state.hedge_positions or state.order_manager.pending_orders or state.execution.live:
         return {"status": "rejected", "reason": "Close/cancel exposure before switching exchange"}
     ex = str(payload.get("exchange", "binance")).strip().lower()
     if ex not in ("binance", "mexc"):
         return {"status": "error", "message": "Sàn giao dịch không hợp lệ. Chọn 'binance' hoặc 'mexc'."}
+    previous_exchange = state.active_exchange
     state.active_exchange = ex
+    try:
+        await state.restart_market_data()
+    except Exception as exc:
+        state.active_exchange = previous_exchange
+        try:
+            await state.restart_market_data()
+        except Exception:
+            pass
+        return {"status": "error", "message": f"Không thể khởi tạo market data {ex.upper()}: {type(exc).__name__}"}
     state.storage.save_setting("active_exchange", ex)
     state.fee_engine.set_exchange(ex)
 
     # Automatically adapt fees to new active exchange
     if ex == "mexc":
-        comm = state.mexc_api.fetch_commission_rate(state.symbol)
+        comm = await asyncio.to_thread(state.mexc_api.fetch_commission_rate, state.symbol)
         if comm.get("success"):
             m = comm["maker_commission"]
             t = comm["taker_commission"]
@@ -2260,7 +2512,7 @@ async def switch_exchange(payload: dict):
 @app.post("/api/settings/toggle_mode")
 @serialized_action
 def toggle_trading_mode(payload: dict):
-    if state.current_position or state.order_manager.pending_orders or state.execution.entry_exit_barrier:
+    if state.current_position or state.hedge_positions or state.order_manager.pending_orders or state.execution.entry_exit_barrier:
         return {"status": "rejected", "reason": "Close/cancel exposure before switching execution environment"}
     live_enabled = payload.get("live_enabled", False)
     if not isinstance(live_enabled, bool):
@@ -2341,7 +2593,7 @@ async def sync_api_fees():
 @app.post("/api/settings/reset_data")
 @serialized_action
 def reset_data(amount: float = 1000.0):
-    if state.execution.live or state.current_position or state.order_manager.pending_orders:
+    if state.execution.live or state.current_position or state.hedge_positions or state.order_manager.pending_orders:
         return {"status": "rejected", "reason": "Close/cancel exposure before resetting paper state"}
     if not math.isfinite(amount) or amount <= 0:
         return {"status": "rejected", "reason": "Invalid balance"}
@@ -2351,6 +2603,7 @@ def reset_data(amount: float = 1000.0):
     state.trades = []
     state.trade_memory.memory_records.clear()
     state.current_position = None
+    state.hedge_positions = {}
     state.total_fees = 0.0
     state.tick_count = 0
     state.last_auto_order_tick = 0
@@ -2368,7 +2621,8 @@ async def export_data(
     download: bool = True,
     trades: bool = True,
     memory: bool = True,
-    settings: bool = True
+    settings: bool = True,
+    session: UserSession = Depends(require_role(Role.VIEWER))
 ):
     pkg = state.storage.export_full_package(
         include_trades=trades,
@@ -2396,11 +2650,16 @@ async def export_data(
 
 @app.post("/api/data/import")
 @serialized_action
-def import_data(payload: dict):
+def import_data(payload: dict, session: UserSession = Depends(require_role(Role.ADMIN))):
     if state.execution.live or state.current_position or state.order_manager.pending_orders:
         return {"status": "rejected", "reason": "Close/cancel exposure before replacing data or credentials"}
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Dữ liệu nhập không hợp lệ (cần định dạng JSON object)!")
+
+    raw_settings = payload.get("settings") or payload.get("user_settings") or {}
+    ok, err_msg = validate_settings_for_import(raw_settings)
+    if not ok:
+        raise HTTPException(status_code=422, detail=f"Secret isolation violation in import: {err_msg}")
 
     if "trades" not in payload and "trade_memory_records" not in payload and "settings" not in payload and "ai_lessons" not in payload:
         raise HTTPException(status_code=400, detail="Tệp sao lưu không chứa các trường dữ liệu hợp lệ (trades, settings, trade_memory_records)!")

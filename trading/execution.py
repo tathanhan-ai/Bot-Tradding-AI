@@ -34,6 +34,7 @@ class ExecutionLifecycle:
         s.current_balance = saved["balance"]
         s.total_fees = saved["total_fees"]
         s.current_position = saved["position"]
+        s.hedge_positions = saved.get("hedge_positions", {})
         s.order_manager.restore_state(saved["queue"])
         self.protective = saved.get("protective", [])
         self.exits = saved.get("exits", [])
@@ -56,8 +57,8 @@ class ExecutionLifecycle:
     def persist(self):
         s = self.state
         s.storage.save_execution_runtime({
-            "version": 1, "balance": s.current_balance, "total_fees": s.total_fees,
-            "position": s.current_position, "queue": s.order_manager.export_state(),
+            "version": 2, "balance": s.current_balance, "total_fees": s.total_fees,
+            "position": s.current_position, "hedge_positions": getattr(s, "hedge_positions", {}), "queue": s.order_manager.export_state(),
             "protective": self.protective, "exits": self.exits,
             "traces": self.traces, "trades": s.trades[-200:],
             "processed_execution_ids": sorted(self.processed_execution_ids), "feedback_pending": self.feedback_pending,
@@ -74,6 +75,21 @@ class ExecutionLifecycle:
         trace = self.state.last_decision_trace
         if trace and trace.order_id == parent:
             trace.add(stage, StageOutcome(verdict, reason, details=details))
+
+    @staticmethod
+    def is_hedge_grid(order):
+        return order.group_type == "GRID" and order.position_side in ("LONG", "SHORT")
+
+    def position_for(self, position_side=None):
+        if position_side in ("LONG", "SHORT"):
+            return getattr(self.state, "hedge_positions", {}).get(position_side)
+        return self.state.current_position
+
+    def all_positions(self):
+        current = self.state.current_position
+        if current:
+            yield "BOTH", current
+        yield from getattr(self.state, "hedge_positions", {}).items()
 
     def queue(self, candidate, research=None, execution_group=""):
         s = self.state
@@ -108,6 +124,46 @@ class ExecutionLifecycle:
         self.tick()
         return {"status": first.status.lower(), "order_id": first.order_id, "client_order_id": first.client_order_id}
 
+    def queue_grid(self, candidate, legs):
+        """Persist all passive grid children beneath one approved parent trace."""
+        s = self.state
+        if candidate.order_type != "GRID" or candidate.direction != 0 or candidate.quantity <= 0:
+            raise ValueError("Only a sized GRID parent can create grid children")
+        if not s.last_decision_trace or s.last_decision_trace.order_id != candidate.order_id or s.last_decision_trace.vetoed:
+            raise ValueError("Grid parent/trace mismatch")
+        if not legs or len(legs) % 2:
+            raise ValueError("Hedge grid must contain paired legs")
+        self.traces[candidate.order_id] = [asdict(entry) for entry in s.last_decision_trace.entries]
+        quantity = math.floor((candidate.quantity / len(legs)) / .001 + 1e-12) * .001
+        if quantity <= 0:
+            self.trace(candidate.order_id, "Execution / Grid", "VETO", "Grid allocation is below BTCUSDT minimum step")
+            self.persist()
+            return {"status": "blocked", "reason": "Grid allocation below minimum step"}
+        created = []
+        for index, leg in enumerate(legs, 1):
+            order, reason = s.order_manager.place_order(
+                symbol=candidate.symbol, order_type="POST_ONLY", side=leg["side"], price=leg["entry_price"],
+                margin=quantity * leg["entry_price"] / candidate.leverage, leverage=candidate.leverage,
+                quantity=quantity, stop_loss=leg["stop_loss"], take_profit=leg["take_profit"],
+                timeframe=s.active_timeframe, best_bid=s.fee_engine.bid_price, best_ask=s.fee_engine.ask_price,
+                execution_group=candidate.order_id, group_type="GRID", position_side="LONG" if leg["side"] == "BUY" else "SHORT",
+                client_order_id=f"g-{candidate.order_id[-20:]}-{index}",
+                candidate_payload={**asdict(candidate), "metadata": {**candidate.metadata, "grid_leg": leg}},
+                decision_trace=self.traces[candidate.order_id],
+            )
+            if order is None:
+                for prior in created:
+                    s.order_manager.cancel_order(prior.order_id)
+                self.trace(candidate.order_id, "Execution / Grid", "VETO", reason)
+                self.persist()
+                return {"status": "blocked", "reason": reason}
+            created.append(order)
+        self.persist()
+        self.tick()
+        self.trace(candidate.order_id, "Execution / Grid", "PASS", "Grid child intents persisted", children=len(created))
+        self.persist()
+        return {"status": "active", "grid_plan_id": candidate.order_id, "children": len(created)}
+
     @staticmethod
     def exchange_type(order):
         if order.order_type in ("MARKET", "TWAP_SLICE"):
@@ -137,7 +193,8 @@ class ExecutionLifecycle:
             return "Measured microstructure is not ready"
         if metrics.is_toxic_flow or metrics.liquidity_drought_warning:
             return "Microstructure deteriorated before execution"
-        approved, reason, _ = s.freqtrade_protections.validate_new_trade(order.price, order.take_profit, order.direction, s.current_balance, s.current_balance + (s.current_position or {}).get("unrealized_pnl", 0))
+        floating = sum(position.get("unrealized_pnl", 0.0) for _, position in self.all_positions())
+        approved, reason, _ = s.freqtrade_protections.validate_new_trade(order.price, order.take_profit, order.direction, s.current_balance, s.current_balance + floating)
         if not approved:
             return reason
         if s.risk_manager.circuit_breaker_active or s.jesse_engine.compute_metrics().current_consecutive_losses >= 3:
@@ -148,7 +205,10 @@ class ExecutionLifecycle:
         proposal = s.risk_manager.evaluate_order(order.symbol, order.direction, price, order.stop_loss, order.take_profit, order.leverage)
         if not proposal.approved or order.units > proposal.units + 1e-9:
             return proposal.rejection_reason or "Quantity exceeds current risk envelope"
-        pos = s.current_position or {}
+        hedge_grid = self.is_hedge_grid(order)
+        if not hedge_grid and getattr(s, "hedge_positions", {}):
+            return "Close hedge-grid exposure before opening a one-way position"
+        pos = self.position_for(order.position_side if hedge_grid else None) or {}
         if pos and pos.get("direction") != order.direction:
             return "Opposite exposure already exists"
         if pos and pos.get("leverage", order.leverage) != order.leverage:
@@ -156,7 +216,8 @@ class ExecutionLifecycle:
         pending = [o for o in s.order_manager.pending_orders if o.order_id != order.order_id]
         if any(o.symbol == order.symbol and o.leverage != order.leverage for o in pending):
             return "Pending symbol intents must share one leverage"
-        open_risk = pos.get("units", 0) * max(0, (pos.get("entry_price", 0) - pos.get("stop_loss", 0)) * pos.get("direction", 0))
+        open_risk = sum(position.get("units", 0) * max(0, (position.get("entry_price", 0) - position.get("stop_loss", 0)) * position.get("direction", 0))
+                        for _, position in self.all_positions())
         reserved_risk = sum(max(0, o.units - o.exchange_executed_quantity) * abs(o.price - o.stop_loss) for o in pending if o.status in s.order_manager.OPEN_STATUSES)
         if open_risk + reserved_risk + order.units * abs(price - order.stop_loss) > s.current_balance * s.risk_config.max_account_risk_pct:
             return "Aggregate risk exceeds account envelope"
@@ -181,13 +242,12 @@ class ExecutionLifecycle:
             self.trace(order.parent_intent_id, "Execution / Filters", "VETO", str(values))
             self.persist()
             return
-        ok, leverage = s.binance_api.prepare_testnet_trading(order.symbol, order.leverage)
+        ok, leverage = s.binance_api.prepare_testnet_trading(order.symbol, order.leverage, hedge=self.is_hedge_grid(order))
         if not ok:
             order.status = "REJECTED"
             self.trace(order.parent_intent_id, "Execution / Leverage", "VETO", str(leverage))
             self.persist()
             return
-        pos = s.current_position or {}
         pending = [o for o in s.order_manager.pending_orders if o.order_id != order.order_id and o.symbol == order.symbol and o.status in s.order_manager.OPEN_STATUSES]
         account = s.binance_api.test_connection()
         wallet = float(account.get("wallet_balance", 0))
@@ -197,7 +257,7 @@ class ExecutionLifecycle:
             self.trace(order.parent_intent_id, "Execution / Account", "VETO", "No verified Testnet wallet and available margin")
             self.persist()
             return
-        open_notional = pos.get("units", 0) * s.live_price
+        open_notional = sum(position.get("units", 0) * s.live_price for _, position in self.all_positions())
         reserved_notional = sum(max(0, o.units - o.exchange_executed_quantity) * max(o.price, s.live_price) for o in pending)
         cro = s.risk_manager.ai_cro.last_verdict
         margin_cap = min(s.current_balance, wallet) * min(.35, cro.max_margin_utilization_pct / 100 if cro else .35)
@@ -240,7 +300,8 @@ class ExecutionLifecycle:
         if not s.order_manager.mark_submit_pending(order.order_id):
             return
         self.persist()
-        kwargs = dict(symbol=order.symbol, side=order.side, order_type=kind, quantity=order.units, client_order_id=order.client_order_id)
+        kwargs = dict(symbol=order.symbol, side=order.side, order_type=kind, quantity=order.units,
+                      client_order_id=order.client_order_id, position_side=order.position_side)
         if kind in ("LIMIT", "POST_ONLY", "STOP", "TAKE_PROFIT"):
             kwargs["price"] = order.price
         if kind in ("STOP", "TAKE_PROFIT"):
@@ -286,7 +347,8 @@ class ExecutionLifecycle:
         s = self.state
         if not math.isfinite(price) or price <= 0:
             raise ValueError("Confirmed fill has no valid execution price")
-        pos = s.current_position
+        hedge_grid = self.is_hedge_grid(order)
+        pos = self.position_for(order.position_side if hedge_grid else None)
         if pos and pos["direction"] != order.direction:
             # Synthetic OCO has a race window; account for both actual fills.
             closed = min(quantity, pos["units"])
@@ -294,7 +356,7 @@ class ExecutionLifecycle:
             quantity -= closed
             if quantity <= 1e-10:
                 return
-            pos = s.current_position
+            pos = self.position_for(order.position_side if hedge_grid else None)
         maker = order.order_type in ("LIMIT", "POST_ONLY", "SCALE_RATIO")
         fee = s.fee_engine.calculate_fee(quantity * price, is_maker=maker)
         s.current_balance -= fee
@@ -323,23 +385,29 @@ class ExecutionLifecycle:
                 "staged_take_profits": payload.get("staged_take_profits", {}),
                 "tp_stage_initial_units": 0.0, "tp_stage_filled": {},
             }
-            s.current_position = pos
+            if hedge_grid:
+                s.hedge_positions[order.position_side] = pos
+            else:
+                s.current_position = pos
         pos["tp_stage_initial_units"] = pos.get("tp_stage_initial_units", pos.get("units", 0.0)) + quantity
         pos["orders"].append(item)
         # Adding inventory must not widen the existing loss boundary.
         pos["stop_loss"] = max(pos["stop_loss"], order.stop_loss) if order.direction == 1 else min(pos["stop_loss"], order.stop_loss)
-        self.aggregate()
+        self.aggregate(order.position_side if hedge_grid else None)
         s.risk_manager.update_balance(s.current_balance)
 
-    def aggregate(self):
+    def aggregate(self, position_side=None):
         s = self.state
-        pos = s.current_position
+        pos = self.position_for(position_side)
         if not pos:
             return
         for field in ("units", "margin", "notional", "entry_fee"):
             pos[field] = sum(item.get(field, 0.0) for item in pos["orders"])
         if pos["units"] <= 1e-10:
-            s.current_position = None
+            if position_side in ("LONG", "SHORT"):
+                s.hedge_positions.pop(position_side, None)
+            else:
+                s.current_position = None
             return
         pos["entry_price"] = pos["notional"] / pos["units"]
         pos["breakeven_price"] = s.fee_engine.calculate_breakeven_price(pos["entry_price"], pos["direction"])
@@ -359,9 +427,12 @@ class ExecutionLifecycle:
         s = self.state
         intent["status"] = "SUBMIT_UNKNOWN"
         self.persist()
+        position_side = intent.get("position_side", "BOTH")
+        native_close = position_side in ("LONG", "SHORT") and intent["order_type"] in ("STOP_MARKET", "TAKE_PROFIT_MARKET")
         ok, response = s.binance_api.place_order_live(
             s.symbol, intent["side"], intent["order_type"], intent["quantity"],
-            stop_price=intent.get("trigger"), reduce_only=True, client_order_id=intent["client_order_id"],
+            stop_price=intent.get("trigger"), reduce_only=position_side == "BOTH", close_position=native_close,
+            position_side=position_side, client_order_id=intent["client_order_id"],
         )
         if ok:
             intent["order_id"] = str(response.get("orderId", ""))
@@ -374,9 +445,13 @@ class ExecutionLifecycle:
 
     def ensure_protection(self):
         s = self.state
-        pos = s.current_position
-        if not self.live or not pos or any(e.get("status") not in ("FILLED", "CANCELED", "EXPIRED", "REJECTED") for e in self.exits):
+        if not self.live or any(e.get("status") not in ("FILLED", "CANCELED", "EXPIRED", "REJECTED") for e in self.exits):
             return
+        for position_side, pos in list(self.all_positions()):
+            self._ensure_protection_for(pos, position_side)
+
+    def _ensure_protection_for(self, pos, position_side):
+        s = self.state
         signature = [pos["units"], pos["stop_loss"], pos["take_profit"]]
         current_ids = set(pos.get("protective_order_ids", []))
         active = [p for p in self.protective if p.get("order_id") in current_ids and p.get("status") in ("NEW", "PARTIALLY_FILLED", "PENDING_TRIGGER") and not p.get("cancel_requested")]
@@ -387,7 +462,7 @@ class ExecutionLifecycle:
         if any(p.get("status") == "SUBMIT_UNKNOWN" for p in self.protective):
             s.execution_blocker = "Protective order acknowledgement unresolved"
             return
-        old = [p for p in self.protective if p.get("status") in ("NEW", "PARTIALLY_FILLED", "PENDING_TRIGGER")]
+        old = [p for p in self.protective if p.get("position_side", "BOTH") == position_side and p.get("status") in ("NEW", "PARTIALLY_FILLED", "PENDING_TRIGGER")]
         revision = pos.get("protection_revision", 0) + 1
         pos["protection_revision"] = revision
         side = "SELL" if pos["direction"] == 1 else "BUY"
@@ -399,7 +474,7 @@ class ExecutionLifecycle:
             trigger = staged.get(stage, 0)
             if qty > 0 and trigger > 0:
                 if (trigger - s.live_price) * pos["direction"] <= 0:
-                    self.request_close(qty / pos["units"], f"{stage.upper()} staged exit", tp_stage=stage)
+                    self.request_close(qty / pos["units"], f"{stage.upper()} staged exit", tp_stage=stage, position_side=position_side)
                     return
                 plan.append(("TAKE_PROFIT_MARKET", trigger, qty, stage))
                 remaining -= qty
@@ -408,16 +483,16 @@ class ExecutionLifecycle:
         created = []
         for kind, trigger, quantity, tp_stage in plan:
             ok, values = s.binance_api.normalize_order_values(s.symbol, quantity, trigger, order_type=kind, reference_price=s.live_price,
-                reduce_only=True, price_rounding="up" if kind == "STOP_MARKET" and pos["direction"] == 1 else "down")
+                reduce_only=position_side == "BOTH", price_rounding="up" if kind == "STOP_MARKET" and pos["direction"] == 1 else "down")
             if not ok:
                 break
             intent = dict(client_order_id=f"p-{uuid.uuid4().hex[:22]}", order_type=kind, side=side, quantity=values["quantity"], trigger=values["price"], status="CREATED", applied=0.0, quote_applied=0.0,
-                reason=f"{tp_stage.upper()} staged exit" if tp_stage else "Protective SL/TP", tp_stage=tp_stage)
+                reason=f"{tp_stage.upper()} staged exit" if tp_stage else "Protective SL/TP", tp_stage=tp_stage, position_side=position_side)
             self.protective.append(intent)
             if not self.send_reduce(intent):
                 break
             created.append(intent)
-        if len(created) == len(plan) and s.current_position is pos:
+        if len(created) == len(plan) and self.position_for(position_side) is pos:
             previous_signature = pos.get("protected_signature")
             pos["protected_signature"] = signature
             pos["protective_order_ids"] = [p["order_id"] for p in created]
@@ -427,7 +502,7 @@ class ExecutionLifecycle:
             s.execution_blocker = ""
         else:
             s.execution_blocker = "Protective setup failed; reducing tracked Testnet exposure"
-            self.request_close(1.0, s.execution_blocker)
+            self.request_close(1.0, s.execution_blocker, position_side=position_side)
         self.persist()
 
     @staticmethod
@@ -465,15 +540,20 @@ class ExecutionLifecycle:
             self.entry_exit_barrier = ""
         self.persist()
 
-    def request_close(self, ratio, reason, slice_id=None, tp_stage=None, after_stop_loss=None):
+    def request_close(self, ratio, reason, slice_id=None, tp_stage=None, after_stop_loss=None, position_side=None):
         s = self.state
-        pos = s.current_position
+        pos = self.position_for(position_side)
         if not pos or not math.isfinite(ratio) or not 0 < ratio <= 1:
             return False
         if after_stop_loss is not None and (not math.isfinite(after_stop_loss) or after_stop_loss <= 0):
             return False
         if ratio == 1 and not slice_id:
-            self.cancel_pending_entries(reason)
+            if position_side in ("LONG", "SHORT"):
+                for order in s.order_manager.pending_orders:
+                    if order.group_type == "GRID" and order.position_side == position_side:
+                        self.cancel(order)
+            else:
+                self.cancel_pending_entries(reason)
             self.persist()
         if any(e.get("status") not in ("FILLED", "CANCELED", "EXPIRED", "REJECTED") for e in self.exits):
             return False
@@ -487,7 +567,7 @@ class ExecutionLifecycle:
                 return False
             quantity = values["quantity"]
         intent = dict(client_order_id=f"x-{uuid.uuid4().hex[:22]}", order_type="MARKET", side="SELL" if pos["direction"] == 1 else "BUY", quantity=quantity, status="CREATED", applied=0.0, quote_applied=0.0, reason=reason, slice_id=slice_id, tp_stage=tp_stage,
-            after_stop_loss=after_stop_loss, after_stop_applied=False, position_key=pos.get("open_timestamp", pos.get("entry_time")))
+            after_stop_loss=after_stop_loss, after_stop_applied=False, position_key=pos.get("open_timestamp", pos.get("entry_time")), position_side=position_side or "BOTH")
         self.exits.append(intent)
         if not self.live:
             self.persist()
@@ -517,7 +597,8 @@ class ExecutionLifecycle:
             price = (quote - intent.get("quote_applied", 0)) / delta
             if not math.isfinite(price) or price <= 0:
                 return False
-            self.realize(delta, price, intent["reason"], f"{intent['client_order_id']}:{qty:.8f}", intent.get("slice_id"), commit=False, tp_stage=intent.get("tp_stage"))
+            self.realize(delta, price, intent["reason"], f"{intent['client_order_id']}:{qty:.8f}", intent.get("slice_id"), commit=False,
+                         tp_stage=intent.get("tp_stage"), position_side=intent.get("position_side"))
             intent["applied"] = qty
             intent["quote_applied"] = quote
         intent["status"] = status
@@ -533,6 +614,8 @@ class ExecutionLifecycle:
         stop = intent.get("after_stop_loss")
         if stop is None or intent.get("after_stop_applied") or intent.get("applied", 0) <= 0:
             return
+        if intent.get("position_side") in ("LONG", "SHORT"):
+            return
         pos = self.state.current_position
         if not pos or pos.get("open_timestamp", pos.get("entry_time")) != intent.get("position_key"):
             intent["after_stop_applied"] = True  # Never apply a stale follow-up to a new position.
@@ -544,18 +627,23 @@ class ExecutionLifecycle:
             intent["after_stop_applied"] = True
             self.persist()
 
-    def realize(self, quantity, price, reason, execution_id, slice_id=None, commit=True, tp_stage=None):
+    def realize(self, quantity, price, reason, execution_id, slice_id=None, commit=True, tp_stage=None, position_side=None):
         s = self.state
         if not all(math.isfinite(v) and v > 0 for v in (quantity, price)):
             raise ValueError("Invalid realized fill quantity/price")
-        if not s.current_position or execution_id in self.processed_execution_ids:
+        pos = self.position_for(position_side)
+        if not pos or execution_id in self.processed_execution_ids:
             return
-        pos = s.current_position
         ordered = sorted(pos["orders"], key=lambda item: 0 if str(item["slice_id"]) == str(slice_id) else 1)
         remaining = min(quantity, pos["units"])
         realized_quantity = remaining
         if remaining >= pos["units"] - 1e-10:
-            self.cancel_pending_entries(reason)
+            if position_side in ("LONG", "SHORT"):
+                for order in s.order_manager.pending_orders:
+                    if order.group_type == "GRID" and order.position_side == position_side:
+                        self.cancel(order)
+            else:
+                self.cancel_pending_entries(reason)
         for item in ordered:
             if remaining <= 1e-10:
                 break
@@ -595,7 +683,7 @@ class ExecutionLifecycle:
             stages = pos.setdefault("tp_stage_filled", {})
             stages[tp_stage] = stages.get(tp_stage, 0.0) + realized_quantity
         pos["partial_tp_done"] = True
-        self.aggregate()
+        self.aggregate(position_side)
         s.risk_manager.update_balance(s.current_balance)
         s.last_trade_closed_time = time.time()
         self.processed_execution_ids.add(execution_id)
@@ -679,11 +767,17 @@ class ExecutionLifecycle:
         if ok and isinstance(positions, list):
             try:
                 relevant = [p for p in positions if p.get("symbol") == s.symbol]
-                amounts = [float(p["positionAmt"]) for p in relevant]
-                expected = (s.current_position or {}).get("units", 0) * (s.current_position or {}).get("direction", 0)
-                valid = all(math.isfinite(v) for v in amounts)
-                hedge = any(p.get("positionSide", "BOTH") != "BOTH" and abs(q) > 1e-10 for p, q in zip(relevant, amounts))
-                if valid and not hedge and abs(sum(amounts) - expected) <= 1e-9:
+                actual = {"BOTH": 0.0, "LONG": 0.0, "SHORT": 0.0}
+                for item in relevant:
+                    side = str(item.get("positionSide", "BOTH")).upper()
+                    if side not in actual:
+                        raise ValueError("unknown position side")
+                    actual[side] += float(item["positionAmt"])
+                expected = {"BOTH": (s.current_position or {}).get("units", 0) * (s.current_position or {}).get("direction", 0),
+                            "LONG": getattr(s, "hedge_positions", {}).get("LONG", {}).get("units", 0),
+                            "SHORT": -getattr(s, "hedge_positions", {}).get("SHORT", {}).get("units", 0)}
+                valid = all(math.isfinite(v) for v in actual.values())
+                if valid and all(abs(actual[side] - expected[side]) <= 1e-9 for side in actual):
                     self.startup_reconciled = True
                     if getattr(s, "execution_blocker", "").startswith("Startup exchange inventory"):
                         s.execution_blocker = ""
@@ -717,7 +811,7 @@ class ExecutionLifecycle:
         for intent in self.protective + self.exits:
             if intent.get("status") in ("FILLED", "CANCELED", "EXPIRED", "REJECTED"):
                 continue
-            if not s.current_position or intent.get("cancel_requested") or (self.entry_exit_barrier and intent in self.protective):
+            if not self.position_for(intent.get("position_side")) or intent.get("cancel_requested") or (self.entry_exit_barrier and intent in self.protective):
                 ok, response = s.binance_api.cancel_order(s.symbol, **self.query_ref(intent))
                 if not ok:
                     ok, response = s.binance_api.query_order(s.symbol, **self.query_ref(intent))

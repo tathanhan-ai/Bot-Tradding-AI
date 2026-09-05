@@ -23,6 +23,28 @@ import urllib.request
 from typing import Any, Dict, Optional, Tuple
 
 
+ALLOWED_MEXC_HOSTS = {"contract.mexc.com", "contract.mexc.co", "api.mexc.co", "api.mexc.com"}
+ALLOWED_SCHEMES = {"https"}
+
+
+def validate_mexc_url(url: str) -> str:
+    """Strictly validates MEXC host and scheme against an immutable allowlist."""
+    if not url or not isinstance(url, str) or not url.strip():
+        return "https://contract.mexc.co"
+    raw = url.strip().rstrip("/")
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme.lower() not in ALLOWED_SCHEMES:
+        raise ValueError(f"Invalid URL scheme '{parsed.scheme}'; only HTTPS is allowed")
+    host = (parsed.hostname or "").lower()
+    if host not in ALLOWED_MEXC_HOSTS:
+        raise ValueError(f"Disallowed MEXC host '{host}'; allowed hosts: {ALLOWED_MEXC_HOSTS}")
+    if parsed.username or parsed.password:
+        raise ValueError("Credentials in URL are strictly forbidden")
+    if parsed.port and parsed.port != 443:
+        raise ValueError("Non-standard ports are forbidden")
+    return f"https://{host}"
+
+
 class MexcAPIManager:
     # Official mirrors: contract.mexc.co is the unblocked mirror for Vietnam & restricted regions
     DEFAULT_BASE_URL = "https://contract.mexc.co"
@@ -43,12 +65,7 @@ class MexcAPIManager:
     ):
         self.api_key = api_key.strip()
         self.api_secret = api_secret.strip()
-        # If user configured a blocked .com URL or empty, default to unblocked .co
-        configured_url = (base_url or self.DEFAULT_BASE_URL).strip().rstrip("/")
-        if "mexc.com" in configured_url:
-            self.base_url = "https://contract.mexc.co"
-        else:
-            self.base_url = configured_url
+        self.base_url = validate_mexc_url(base_url or self.DEFAULT_BASE_URL)
         self.proxy_url = proxy_url.strip()
         self.is_live_enabled = is_live_enabled
 
@@ -56,7 +73,7 @@ class MexcAPIManager:
         self.api_key = api_key.strip()
         self.api_secret = api_secret.strip()
         if base_url:
-            self.base_url = base_url.strip().rstrip("/")
+            self.base_url = validate_mexc_url(base_url)
         if proxy_url is not None:
             self.proxy_url = proxy_url.strip()
 

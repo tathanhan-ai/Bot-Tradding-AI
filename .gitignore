@@ -13,9 +13,14 @@ npm-debug.log*
 # Databases and runtime state (auto-initialized on first run)
 data/*.db
 data/*.db-journal
+data/*.sqlite
+data/*.sqlite-journal
 data/cache/
 data/persistent_state.json
 *.db
+*.sqlite
+data/*.jsonl
+*.jsonl
 
 # Virtual environments
 venv/

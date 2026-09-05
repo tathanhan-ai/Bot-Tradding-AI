@@ -14,20 +14,21 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Union
 
 
 class PersistentStorageManager:
-    def __init__(self, db_path: Optional[Path] = None, json_backup_path: Optional[Path] = None):
+    def __init__(self, db_path: Optional[Union[str, Path]] = None, json_backup_path: Optional[Union[str, Path]] = None, secret_provider: Optional[Any] = None):
         if db_path is None:
             base_dir = Path(__file__).resolve().parent
-            db_path = base_dir / "bot_database.db"
+            db_path = base_dir / "trading_state.sqlite"
         if json_backup_path is None:
             base_dir = Path(__file__).resolve().parent
             json_backup_path = base_dir / "persistent_state.json"
 
         self.db_path = Path(db_path)
         self.json_backup_path = Path(json_backup_path)
+        self.secret_provider = secret_provider
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -366,7 +367,18 @@ class PersistentStorageManager:
     # Settings & API Keys Persistence
     # -------------------------------------------------------------
     def save_setting(self, key: str, value: Any):
-        val_str = json.dumps(value) if not isinstance(value, str) else value
+        from security.secret_provider import get_secret_provider, make_credential_ref, is_secret_key
+        if is_secret_key(key) and isinstance(value, str) and value.strip() and not value.startswith("keyring://"):
+            try:
+                provider = self.secret_provider or get_secret_provider()
+                provider.set_secret(key, value)
+                val_str = make_credential_ref("credentials", key)
+            except Exception as e:
+                print(f"[PersistentStorage] SecretProvider error: {e}; saving reference")
+                val_str = make_credential_ref("credentials", key)
+        else:
+            val_str = json.dumps(value) if not isinstance(value, str) else value
+
         now_str = datetime.now().isoformat()
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -377,19 +389,27 @@ class PersistentStorageManager:
             """, (key, val_str, now_str))
             conn.commit()
 
-    def get_setting(self, key: str, default: Any = None) -> Any:
+    def get_setting(self, key: str, default: Any = None, resolve_secrets: bool = True) -> Any:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT value FROM user_settings WHERE key = ?", (key,))
             row = cursor.fetchone()
             if row:
                 try:
-                    return json.loads(row["value"])
+                    val = json.loads(row["value"])
                 except Exception:
-                    return row["value"]
+                    val = row["value"]
+                if isinstance(val, str) and val.startswith("keyring://"):
+                    if not resolve_secrets:
+                        return val
+                    from security.secret_provider import resolve_credential
+                    provider = self.secret_provider
+                    resolved = resolve_credential(val, provider=provider)
+                    return resolved if resolved else default
+                return val
         return default
 
-    def get_all_settings(self) -> Dict[str, Any]:
+    def get_all_settings(self, sanitize: bool = False) -> Dict[str, Any]:
         res = {}
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -400,6 +420,9 @@ class PersistentStorageManager:
                     res[r["key"]] = json.loads(r["value"])
                 except Exception:
                     res[r["key"]] = r["value"]
+        if sanitize:
+            from security.secret_provider import sanitize_settings_for_export
+            return sanitize_settings_for_export(res)
         return res
 
     def save_vibe_config(
@@ -548,7 +571,7 @@ class PersistentStorageManager:
         """Exports selected account state, trades, trade memory records, and settings into a single portable dictionary."""
         trades = self.load_trades(limit=10000) if include_trades else []
         memories = self.load_trade_memory_records(limit=5000) if include_memory else []
-        settings = self.get_all_settings() if include_settings else {}
+        settings = self.get_all_settings(sanitize=True) if include_settings else {}
         account = self.load_account_state()
         
         return {
@@ -573,6 +596,12 @@ class PersistentStorageManager:
         """Imports and restores trades, memory lessons, and settings from another machine's backup.
         Supports 'merge' (append with deduplication) or 'overwrite' (purge existing data for included sections).
         """
+        from security.secret_provider import validate_settings_for_import
+        raw_settings = data.get("settings") or data.get("user_settings") or {}
+        ok, err_msg = validate_settings_for_import(raw_settings)
+        if not ok:
+            raise ValueError(f"Secret isolation violation in import: {err_msg}")
+
         imported_trades = 0
         imported_memories = 0
         imported_settings = 0

@@ -57,129 +57,111 @@
   <!-- ========================================================== -->
   <!-- 1. TOP INSTITUTIONAL COMMAND & TICKER BAR                  -->
   <!-- ========================================================== -->
-  <header class="card p-3 mb-3 border-cyan-900/40 shadow-xl bg-gradient-to-r from-[#0c101a] via-[#0e1422] to-[#0c101a]">
-    <div class="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-3">
-      
-      <!-- Brand & Live Price Ticker -->
-      <div class="flex items-center gap-3 flex-wrap">
-        <div class="w-9 h-9 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 font-bold text-lg shadow-lg shadow-amber-500/10">
-          ⚡
-        </div>
-        <div>
-          <div class="flex items-center gap-2 flex-wrap">
-            <h1 class="text-sm font-extrabold text-white tracking-wider">BINANCE FUTURES QUANT DESK</h1>
-            <span class="px-2 py-0.5 text-[10px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800 rounded mono">PRO TERMINAL</span>
+  <header class="card p-2 mb-3 border-cyan-900/40 shadow-xl bg-gradient-to-r from-[#0c101a] via-[#0e1422] to-[#0c101a]">
+    <div class="flex flex-col gap-1.5">
+      <!-- Row 1: market identity and executable quote. -->
+      <div class="grid grid-cols-[auto_minmax(0,1fr)] sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 min-w-0">
+      <div class="flex items-center gap-2 shrink-0">
+        <div class="w-7 h-7 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 font-bold text-sm" aria-hidden="true">⚡</div>
+        <div class="hidden md:block leading-tight">
+          <div class="flex items-center gap-1.5">
+            <h1 class="text-xs font-extrabold text-white tracking-wider">QUANT DESK</h1>
+            <span class="px-1.5 py-0.5 text-[9px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800 rounded mono">PRO</span>
           </div>
-          <div class="flex items-center gap-2 mt-0.5">
-            <!-- Pair Selector -->
-            <select id="select-symbol" onchange="changeSymbol(this.value)" class="bg-[#141b2b] border border-gray-700 rounded px-2 py-0.5 text-xs text-amber-400 font-bold focus:outline-none cursor-pointer mono">
-              <option value="BTCUSDT">BTCUSDT</option>
-              <option value="ETHUSDT">ETHUSDT</option>
-              <option value="SOLUSDT">SOLUSDT</option>
-              <option value="DOGEUSDT">DOGEUSDT</option>
-            </select>
-
-            <!-- Live Flashing Price -->
-            <div id="price-box" class="px-2.5 py-0.5 rounded transition-all duration-200 inline-flex items-center gap-1.5 bg-[#141b2b] border border-gray-700">
-              <span class="text-base font-extrabold mono text-white tracking-wide" id="live-price">$0.00</span>
-              <span id="price-arrow" class="text-xs font-bold"></span>
-            </div>
-
-            <!-- Best Bid / Ask / Spread -->
-            <div class="hidden sm:flex items-center gap-1.5 text-[10px] mono bg-[#080b11] px-2 py-0.5 rounded border border-gray-800 text-gray-400">
-              <span>B:<b id="book-bid" class="text-emerald-400">$0</b></span>
-              <span class="text-gray-600">|</span>
-              <span>A:<b id="book-ask" class="text-rose-400">$0</b></span>
-              <span class="text-gray-600">|</span>
-              <span>Spr:<b id="book-spread" class="text-amber-300">$0</b></span>
-            </div>
-          </div>
+          <span class="text-[9px] text-gray-500 font-semibold tracking-wide">BINANCE FUTURES</span>
         </div>
       </div>
 
-      <!-- Center Quick Telemetry Bar -->
-      <div class="flex items-center gap-2 text-xs mono flex-wrap">
-        <!-- Capital Balance -->
-        <div class="bg-[#080b11] px-3 py-1.5 rounded-lg border border-gray-800/80 flex items-center gap-2">
-          <span class="text-[10px] text-gray-400" data-i18n="nav_capital">VỐN:</span>
-          <b id="stat-balance" class="text-white text-sm font-bold">$5,000.00</b>
+      <div class="flex min-w-0 items-center gap-1.5 sm:justify-self-center">
+        <select id="select-symbol" onchange="changeSymbol(this.value)" aria-label="Chọn cặp giao dịch" class="shrink-0 bg-[#141b2b] border border-gray-700 rounded-md px-1.5 py-1 text-[11px] text-amber-400 font-bold focus:outline-none focus:ring-1 focus:ring-amber-400 cursor-pointer mono">
+          <option value="BTCUSDT">BTCUSDT</option>
+          <option value="ETHUSDT">ETHUSDT</option>
+          <option value="SOLUSDT">SOLUSDT</option>
+          <option value="DOGEUSDT">DOGEUSDT</option>
+        </select>
+        <div id="price-box" class="shrink-0 px-2 py-1 rounded-md transition-all duration-200 inline-flex items-center gap-1.5 bg-[#141b2b] border border-gray-700" title="Giá mid hiện tại">
+          <span class="text-sm font-extrabold mono text-white tracking-wide" id="live-price">$0.00</span>
+          <span id="price-arrow" class="text-[10px] font-bold"></span>
         </div>
-
-        <!-- Net PnL -->
-        <div class="bg-[#080b11] px-3 py-1.5 rounded-lg border border-gray-800/80 flex items-center gap-1.5">
-          <span class="text-[10px] text-gray-400" data-i18n="nav_pnl">PnL:</span>
-          <b id="stat-pnl" class="text-sm font-bold text-emerald-400">+$0.00</b>
-          <span id="stat-pnl-pct" class="text-[10px] text-emerald-400">(+0.00%)</span>
+        <span id="price-source" class="min-w-0 truncate text-[9px] mono text-cyan-300" title="Nguồn báo giá và tuổi dữ liệu">Data: --</span>
+        <div class="hidden lg:flex items-center gap-1.5 text-[10px] mono text-gray-400 whitespace-nowrap" title="Best bid, ask và spread từ sổ lệnh">
+          <span>B <b id="book-bid" class="text-emerald-400">$0</b></span>
+          <span class="text-gray-700">/</span>
+          <span>A <b id="book-ask" class="text-rose-400">$0</b></span>
+          <span class="text-gray-700">/</span>
+          <span>Spr <b id="book-spread" class="text-amber-300">$0</b></span>
         </div>
+      </div>
+      <div class="hidden sm:block" aria-hidden="true"></div>
+      </div>
 
-        <!-- Win Rate -->
-        <div class="bg-[#080b11] px-2.5 py-1.5 rounded-lg border border-gray-800/80 hidden xl:flex items-center gap-1.5">
-          <span class="text-[10px] text-gray-400" data-i18n="nav_winrate">THẮNG:</span>
-          <b id="stat-winrate" class="text-amber-400 text-xs font-bold">0.0%</b>
+      <!-- Row 2: account telemetry scrolls independently from the controls. -->
+      <div class="flex items-center gap-2 min-w-0 border-t border-gray-800/80 pt-1.5">
+      <div class="min-w-0 flex-1 overflow-x-auto">
+      <div class="flex w-max items-center gap-2 pr-1">
+      <!-- Account figures are one grouped strip, not four competing cards. -->
+      <div class="flex items-center divide-x divide-gray-800 bg-[#080b11] border border-gray-800/80 rounded-md mono text-[10px] whitespace-nowrap">
+        <div class="px-2 py-1 flex items-baseline gap-1">
+          <span class="text-gray-500" data-i18n="nav_capital">VỐN:</span>
+          <b id="stat-balance" class="text-white text-xs font-bold">$5,000.00</b>
         </div>
-
-        <!-- Monthly Target Progress Pill -->
-        <div id="stat-monthly-target-badge" onclick="openSettingsModal(); switchSettingsTab('target');" class="bg-[#080b11] px-2.5 py-1.5 rounded-lg border border-purple-900/80 hover:border-purple-500 transition cursor-pointer hidden lg:flex items-center gap-1.5 text-[11px]" data-i18n-title="nav_target_title" title="Mục tiêu tháng: Bấm để mở cấu hình điều tiết AI">
-          <span class="text-[10px] text-purple-300 font-bold" data-i18n="nav_target">🎯 MỤC TIÊU:</span>
-          <b id="stat-monthly-progress-text" class="text-purple-300 font-bold">0.0% / 10.0%</b>
-          <span id="stat-monthly-regime-pill" class="text-[10px] px-1.5 py-0.5 rounded bg-purple-950 text-purple-300 border border-purple-800 font-bold" data-i18n="nav_target_running">ĐANG CHẠY</span>
+        <div class="px-2 py-1 flex items-baseline gap-1">
+          <span class="text-gray-500" data-i18n="nav_pnl">PnL:</span>
+          <b id="stat-pnl" class="text-xs font-bold text-emerald-400">+$0.00</b>
+          <span id="stat-pnl-pct" class="text-[10px] text-emerald-400">+0.00%</span>
         </div>
-
-        <!-- Feed Latency -->
-        <div class="bg-[#080b11] px-2.5 py-1.5 rounded-lg border border-gray-800/80 flex items-center gap-1.5 text-[11px]">
-          <span class="w-2 h-2 rounded-full bg-emerald-500 pulse-green"></span>
-          <span id="ws-status" class="text-emerald-400 font-bold hidden sm:inline">WS ⚡</span>
-          <span id="ws-latency-badge" class="text-cyan-300 mono text-[10px] font-bold">1ms</span>
-          <span id="tick-counter" class="text-gray-500 text-[10px] hidden sm:inline">0 ticks</span>
-        </div>
-
-        <!-- Funding Rate -->
-        <div class="bg-[#080b11] px-2.5 py-1.5 rounded-lg border border-cyan-900/60 hidden md:flex items-center gap-1.5 text-[11px]">
-          <span class="text-gray-400 text-[10px]">Funding:</span>
-          <span id="funding-rate-val" class="text-cyan-300 font-bold">+0.0100%</span>
-          <span id="funding-countdown" class="text-[10px] text-gray-500">00:00:00</span>
+        <div class="hidden xl:flex px-2 py-1 items-baseline gap-1">
+          <span class="text-gray-500" data-i18n="nav_winrate">THẮNG:</span>
+          <b id="stat-winrate" class="text-amber-400 font-bold">0.0%</b>
         </div>
       </div>
 
-      <!-- Right Action Suite: Ultra-Clean & Compact with More Menu -->
-      <div class="flex items-center gap-1.5 flex-nowrap">
+      <div id="stat-monthly-target-badge" onclick="openSettingsModal(); switchSettingsTab('target');" class="hidden 2xl:flex items-center gap-1.5 px-2 py-1 rounded-md border border-purple-900/80 hover:border-purple-500 transition cursor-pointer text-[10px] whitespace-nowrap" data-i18n-title="nav_target_title" title="Mục tiêu tháng: Bấm để mở cấu hình điều tiết AI">
+        <span class="text-purple-300 font-bold" data-i18n="nav_target">🎯 MỤC TIÊU:</span>
+        <b id="stat-monthly-progress-text" class="text-purple-300 font-bold">0.0% / 10.0%</b>
+        <span id="stat-monthly-regime-pill" class="text-[9px] px-1 py-0.5 rounded bg-purple-950 text-purple-300 border border-purple-800 font-bold" data-i18n="nav_target_running">ĐANG CHẠY</span>
+      </div>
+
+      <div class="flex items-center gap-1.5 px-2 py-1 rounded-md bg-[#080b11] border border-gray-800/80 text-[10px] mono whitespace-nowrap">
+        <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 pulse-green" aria-hidden="true"></span>
+        <span id="ws-status" class="text-emerald-400 font-bold">WS</span>
+        <span id="ws-latency-badge" class="text-cyan-300 mono font-bold">1ms</span>
+        <span id="tick-counter" class="text-gray-500 hidden 2xl:inline">0 ticks</span>
+        <span class="hidden xl:inline text-gray-700">|</span>
+        <span class="hidden xl:inline text-gray-500">Fund</span>
+        <span id="funding-rate-val" class="hidden xl:inline text-cyan-300 font-bold">+0.0100%</span>
+        <span id="funding-countdown" class="hidden 2xl:inline text-gray-500">00:00:00</span>
+      </div>
+      </div>
+      </div>
+
+      <!-- Controls remain visually separate from live market data. -->
+      <div class="ml-auto shrink-0 flex items-center gap-1.5 flex-nowrap">
         <!-- Exchange & Mode Pill -->
-        <div id="header-exchange-badge" onclick="openSettingsModal()" class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-[#141b2b] text-amber-300 border border-gray-700 hover:border-amber-400 cursor-pointer transition flex items-center gap-1.5 shadow-sm whitespace-nowrap" data-i18n-title="nav_exchange_title" title="Sàn giao dịch: Binance Futures (Bấm để mở cài đặt)">
+        <button type="button" id="header-exchange-badge" onclick="openSettingsModal()" aria-label="Mở cài đặt sàn và chế độ" class="px-2 py-1 rounded-md text-[10px] font-bold bg-[#141b2b] text-amber-300 border border-gray-700 hover:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 transition flex items-center gap-1.5 whitespace-nowrap" data-i18n-title="nav_exchange_title" title="Sàn giao dịch: Binance Futures (Bấm để mở cài đặt)">
           <span class="w-2 h-2 rounded-full bg-amber-400"></span>
-          <span id="header-exchange-text">BINANCE</span>
-          <span id="header-mode-badge" class="text-cyan-400 font-normal">| <span data-i18n="nav_mode_demo">MÔ PHỎNG</span></span>
-        </div>
+          <span id="header-exchange-text" class="hidden sm:inline">BINANCE</span>
+          <span id="header-mode-badge" class="hidden md:inline text-cyan-400 font-normal">| <span data-i18n="nav_mode_demo">MÔ PHỎNG</span></span>
+        </button>
 
         <!-- MORE MENU DROPDOWN (Gom toàn bộ nút phụ vào 1 Menu chức năng cực gọn) -->
         <div class="relative">
-          <button id="btn-more-menu-toggle" onclick="toggleMoreMenu(event)" class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-[#141b2b] hover:bg-[#1c263c] text-gray-200 border border-gray-700 hover:border-amber-400 transition flex items-center gap-1.5 shadow-sm cursor-pointer whitespace-nowrap" title="Menu Chức Năng Mở Rộng">
-            <span>⚡</span> <span>Chức Năng</span> <span class="text-[10px] text-gray-400">▾</span>
+          <button id="btn-more-menu-toggle" onclick="toggleMoreMenu(event)" aria-label="Mở menu chức năng" class="px-2 py-1 rounded-md text-[10px] font-bold bg-[#141b2b] hover:bg-[#1c263c] text-gray-200 border border-gray-700 hover:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 transition flex items-center gap-1.5 cursor-pointer whitespace-nowrap" title="Menu Chức Năng Mở Rộng">
+            <span>⚡</span> <span class="hidden sm:inline">Chức Năng</span> <span class="text-[10px] text-gray-400">▾</span>
           </button>
           
           <div id="dropdown-more-menu" class="hidden absolute right-0 mt-1.5 w-72 bg-[#0e1420] border border-gray-700 rounded-xl shadow-2xl py-2 z-50 text-xs backdrop-blur-md divide-y divide-gray-800/80">
-            <!-- Group 1: Grid & Auto Rotation Controls -->
+            <!-- Group 1: Grid control -->
             <div class="p-2 space-y-1">
               <div class="text-[10px] font-bold text-gray-400 uppercase tracking-wider px-2">Điều Khiển Chiến Lược</div>
               
-              <!-- Auto Grid Rotation Toggle -->
-              <button type="button" onclick="toggleAutoGrid()" class="w-full flex items-center justify-between px-2.5 py-2 rounded-lg hover:bg-purple-950/40 text-gray-200 transition cursor-pointer text-left">
-                <div class="flex items-center gap-2">
-                  <span class="text-purple-400 text-sm">🔄</span>
-                  <div>
-                    <div class="font-bold text-xs">Xoay Tua Tự Động</div>
-                    <div class="text-[10px] text-gray-400">Grid khi Sideway / Trend khi Breakout</div>
-                  </div>
-                </div>
-                <span id="auto-grid-menu-badge" class="px-2 py-0.5 text-[10px] font-bold rounded bg-purple-950 text-purple-300 border border-purple-800 mono">BẬT</span>
-              </button>
-
               <!-- Manual Grid Toggle -->
-              <button type="button" onclick="toggleGridBot()" class="w-full flex items-center justify-between px-2.5 py-2 rounded-lg hover:bg-cyan-950/40 text-gray-200 transition cursor-pointer text-left">
+              <button type="button" onclick="toggleGridBot()" aria-describedby="grid-menu-description" class="w-full flex items-center justify-between px-2.5 py-2 rounded-lg hover:bg-cyan-950/40 text-gray-200 transition cursor-pointer text-left">
                 <div class="flex items-center gap-2">
                   <span class="text-cyan-400 text-sm">⚡</span>
                   <div>
                     <div class="font-bold text-xs">Lưới Futures Grid</div>
-                    <div class="text-[10px] text-gray-400">Rải 10 tầng cân đối quanh VWAP</div>
+                    <div id="grid-menu-description" class="text-[10px] text-gray-400">Tối đa 10 tầng, chỉ khi range đủ an toàn</div>
                   </div>
                 </div>
                 <span id="grid-menu-badge" class="px-2 py-0.5 text-[10px] font-bold rounded bg-gray-800 text-gray-400 border border-gray-700 mono">TẮT</span>
@@ -225,16 +207,11 @@
         </div>
 
         <!-- Primary BOT Toggle Button -->
-        <button id="btn-toggle-bot" onclick="toggleBot()" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-600 hover:bg-amber-500 text-white shadow transition whitespace-nowrap">
+        <button id="btn-toggle-bot" onclick="toggleBot()" class="px-2.5 py-1 rounded-md text-xs font-bold bg-amber-600 hover:bg-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-300 text-white shadow transition whitespace-nowrap">
           ⏸ <span data-i18n="btn_bot">BOT</span>
         </button>
-
-        <!-- Emergency Close Position Button -->
-        <button onclick="emergencyClose()" class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-rose-900/60 hover:bg-rose-800 text-rose-200 border border-rose-700 transition whitespace-nowrap">
-          🛑 <span data-i18n="btn_close_pos">Đóng Vị Thế</span>
-        </button>
       </div>
-
+    </div>
     </div>
   </header>
 
@@ -3157,6 +3134,12 @@
     let currentTimeframe = "15m";
     let lastPrice = 0.0;
     let lastCandle = null;
+    let chartLoadVersion = 0;
+    let lastChartCandleEventTime = 0;
+    let lastChartCandleRenderAt = 0;
+    const chartTimeFormatter = new Intl.DateTimeFormat('vi-VN', {
+      timeZone: 'Asia/Ho_Chi_Minh', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+    });
     let activePosition = null;
     let activeOrderType = "MARKET";
     let currentAiSupport = 0.0;
@@ -3202,53 +3185,34 @@
     }
     setInterval(updateCandleCountdown, 1000);
 
-    // Cập nhật nến và tự động NGẮT NẾN khi hết chu kỳ khung thời gian
-    function updateChartCandle(price) {
-      if (!candlestickSeries || !lastCandle) return;
+    // Render exchange OHLCV at most once per second; price ticks never invent a candle.
+    function updateChartCandle(candle) {
+      if (!candlestickSeries || !candle) return;
+      const next = {
+        time: Number(candle.time), open: Number(candle.open), high: Number(candle.high),
+        low: Number(candle.low), close: Number(candle.close)
+      };
+      if (!Number.isFinite(next.time) || next.time <= 0 || [next.open, next.high, next.low, next.close].some(value => !Number.isFinite(value) || value <= 0)
+          || next.high < Math.max(next.open, next.close) || next.low > Math.min(next.open, next.close)) return;
 
-      const period = getTimeframePeriod(currentTimeframe);
-      const nowSec = Math.floor(Date.now() / 1000);
-      const currentCandleTime = Math.floor(nowSec / period) * period;
+      const eventTime = Number(candle.event_time) || 0;
+      const now = performance.now();
+      const isNewBar = !lastCandle || next.time > lastCandle.time;
+      const isFinalBar = Boolean(candle.is_closed) && lastCandle && next.time === lastCandle.time;
+      if ((!isNewBar && !isFinalBar && eventTime && eventTime <= lastChartCandleEventTime)
+          || (!isNewBar && !isFinalBar && now - lastChartCandleRenderAt < 1000)) return;
 
-      if (currentCandleTime > lastCandle.time) {
-        // 🕯️ NGẮT NẾN: Chu kỳ nến cũ đã kết thúc, mở nến mới
-        console.log(`[Chart] 🕯️ Ngắt nến ${currentTimeframe} tại $${price.toFixed(2)}. Mở nến mới: ${new Date(currentCandleTime * 1000).toLocaleTimeString()}`);
-
-        const newCandle = {
-          time: currentCandleTime,
-          open: price,
-          high: price,
-          low: price,
-          close: price
-        };
-        lastCandle = newCandle;
-        candlestickSeries.update(newCandle);
-
-        if (volumeSeries) {
-          volumeSeries.update({
-            time: currentCandleTime,
-            value: 0,
-            color: 'rgba(16, 185, 129, 0.25)'
-          });
-        }
-
-        // Tự động tải lại klines chuẩn từ Binance sau 1.5s để bảo đảm volume & OHLC không bị sai lệch
-        setTimeout(() => {
-          loadKlines(currentSymbol, currentTimeframe);
-        }, 1500);
-      } else {
-        // Vẫn trong chu kỳ nến hiện tại
-        lastCandle.high = Math.max(lastCandle.high, price);
-        lastCandle.low = Math.min(lastCandle.low, price);
-        lastCandle.close = price;
-        candlestickSeries.update({
-          time: lastCandle.time,
-          open: lastCandle.open,
-          high: lastCandle.high,
-          low: lastCandle.low,
-          close: lastCandle.close
+      candlestickSeries.update(next);
+      if (volumeSeries && Number.isFinite(Number(candle.volume))) {
+        volumeSeries.update({
+          time: next.time,
+          value: Number(candle.volume),
+          color: next.close >= next.open ? 'rgba(16, 185, 129, 0.25)' : 'rgba(244, 63, 94, 0.25)'
         });
       }
+      lastCandle = next;
+      lastChartCandleEventTime = eventTime;
+      lastChartCandleRenderAt = now;
     }
 
     // Initialize TradingView Lightweight Charts
@@ -3280,6 +3244,9 @@
           borderColor: '#242c3d',
           timeVisible: true,
           secondsVisible: false
+        },
+        localization: {
+          timeFormatter: time => chartTimeFormatter.format(new Date(Number(time) * 1000))
         }
       });
 
@@ -3313,9 +3280,11 @@
 
     // Load Candlestick data for selected timeframe
     async function loadKlines(sym, tf) {
+      const requestVersion = ++chartLoadVersion;
       try {
         const res = await fetch(`/api/klines?symbol=${sym}&interval=${tf}&limit=120`);
         const json = await res.json();
+        if (requestVersion !== chartLoadVersion || sym !== currentSymbol || tf !== currentTimeframe) return;
         if (json.candles && json.candles.length > 0) {
           const candleData = json.candles.map(c => ({
             time: c.time,
@@ -3334,6 +3303,8 @@
           candlestickSeries.setData(candleData);
           volumeSeries.setData(volData);
           lastCandle = candleData[candleData.length - 1];
+          lastChartCandleEventTime = 0;
+          lastChartCandleRenderAt = 0;
 
           document.getElementById('tv-watermark').innerText = `${sym} CANDLESTICKS • ${tf.toUpperCase()}`;
           tvChart.timeScale().fitContent();
@@ -3857,8 +3828,15 @@
         priceEl.innerText = `$${price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
         lastPrice = price;
 
-        // Update active candle in TradingView chart with automatic timeframe rollover (ngắt nến)
-        updateChartCandle(price);
+        const quote = data.market_quote || {};
+        const source = document.getElementById('price-source');
+        if (source) {
+          const age = quote.age_seconds === null || quote.age_seconds === undefined ? '--' : `${quote.age_seconds.toFixed(2)}s`;
+          source.innerText = `${quote.venue || 'Data: --'} • ${age}`;
+          source.title = `Exchange tick: ${quote.quote_time ? new Date(quote.quote_time * 1000).toLocaleTimeString() : '--'} • received: ${quote.received_at ? new Date(quote.received_at * 1000).toLocaleTimeString() : '--'}`;
+        }
+
+        updateChartCandle(data.chart_klines?.[currentTimeframe]);
       }
 
       // Update chart lines (Position, Pending Orders, AI Long/Short targets)
@@ -3890,15 +3868,16 @@
       const displayEquity = data.equity || data.balance;
       document.getElementById('stat-balance').innerText = `$${displayEquity.toLocaleString('en-US', {minimumFractionDigits: 2})}`;
       document.getElementById('stat-wallet-balance').innerText = `$${data.balance.toLocaleString('en-US', {minimumFractionDigits: 2})}`;
-      document.getElementById('stat-avail-margin').innerText = `$${(data.balance - (data.position ? data.position.margin : 0)).toLocaleString('en-US', {minimumFractionDigits: 2})}`;
+      const hedgeMargin = Object.values(data.hedge_positions || {}).reduce((sum, item) => sum + (item.margin || 0), 0);
+      document.getElementById('stat-avail-margin').innerText = `$${(data.balance - (data.position ? data.position.margin : 0) - hedgeMargin).toLocaleString('en-US', {minimumFractionDigits: 2})}`;
       
       const pnlEl = document.getElementById('stat-pnl');
       pnlEl.innerText = `${data.net_pnl >= 0 ? '+' : ''}$${data.net_pnl.toFixed(2)}`;
-      pnlEl.className = `text-2xl font-bold mono ${data.net_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+      pnlEl.className = `text-xs font-bold mono ${data.net_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
       
       const pnlPctEl = document.getElementById('stat-pnl-pct');
-      pnlPctEl.innerText = `${t('nav_pnl') || 'PnL'}: ${data.net_pnl_pct >= 0 ? '+' : ''}${data.net_pnl_pct.toFixed(2)}%`;
-      pnlPctEl.className = `font-semibold ${data.net_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+      pnlPctEl.innerText = `${data.net_pnl_pct >= 0 ? '+' : ''}${data.net_pnl_pct.toFixed(2)}%`;
+      pnlPctEl.className = `text-[10px] font-semibold ${data.net_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
 
       if (data.closed_pnl !== undefined) {
         document.getElementById('stat-closed-pnl').innerText = `${data.closed_pnl >= 0 ? '+' : ''}$${data.closed_pnl.toFixed(2)}`;
@@ -3908,10 +3887,10 @@
       const btn = document.getElementById('btn-toggle-bot');
       if (data.is_running) {
         btn.innerText = t('btn_toggle_bot_pause');
-        btn.className = 'px-4 py-1.5 rounded-lg text-sm font-semibold transition bg-amber-600 hover:bg-amber-500 text-white shadow-lg shadow-amber-600/20';
+        btn.className = 'px-2.5 py-1 rounded-md text-xs font-bold transition bg-amber-600 hover:bg-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-300 text-white shadow';
       } else {
         btn.innerText = t('btn_toggle_bot_start');
-        btn.className = 'px-4 py-1.5 rounded-lg text-sm font-semibold transition bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/20';
+        btn.className = 'px-2.5 py-1 rounded-md text-xs font-bold transition bg-emerald-600 hover:bg-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-300 text-white shadow';
       }
 
       // AI Brain State Rendering
@@ -4363,17 +4342,12 @@
         }
       }
 
-      // More Menu Badges (Auto-Grid, Grid Bot, SQLite)
-      const autoGridMenuBadge = document.getElementById('auto-grid-menu-badge');
-      if (autoGridMenuBadge && data.auto_grid_rotation !== undefined) {
-        autoGridMenuBadge.innerText = data.auto_grid_rotation ? 'BẬT' : 'TẮT';
-        autoGridMenuBadge.className = `px-2 py-0.5 text-[10px] font-bold rounded mono ${data.auto_grid_rotation ? 'bg-purple-950 text-purple-300 border border-purple-800' : 'bg-gray-800 text-gray-400 border border-gray-700'}`;
-      }
-
       const gridMenuBadge = document.getElementById('grid-menu-badge');
-      if (gridMenuBadge && data.is_grid_active !== undefined) {
-        gridMenuBadge.innerText = data.is_grid_active ? 'ĐANG CHẠY ⚡' : 'ĐANG TẮT';
-        gridMenuBadge.className = `px-2 py-0.5 text-[10px] font-bold rounded mono ${data.is_grid_active ? 'bg-cyan-950 text-cyan-300 border border-cyan-700' : 'bg-gray-800 text-gray-400 border border-gray-700'}`;
+      if (gridMenuBadge && data.grid_status) {
+        const gridActive = data.grid_status === 'ACTIVE';
+        const gridBlocked = data.grid_status === 'BLOCKED';
+        gridMenuBadge.innerText = gridActive ? 'BẬT ⚡' : (gridBlocked ? 'BỊ CHẶN' : (data.grid_status === 'CANCELLING' ? 'HỦY LỆNH' : 'TẮT'));
+        gridMenuBadge.className = `px-2 py-0.5 text-[10px] font-bold rounded mono ${gridActive ? 'bg-cyan-950 text-cyan-300 border border-cyan-700' : (gridBlocked ? 'bg-rose-950 text-rose-300 border border-rose-700' : 'bg-gray-800 text-gray-400 border border-gray-700')}`;
       }
 
       const menuDbInfo = document.getElementById('menu-db-info');
@@ -4721,14 +4695,15 @@
 
       // Position Card
       const pos = data.position;
+      const hedgePositions = Object.values(data.hedge_positions || {});
       const posBadge = document.getElementById('pos-badge');
       const statPos = document.getElementById('stat-position');
       const statUnrealized = document.getElementById('stat-unrealized-pnl');
       const dockPosCount = document.getElementById('dock-pos-count');
       const posCountInfo = document.getElementById('pos-count-info');
 
-      const posOrders = (pos && pos.orders) ? pos.orders : [];
-      const posOrderCount = pos ? Math.max(posOrders.length, 1) : 0;
+      const posOrders = (pos && pos.orders) ? pos.orders : hedgePositions.flatMap(item => item.orders || []);
+      const posOrderCount = pos ? Math.max(posOrders.length, 1) : posOrders.length;
       const uOrder = currentLanguage === 'vi' ? 'lệnh' : (currentLanguage === 'zh' ? '笔订单' : (posOrderCount === 1 ? 'order' : 'orders'));
 
       if (dockPosCount) {
@@ -4821,6 +4796,26 @@
             }).join('');
           }
         }
+      } else if (hedgePositions.length) {
+        const gridPnl = hedgePositions.reduce((total, item) => total + (item.unrealized_pnl || 0), 0);
+        const gridMargin = hedgePositions.reduce((total, item) => total + (item.margin || 0), 0);
+        posBadge.innerText = 'HEDGE GRID ⚖️';
+        posBadge.className = 'px-2 py-0.5 text-xs font-semibold rounded bg-cyan-950 text-cyan-300 border border-cyan-800';
+        statPos.innerHTML = `<span class="text-cyan-300 font-bold">HEDGE GRID ⚖️</span> <span class="text-sm text-gray-400 ml-1">LONG + SHORT • ${posOrderCount} ${uOrder}</span>`;
+        statUnrealized.innerHTML = `${t('pos_unrealized_prefix')}<b class="${gridPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'} mono">${gridPnl >= 0 ? '+' : ''}$${gridPnl.toFixed(2)} (gross hedge)</b>`;
+        document.getElementById('pos-entry').innerText = 'Per-grid-leg';
+        document.getElementById('pos-breakeven').innerText = 'Per side';
+        document.getElementById('pos-units').innerText = `${hedgePositions.map(item => `${item.direction === 1 ? 'L' : 'S'} ${item.units}`).join(' / ')}`;
+        document.getElementById('pos-margin').innerText = `$${gridMargin.toFixed(2)}`;
+        document.getElementById('pos-fees').innerText = 'Maker estimates';
+        document.getElementById('pos-sl').innerText = 'Native per side';
+        document.getElementById('pos-tp').innerText = 'Native per side';
+        document.getElementById('pos-liq').innerText = 'Per side';
+        document.getElementById('pos-trailing').innerText = 'Grid protection';
+        document.getElementById('pos-ai-status').innerText = 'Hedge Grid: directional entries locked';
+        document.getElementById('pos-orders-count').innerText = posOrderCount;
+        const posOrdersBody = document.getElementById('pos-orders-body');
+        if (posOrdersBody) posOrdersBody.innerHTML = posOrders.map(order => `<tr><td colspan="2" class="p-2 text-amber-300">#${order.slice_id || order.order_id}</td><td class="p-2">GRID</td><td class="p-2 ${order.direction === 1 ? 'text-emerald-400' : 'text-rose-400'}">${order.direction === 1 ? 'LONG' : 'SHORT'}</td><td class="p-2">$${Number(order.entry_price).toFixed(2)}</td><td class="p-2">${order.units}</td><td class="p-2">$${Number(order.margin).toFixed(2)}</td><td class="p-2 ${order.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${order.unrealized_pnl >= 0 ? '+' : ''}$${Number(order.unrealized_pnl || 0).toFixed(2)}</td><td colspan="2" class="p-2 text-gray-500">Protected</td></tr>`).join('');
       } else {
         if (dockPosCount) {
           dockPosCount.innerText = currentLanguage === 'vi' ? '0 lệnh' : (currentLanguage === 'zh' ? '0 笔订单' : '0 orders');
@@ -5171,10 +5166,10 @@
           const isMexc = (s.active_exchange === 'mexc');
           exText.innerText = isMexc ? 'MEXC' : 'BINANCE';
           if (isMexc) {
-            exBadge.className = 'px-2.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-500 cursor-pointer hover:border-emerald-300 transition flex items-center gap-1.5 shadow-sm';
+            exBadge.className = 'px-2 py-1 rounded-md text-[10px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-500 cursor-pointer hover:border-emerald-300 focus:outline-none focus:ring-1 focus:ring-emerald-300 transition flex items-center gap-1.5 whitespace-nowrap';
             exBadge.title = t('ex_badge_title_mexc');
           } else {
-            exBadge.className = 'px-2.5 py-1.5 rounded-lg text-xs font-bold bg-amber-950/80 text-amber-300 border border-amber-500 cursor-pointer hover:border-amber-300 transition flex items-center gap-1.5 shadow-sm';
+            exBadge.className = 'px-2 py-1 rounded-md text-[10px] font-bold bg-amber-950/80 text-amber-300 border border-amber-500 cursor-pointer hover:border-amber-300 focus:outline-none focus:ring-1 focus:ring-amber-300 transition flex items-center gap-1.5 whitespace-nowrap';
             exBadge.title = t('ex_badge_title_binance');
           }
         }
@@ -5368,18 +5363,6 @@
       }
     });
 
-    async function toggleAutoGrid() {
-      try {
-        const res = await fetch('/api/action/toggle_auto_grid', { method: 'POST' });
-        const d = await res.json();
-        const btnText = document.getElementById('auto-grid-btn-text');
-        if (btnText) btnText.innerText = d.auto_grid_rotation ? 'XOAY TUA: BẬT' : 'XOAY TUA: TẮT';
-        fetchStateRest();
-      } catch (e) {
-        console.error('Lỗi toggle auto grid:', e);
-      }
-    }
-
     async function sendAiCopilotInstruction() {
       const input = document.getElementById('copilot-user-input');
       const instruction = input ? input.value.trim() : '';
@@ -5426,8 +5409,17 @@
     }
 
     async function toggleGridBot() {
-      await fetch('/api/action/toggle_grid', { method: 'POST' });
-      fetchStateRest();
+      try {
+        const res = await fetch('/api/action/toggle_grid', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok || data.status === 'blocked') showToast(`🛑 Grid bị chặn: ${data.reason || 'Không đủ điều kiện'}`);
+        else showToast(data.message || (data.status === 'active' ? `⚡ Đã tạo ${data.children} Grid child intents` : 'Đã gửi yêu cầu dừng Grid'));
+      } catch (error) {
+        showToast('🛑 Không thể cập nhật Grid');
+        console.error('Lỗi toggle grid:', error);
+      } finally {
+        fetchStateRest();
+      }
     }
 
     async function setLeverageMode(mode, val) {
@@ -6557,7 +6549,6 @@
         nav_mode_live: "🟢 REAL TRADING",
         btn_settings: "Cài Đặt",
         btn_bot: "BOT",
-        btn_close_pos: "Đóng Vị Thế",
         btn_toggle_bot_pause: "⏸ Tạm dừng BOT",
         btn_toggle_bot_start: "▶ Khởi động BOT",
         
@@ -7217,7 +7208,6 @@
         nav_mode_live: "🟢 REAL TRADING",
         btn_settings: "Settings",
         btn_bot: "BOT",
-        btn_close_pos: "Close Pos",
         btn_toggle_bot_pause: "⏸ Pause BOT",
         btn_toggle_bot_start: "▶ Start BOT",
         
@@ -7873,7 +7863,6 @@
         nav_mode_live: "🟢 实盘交易",
         btn_settings: "系统设置",
         btn_bot: "机器人",
-        btn_close_pos: "全平仓位",
         btn_toggle_bot_pause: "⏸ 暂停机器人",
         btn_toggle_bot_start: "▶ 启动机器人",
         
@@ -9509,7 +9498,8 @@
 
     function initWebSocket() {
       const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${wsProto}//${location.host}/ws`;
+      const deskToken = window.__DESK_TOKEN__ || (document.cookie.split('; ').find(row => row.startsWith('desk_token=')) || '').split('=')[1] || '';
+      const wsUrl = `${wsProto}//${location.host}/ws${deskToken ? '?token=' + encodeURIComponent(deskToken) : ''}`;
       
       try {
         if (wsClient) {

@@ -133,7 +133,7 @@ class MonthlyTargetGovernor:
     @staticmethod
     def _is_trade_in_month(t: dict, ym_str: str) -> bool:
         """Assign realized PnL only to the close month, never the entry month."""
-        for key in ("closed_at_ts", "timestamp", "closed_at", "exit_time", "created_at"):
+        for key in ("closed_at_ts", "timestamp", "closed_at", "exit_time", "created_at", "time"):
             value = t.get(key)
             if value is None or value == "":
                 continue
@@ -254,17 +254,17 @@ class MonthlyTargetGovernor:
                 f"khóa đòn bẩy tối đa 3x và chỉ khớp các lệnh A+ (độ tin cậy >= 75%) để bảo vệ lãi."
             )
         elif self.carried_deficit_pct > 0:
-            # 2. DEFICIT CATCH-UP MODE -> Smart Adaptive Optimization
+            # 2. DEFICIT CATCH-UP MODE -> Strict Anti-Chasing (Never increase size or leverage after losses)
             regime = "DEFICIT_CATCHUP"
             protection_mode = "ADAPTIVE_CATCHUP"
-            size_multiplier = 1.15          # Controlled 15% increase for optimal Kelly
-            max_leverage_cap = 5            # Controlled max leverage
+            size_multiplier = 0.85          # Hard invariant: size_multiplier <= 1.0 (anti-target chasing)
+            max_leverage_cap = 4            # Deficit leverage strictly below normal cap
             min_ai_confidence = 65          # Filter out low-grade noise
             min_risk_reward = 2.5           # Prioritize higher R:R (1:2.5+) to compound gains safely
             rationale = (
                 f"🔄 CHẾ ĐỘ BÙ THIẾU HỤT THÁNG TRƯỚC: Tháng trước chưa đạt mục tiêu (thiếu {self.carried_deficit_pct:.1f}%). "
                 f"Mục tiêu tháng này được điều chỉnh lên {effective_target_pct:.1f}%. "
-                f"AI tự động ưu tiên các lệnh R:R cao (>= 1:2.5) và lọc tín hiệu chất lượng để bù đắp an toàn."
+                f"AI tự động ưu tiên các lệnh R:R cao (>= 1:2.5), giảm nhẹ khối lượng (0.85x) và siết đòn bẩy để bảo vệ vốn an toàn."
             )
         elif (time_progress_pct >= 60.0) and (progress_ratio < 0.35):
             # 3. BEHIND PACING -> Defensive Patience (Do NOT panic or overtrade)
@@ -291,6 +291,9 @@ class MonthlyTargetGovernor:
                 f"⚖️ ĐANG ĐÚNG TIẾN ĐỘ THÁNG: Lãi hiện tại {current_pnl_pct:+.2f}% / Mục tiêu {effective_target_pct:.1f}% "
                 f"(Ngày {day_of_month}/{days_in_month} - {time_progress_pct:.0f}% tháng). AI duy trì nhịp độ giao dịch cân bằng."
             )
+
+        # Hard Invariant: size_multiplier can NEVER exceed 1.0 (anti-target chasing)
+        size_multiplier = min(1.0, float(size_multiplier))
 
         now_str = now.strftime("%H:%M:%S")
         return MonthlyGovernorStatus(

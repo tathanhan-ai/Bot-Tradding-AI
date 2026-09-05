@@ -82,6 +82,8 @@ def snapshot_from_event(event: dict) -> MarketSnapshot:
             raise ReplayDataError("explicit provenance.kind recorded/test_only is required")
         if event.get("symbol") != "BTCUSDT":
             raise ReplayDataError("this baseline is scoped to BTCUSDT")
+        if event.get("exchange") != "binance":
+            raise ReplayDataError(f"exchange={event.get('exchange')} is not supported in replay")
         sources = {key: _seconds(value) for key, value in event["source_times"].items()}
         if any(value > now for value in sources.values()):
             raise ReplayDataError("future source timestamp")
@@ -223,13 +225,13 @@ class RecordedExecution:
             original_entry(order, quantity, fill_price)
             self.record(order.direction, quantity, fill_price, maker)
 
-        def realize(quantity, price, reason, execution_id, slice_id=None, commit=True, tp_stage=None):
+        def realize(quantity, price, reason, execution_id, slice_id=None, commit=True, tp_stage=None, **kwargs):
             if not state.current_position or execution_id in state.execution.processed_execution_ids:
                 return
             quantity = min(quantity, state.current_position["units"])
             direction = -state.current_position["direction"]
             fill_price = self.price(direction, quantity)
-            original_exit(quantity, fill_price, reason, execution_id, slice_id, commit, tp_stage=tp_stage)
+            original_exit(quantity, fill_price, reason, execution_id, slice_id, commit, tp_stage=tp_stage, **kwargs)
             self.record(direction, quantity, fill_price, False)
 
         state.execution.apply_entry, state.execution.realize = entry, realize
