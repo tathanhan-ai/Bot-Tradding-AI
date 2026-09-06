@@ -63,28 +63,18 @@ class QuantSkillsBrain:
                 description='Chưa đủ dữ liệu chuỗi thời gian để tính Hurst (cần >= 30 nến).'
             )
 
-        clean_series = series.dropna().astype(float)
+        clean_series = series.dropna().astype(float).values
         n = len(clean_series)
         eff_max_lag = min(max_lag, n // 2)
-        lags = range(4, eff_max_lag)
-        rs_values = []
+        lags = range(2, eff_max_lag)
+        tau = []
         valid_lags = []
 
         for lag in lags:
-            num_chunks = n // lag
-            if num_chunks < 2:
-                continue
-            chunk_rs = []
-            for i in range(num_chunks):
-                chunk = clean_series.iloc[i * lag : (i + 1) * lag].values
-                mean_val = np.mean(chunk)
-                cum_dev = np.cumsum(chunk - mean_val)
-                r = np.max(cum_dev) - np.min(cum_dev)
-                s = np.std(chunk, ddof=1)
-                if s > 1e-8:
-                    chunk_rs.append(r / s)
-            if chunk_rs:
-                rs_values.append(np.mean(chunk_rs))
+            diffs = clean_series[lag:] - clean_series[:-lag]
+            rms = np.sqrt(np.mean(diffs ** 2))
+            if rms > 1e-8:
+                tau.append(rms)
                 valid_lags.append(lag)
 
         if len(valid_lags) < 4:
@@ -92,12 +82,12 @@ class QuantSkillsBrain:
                 hurst_exponent=0.50,
                 regime_type='RANDOM_WALK',
                 confidence=0.50,
-                description='Không đủ điểm phân đoạn thống kê R/S.'
+                description='Không đủ điểm phân đoạn thống kê Hurst.'
             )
 
         log_lags = np.log(valid_lags)
-        log_rs = np.log(rs_values)
-        coeffs = np.polyfit(log_lags, log_rs, 1)
+        log_tau = np.log(tau)
+        coeffs = np.polyfit(log_lags, log_tau, 1)
         h = float(coeffs[0])
         h_clamped = round(max(0.05, min(0.95, h)), 2)
 

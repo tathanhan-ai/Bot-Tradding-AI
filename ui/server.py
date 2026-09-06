@@ -233,7 +233,7 @@ class LiveTradingState:
         self.freqtrade_protections = FreqtradeProtectionEngine(initial_balance=balance)
 
         # OctoBot Tentacle Matrix & Trading Modes Framework
-        self.octobot_matrix = OctoBotMatrixEngine(confidence_threshold=0.55)
+        self.octobot_matrix = OctoBotMatrixEngine(confidence_threshold=0.30)
         self.octobot_coordinator = OctoBotTradingCoordinator()
         self.octobot_consensus: Optional[MatrixConsensus] = None
         self.octobot_setup: Optional[OctoBotTradeSetup] = None
