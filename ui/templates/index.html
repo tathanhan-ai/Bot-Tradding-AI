@@ -779,6 +779,80 @@
             </div>
           </div>
         </div>
+
+        <!-- Dual-Horizon Portfolio Capital Partitioning & Monthly Target Alignment Strip -->
+        <div class="bg-[#080b11] p-3 rounded-xl border border-emerald-900/60 text-xs space-y-2">
+          <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 pb-1.5 border-b border-gray-800">
+            <span class="font-bold text-white flex items-center gap-1.5">
+              <span>🏛️</span> <span>PHÂN BỔ DANH MỤC VỐN ĐA KHUNG & ĐIỀU TIẾT LÃI MỤC TIÊU THÁNG</span>
+            </span>
+            <div class="flex items-center gap-2">
+              <span id="sleeve-active-horizon-badge" class="px-2 py-0.5 text-[10px] font-bold rounded bg-cyan-950 text-cyan-300 border border-cyan-700 mono">KHUNG 15M: NGẮN HẠN</span>
+              <button type="button" onclick="openSettingsModal(); switchSettingsTab('target');" class="text-[10px] text-purple-300 hover:text-white bg-purple-950/70 border border-purple-700/60 px-2 py-0.5 rounded transition mono cursor-pointer">
+                ⚙️ Cài đặt mục tiêu tháng
+              </button>
+            </div>
+          </div>
+          
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-2.5 text-[11px] mono">
+            <!-- Short-Term Sleeve -->
+            <div class="bg-[#121722] p-2.5 rounded-lg border border-cyan-900/50 flex flex-col justify-between">
+              <div class="flex justify-between items-center text-[10px] font-bold">
+                <span class="text-cyan-400">⚡ NGĂN NGẮN HẠN (SCALP / 1M-15M)</span>
+                <span id="sleeve-short-ratio" class="text-cyan-300">40%</span>
+              </div>
+              <div class="my-1.5 flex justify-between items-baseline">
+                <span class="text-gray-400 text-[10px]">Ngân sách:</span>
+                <b id="sleeve-short-budget" class="text-white text-xs font-bold">$2,023.88</b>
+              </div>
+              <div class="flex justify-between text-[10px] text-gray-400">
+                <span>Đã dùng: <b id="sleeve-short-used" class="text-amber-400">$0.00</b></span>
+                <span>Khả dụng: <b id="sleeve-short-avail" class="text-emerald-400">$2,023.88</b></span>
+              </div>
+              <div class="w-full bg-gray-900 h-1.5 rounded-full overflow-hidden mt-1.5 border border-gray-800">
+                <div id="sleeve-short-bar" class="h-full bg-cyan-400 transition-all" style="width: 0%"></div>
+              </div>
+            </div>
+
+            <!-- Long-Term Sleeve -->
+            <div class="bg-[#121722] p-2.5 rounded-lg border border-purple-900/50 flex flex-col justify-between">
+              <div class="flex justify-between items-center text-[10px] font-bold">
+                <span class="text-purple-400">🌊 NGĂN DÀI HẠN (SWING / 30M-1D)</span>
+                <span id="sleeve-long-ratio" class="text-purple-300">45%</span>
+              </div>
+              <div class="my-1.5 flex justify-between items-baseline">
+                <span class="text-gray-400 text-[10px]">Ngân sách:</span>
+                <b id="sleeve-long-budget" class="text-white text-xs font-bold">$2,276.86</b>
+              </div>
+              <div class="flex justify-between text-[10px] text-gray-400">
+                <span>Đã dùng: <b id="sleeve-long-used" class="text-amber-400">$0.00</b></span>
+                <span>Khả dụng: <b id="sleeve-long-avail" class="text-emerald-400">$2,276.86</b></span>
+              </div>
+              <div class="w-full bg-gray-900 h-1.5 rounded-full overflow-hidden mt-1.5 border border-gray-800">
+                <div id="sleeve-long-bar" class="h-full bg-purple-400 transition-all" style="width: 0%"></div>
+              </div>
+            </div>
+
+            <!-- Emergency Reserve Buffer -->
+            <div class="bg-[#121722] p-2.5 rounded-lg border border-emerald-900/50 flex flex-col justify-between">
+              <div class="flex justify-between items-center text-[10px] font-bold">
+                <span class="text-emerald-400">🛡️ QUỸ DỰ TRỮ KHẨN CẤP</span>
+                <span id="sleeve-reserve-ratio" class="text-emerald-300">15%</span>
+              </div>
+              <div class="my-1.5 flex justify-between items-baseline">
+                <span class="text-gray-400 text-[10px]">Bảo lưu an toàn:</span>
+                <b id="sleeve-reserve-budget" class="text-emerald-400 text-xs font-bold">$758.95</b>
+              </div>
+              <div class="text-[10px] text-gray-400 leading-tight">
+                <span>Trạng thái: </span><b id="sleeve-reserve-status" class="text-emerald-300">BẤT KHẢ XÂM PHẠM</b>
+                <div class="text-[9px] text-gray-500 mt-0.5">Bảo vệ Margin Call & nâng lên 30% khi đạt mục tiêu</div>
+              </div>
+              <div class="w-full bg-gray-900 h-1.5 rounded-full overflow-hidden mt-1.5 border border-gray-800">
+                <div id="sleeve-reserve-bar" class="h-full bg-emerald-500" style="width: 100%"></div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- -------------------------------------------------------- -->
@@ -5433,6 +5507,9 @@
       if (data.monthly_target) {
         updateMonthlyGovernorUI(data.monthly_target);
       }
+      if (data.capital_allocation) {
+        updateCapitalAllocationUI(data.capital_allocation, data.active_timeframe, data.monthly_target);
+      }
 
       // Proactively sync Live Tape height with position frame
       syncLiveTapeHeight();
@@ -6384,6 +6461,67 @@
       }
     }
 
+    function updateCapitalAllocationUI(alloc, activeTf, gov) {
+      if (!alloc) return;
+      
+      const shortBudgetEl = document.getElementById('sleeve-short-budget');
+      const shortUsedEl = document.getElementById('sleeve-short-used');
+      const shortAvailEl = document.getElementById('sleeve-short-avail');
+      const shortRatioEl = document.getElementById('sleeve-short-ratio');
+      const shortBarEl = document.getElementById('sleeve-short-bar');
+
+      const longBudgetEl = document.getElementById('sleeve-long-budget');
+      const longUsedEl = document.getElementById('sleeve-long-used');
+      const longAvailEl = document.getElementById('sleeve-long-avail');
+      const longRatioEl = document.getElementById('sleeve-long-ratio');
+      const longBarEl = document.getElementById('sleeve-long-bar');
+
+      const reserveBudgetEl = document.getElementById('sleeve-reserve-budget');
+      const reserveRatioEl = document.getElementById('sleeve-reserve-ratio');
+      const reserveStatusEl = document.getElementById('sleeve-reserve-status');
+
+      const horizonBadgeEl = document.getElementById('sleeve-active-horizon-badge');
+
+      if (alloc.short_term) {
+        if (shortBudgetEl) shortBudgetEl.innerText = `$${alloc.short_term.budget_usdt.toLocaleString('en-US', {minimumFractionDigits: 2})}`;
+        if (shortUsedEl) shortUsedEl.innerText = `$${alloc.short_term.used_usdt.toLocaleString('en-US', {minimumFractionDigits: 2})}`;
+        if (shortAvailEl) shortAvailEl.innerText = `$${alloc.short_term.available_usdt.toLocaleString('en-US', {minimumFractionDigits: 2})}`;
+        if (shortRatioEl) shortRatioEl.innerText = `${alloc.short_term.target_ratio_pct ? alloc.short_term.target_ratio_pct.toFixed(0) : 40}%`;
+        if (shortBarEl) shortBarEl.style.width = `${Math.min(100, alloc.short_term.utilization_pct || 0)}%`;
+      }
+
+      if (alloc.long_term) {
+        if (longBudgetEl) longBudgetEl.innerText = `$${alloc.long_term.budget_usdt.toLocaleString('en-US', {minimumFractionDigits: 2})}`;
+        if (longUsedEl) longUsedEl.innerText = `$${alloc.long_term.used_usdt.toLocaleString('en-US', {minimumFractionDigits: 2})}`;
+        if (longAvailEl) longAvailEl.innerText = `$${alloc.long_term.available_usdt.toLocaleString('en-US', {minimumFractionDigits: 2})}`;
+        if (longRatioEl) longRatioEl.innerText = `${alloc.long_term.target_ratio_pct ? alloc.long_term.target_ratio_pct.toFixed(0) : 45}%`;
+        if (longBarEl) longBarEl.style.width = `${Math.min(100, alloc.long_term.utilization_pct || 0)}%`;
+      }
+
+      if (reserveBudgetEl && alloc.reserve_buffer) {
+        reserveBudgetEl.innerText = `$${alloc.reserve_buffer.toLocaleString('en-US', {minimumFractionDigits: 2})}`;
+      }
+      if (reserveRatioEl && alloc.reserve_ratio_pct) {
+        reserveRatioEl.innerText = `${alloc.reserve_ratio_pct.toFixed(0)}%`;
+      }
+      if (reserveStatusEl) {
+        if (gov && gov.regime === 'TARGET_ACHIEVED') {
+          reserveStatusEl.innerText = 'ĐÃ KHÓA BẢO TOÀN LÃI (30%) 🎉';
+          reserveStatusEl.className = 'text-emerald-300 font-bold animate-pulse';
+        } else {
+          reserveStatusEl.innerText = 'BẤT KHẢ XÂM PHẠM (15%) 🛡️';
+          reserveStatusEl.className = 'text-emerald-400 font-bold';
+        }
+      }
+
+      if (horizonBadgeEl) {
+        const tf = activeTf || '15m';
+        const isShort = ['1m', '3m', '5m', '15m'].includes(String(tf).toLowerCase());
+        horizonBadgeEl.innerText = `KHUNG ${String(tf).toUpperCase()}: ${isShort ? 'NGẮN HẠN (SCALP)' : 'DÀI HẠN (SWING)'}`;
+        horizonBadgeEl.className = `px-2 py-0.5 text-[10px] font-bold rounded mono ${isShort ? 'bg-cyan-950 text-cyan-300 border border-cyan-700' : 'bg-purple-950 text-purple-300 border border-purple-700'}`;
+      }
+    }
+
     async function saveMonthlyTargetAction() {
       const targetPct = parseFloat(document.getElementById('setting-monthly-target-pct')?.value) || 10.0;
       const enabled = document.getElementById('setting-monthly-target-enabled')?.checked ?? true;
@@ -6403,6 +6541,9 @@
         alert(data.message || (currentLanguage === 'vi' ? 'Đã lưu cấu hình mục tiêu tháng thành công!' : (currentLanguage === 'zh' ? '月度目标配置已成功保存！' : 'Monthly target settings saved successfully!')));
         if (data.monthly_target) {
           updateMonthlyGovernorUI(data.monthly_target);
+        }
+        if (data.capital_allocation) {
+          updateCapitalAllocationUI(data.capital_allocation, state.active_timeframe, data.monthly_target);
         }
         fetchStateRest();
       } catch (e) {

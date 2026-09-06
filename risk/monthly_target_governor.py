@@ -48,6 +48,10 @@ class MonthlyGovernorStatus:
     min_risk_reward_ratio: float       # Min R:R required (e.g. 2.5 if catch-up, 1.5 normal)
     rationale: str                     # Vietnamese explanation for display
     updated_at: str
+    target_pnl_usdt: float = 0.0       # Target profit in USDT for this month
+    target_daily_pnl_usdt: float = 0.0 # Expected profit pacing per day in USDT
+    remaining_days: int = 1            # Days remaining in current month
+    reserve_ratio_recommended: float = 0.15 # 0.30 if TARGET_ACHIEVED, 0.15 otherwise
 
 
 class MonthlyTargetGovernor:
@@ -295,6 +299,12 @@ class MonthlyTargetGovernor:
         # Hard Invariant: size_multiplier can NEVER exceed 1.0 (anti-target chasing)
         size_multiplier = min(1.0, float(size_multiplier))
 
+        target_pnl_usdt = round(self.month_start_balance * (effective_target_pct / 100.0), 2)
+        remaining_days = max(1, days_in_month - day_of_month + 1)
+        remaining_target_usdt = max(0.0, target_pnl_usdt - month_realized_pnl)
+        target_daily_pnl_usdt = round(remaining_target_usdt / remaining_days, 2)
+        reserve_ratio_rec = 0.30 if regime == "TARGET_ACHIEVED" else 0.15
+
         now_str = now.strftime("%H:%M:%S")
         return MonthlyGovernorStatus(
             enabled=self.enabled,
@@ -316,5 +326,9 @@ class MonthlyTargetGovernor:
             min_ai_confidence=min_ai_confidence,
             min_risk_reward_ratio=min_risk_reward,
             rationale=rationale,
-            updated_at=now_str
+            updated_at=now_str,
+            target_pnl_usdt=target_pnl_usdt,
+            target_daily_pnl_usdt=target_daily_pnl_usdt,
+            remaining_days=remaining_days,
+            reserve_ratio_recommended=reserve_ratio_rec
         )

@@ -114,11 +114,24 @@ class VolatilityTargeter:
     def __init__(self, annual_vol_target_pct: float = 0.25):
         self.annual_vol_target_pct = annual_vol_target_pct
 
-    def get_daily_cash_vol_target(self, capital: float) -> float:
+    def get_daily_cash_vol_target(
+        self,
+        capital: float,
+        monthly_target_pct: Optional[float] = None,
+        governor_multiplier: float = 1.0
+    ) -> float:
         if capital <= 0:
             return 0.0
-        daily_target = (capital * self.annual_vol_target_pct) / math.sqrt(365.0)
-        return float(daily_target)
+        
+        eff_annual_vol = self.annual_vol_target_pct
+        if monthly_target_pct is not None and monthly_target_pct > 0:
+            implied_annual_return = (monthly_target_pct / 100.0) * 12.0
+            implied_vol = implied_annual_return / 1.50
+            eff_annual_vol = float(np.clip(implied_vol, 0.15, 0.40))
+
+        daily_target = (capital * eff_annual_vol) / math.sqrt(365.0)
+        gov_mult = max(0.20, min(1.0, float(governor_multiplier)))
+        return float(daily_target * gov_mult)
 
 
 class CarverPositionSizer:
@@ -314,7 +327,9 @@ class CarverSystematicEngine:
         ensemble_num_rules: int = 4,
         historical_signals: Optional[List[float]] = None,
         effective_leverage: int = 5,
-        contract_step: float = 0.001
+        contract_step: float = 0.001,
+        monthly_target_pct: Optional[float] = None,
+        governor_multiplier: float = 1.0
     ) -> CarverSystematicOutput:
         # 1. Forecast Scaling
         scalar = self.scaler.calculate_scalar(historical_signals)
@@ -324,7 +339,11 @@ class CarverSystematicEngine:
         capped_fc = self.capper.cap(scaled_fc)
 
         # 3. Volatility Targeting
-        daily_cash_vol = self.vol_targeter.get_daily_cash_vol_target(capital_usdt)
+        daily_cash_vol = self.vol_targeter.get_daily_cash_vol_target(
+            capital_usdt,
+            monthly_target_pct=monthly_target_pct,
+            governor_multiplier=governor_multiplier
+        )
         base_vol = baseline_vol_pct if (baseline_vol_pct and baseline_vol_pct > 0) else daily_vol_pct
         inst_val_vol = self.sizer.compute_instrument_value_vol(current_price, daily_vol_pct)
 

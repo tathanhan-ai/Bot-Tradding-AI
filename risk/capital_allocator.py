@@ -43,13 +43,19 @@ class PortfolioCapitalAllocator:
             return "SHORT_TERM"
         return "LONG_TERM"
 
-    def calculate_sleeve_budgets(self, total_equity: float) -> Dict[str, float]:
+    def calculate_sleeve_budgets(self, total_equity: float, reserve_ratio_override: Optional[float] = None) -> Dict[str, float]:
         eq = max(100.0, float(total_equity))
+        eff_reserve = float(reserve_ratio_override) if (reserve_ratio_override is not None and 0.05 <= reserve_ratio_override <= 0.60) else self.reserve_ratio
+        deployable = max(0.10, 1.0 - eff_reserve)
+        base_dep = self.short_term_ratio + self.long_term_ratio
+        eff_short = deployable * (self.short_term_ratio / max(0.01, base_dep))
+        eff_long = deployable * (self.long_term_ratio / max(0.01, base_dep))
         return {
-            "short_term_budget": round(eq * self.short_term_ratio, 2),
-            "long_term_budget": round(eq * self.long_term_ratio, 2),
-            "reserve_buffer": round(eq * self.reserve_ratio, 2),
-            "deployable_capital": round(eq * (self.short_term_ratio + self.long_term_ratio), 2),
+            "short_term_budget": round(eq * eff_short, 2),
+            "long_term_budget": round(eq * eff_long, 2),
+            "reserve_buffer": round(eq * eff_reserve, 2),
+            "reserve_ratio": eff_reserve,
+            "deployable_capital": round(eq * deployable, 2),
             "total_equity": round(eq, 2)
         }
 
@@ -99,9 +105,10 @@ class PortfolioCapitalAllocator:
         total_equity: float,
         active_positions: Optional[List[Dict[str, Any]]] = None,
         pending_orders: Optional[List[Any]] = None,
-        min_trade_margin: float = 30.0
+        min_trade_margin: float = 30.0,
+        reserve_ratio_override: Optional[float] = None
     ) -> AllocationResult:
-        budgets = self.calculate_sleeve_budgets(total_equity)
+        budgets = self.calculate_sleeve_budgets(total_equity, reserve_ratio_override=reserve_ratio_override)
         util = self.compute_sleeve_utilization(active_positions or [], pending_orders or [])
 
         eff_hz = "SHORT_TERM" if horizon == "SHORT_TERM" else "LONG_TERM"
@@ -123,18 +130,18 @@ class PortfolioCapitalAllocator:
                 sleeve_used=sleeve_used,
                 sleeve_available=sleeve_avail,
                 reserve_buffer=budgets["reserve_buffer"],
-                rationale=f"Ngan von {eff_hz} da het han muc (Da dung: ${sleeve_used:.1f}/${sleeve_cap:.1f}, Kha dung: ${sleeve_avail:.1f} < toi thieu ${min_trade_margin:.1f}). Dam bao 15% quy du tru an toan (${budgets['reserve_buffer']:.1f}).",
+                rationale=f"Ngăn vốn {eff_hz} đã hết hạn mức (Đã dùng: ${sleeve_used:.1f}/${sleeve_cap:.1f}, Khả dụng: ${sleeve_avail:.1f} < tối thiểu ${min_trade_margin:.1f}). Đảm bảo quỹ dự trữ an toàn ${budgets['reserve_buffer']:.1f} ({budgets['reserve_ratio']*100:.0f}%).",
                 is_throttled=True
             )
 
         if req_m <= effective_limit:
             allocated = req_m
             throttled = False
-            rationale = f"Phan bo thanh cong ${allocated:.1f} tu ngan von {eff_hz} (Han muc: ${sleeve_cap:.1f}, Kha dung: ${sleeve_avail:.1f})."
+            rationale = f"Phân bổ thành công ${allocated:.1f} từ ngăn vốn {eff_hz} (Hạn mức: ${sleeve_cap:.1f}, Khả dụng: ${sleeve_avail:.1f})."
         else:
             allocated = round(effective_limit, 0)
             throttled = True
-            rationale = f"Yeu cau ${req_m:.1f} vuot han muc con lai (${effective_limit:.1f}). Tu dong dieu tiet xuong ${allocated:.1f} de giu vung ty trong danh muc {eff_hz}."
+            rationale = f"Yêu cầu ${req_m:.1f} vượt hạn mức còn lại (${effective_limit:.1f}). Tự động điều tiết xuống ${allocated:.1f} để giữ vững tỷ trọng danh mục {eff_hz}."
 
         return AllocationResult(
             allowed=True,
@@ -153,17 +160,18 @@ class PortfolioCapitalAllocator:
         self,
         total_equity: float,
         active_positions: Optional[List[Dict[str, Any]]] = None,
-        pending_orders: Optional[List[Any]] = None
+        pending_orders: Optional[List[Any]] = None,
+        reserve_ratio_override: Optional[float] = None
     ) -> Dict[str, Any]:
-        budgets = self.calculate_sleeve_budgets(total_equity)
+        budgets = self.calculate_sleeve_budgets(total_equity, reserve_ratio_override=reserve_ratio_override)
         util = self.compute_sleeve_utilization(active_positions or [], pending_orders or [])
         return {
             "total_equity": budgets["total_equity"],
             "reserve_buffer": budgets["reserve_buffer"],
-            "reserve_ratio_pct": round(self.reserve_ratio * 100, 1),
+            "reserve_ratio_pct": round(budgets["reserve_ratio"] * 100, 1),
             "short_term": {
                 "horizon": "SHORT_TERM",
-                "target_ratio_pct": round(self.short_term_ratio * 100, 1),
+                "target_ratio_pct": round((budgets["short_term_budget"] / budgets["total_equity"]) * 100, 1),
                 "budget_usdt": budgets["short_term_budget"],
                 "used_usdt": util["short_term_used"],
                 "available_usdt": max(0.0, round(budgets["short_term_budget"] - util["short_term_used"], 2)),
@@ -171,7 +179,7 @@ class PortfolioCapitalAllocator:
             },
             "long_term": {
                 "horizon": "LONG_TERM",
-                "target_ratio_pct": round(self.long_term_ratio * 100, 1),
+                "target_ratio_pct": round((budgets["long_term_budget"] / budgets["total_equity"]) * 100, 1),
                 "budget_usdt": budgets["long_term_budget"],
                 "used_usdt": util["long_term_used"],
                 "available_usdt": max(0.0, round(budgets["long_term_budget"] - util["long_term_used"], 2)),

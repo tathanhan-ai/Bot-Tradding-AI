@@ -61,6 +61,8 @@ class AIOrderResearchResult:
     strategy_horizon: str = "SHORT_TERM"
     is_vpin_throttled: bool = False
     sleeve_allocation: Optional[Dict[str, Any]] = None
+    monthly_regime: str = "ON_TRACK"
+    monthly_size_multiplier: float = 1.0
 
 
 class AIOrderResearcher:
@@ -99,7 +101,8 @@ class AIOrderResearcher:
         visual_hft_metrics: Optional[Any] = None,
         jesse_metrics: Optional[Any] = None,
         octobot_consensus: Optional[Any] = None,
-        pending_orders: Optional[List[Any]] = None
+        pending_orders: Optional[List[Any]] = None,
+        monthly_governor_status: Optional[Any] = None
     ) -> AIOrderResearchResult:
         """
         Synthesizes all quantitative signals on every tick to recommend the exact optimal order.
@@ -393,7 +396,19 @@ class AIOrderResearcher:
         is_macro_aligned = (opt_side == "BUY" and w_bias == "BULL" and m_bias == "BULL") or \
                            (opt_side == "SELL" and w_bias == "BEAR" and m_bias == "BEAR")
 
+        # Monthly Governor Controls Extraction
+        gov_enabled = bool(monthly_governor_status and getattr(monthly_governor_status, "enabled", False))
+        gov_regime = getattr(monthly_governor_status, "regime", "ON_TRACK") if gov_enabled else "ON_TRACK"
+        gov_size_mult = float(getattr(monthly_governor_status, "size_multiplier", 1.0)) if gov_enabled else 1.0
+        gov_lev_cap = int(getattr(monthly_governor_status, "max_leverage_cap", 10)) if gov_enabled else 10
+        gov_min_rr = float(getattr(monthly_governor_status, "min_risk_reward_ratio", 1.5)) if gov_enabled else 1.5
+        gov_target_pct = float(getattr(monthly_governor_status, "effective_target_pct", 10.0)) if gov_enabled else None
+        gov_reserve_override = float(getattr(monthly_governor_status, "reserve_ratio_recommended", 0.15)) if gov_enabled else 0.15
+
         lev = effective_leverage if (effective_leverage and effective_leverage > 0) else 5
+        if gov_enabled:
+            lev = min(lev, gov_lev_cap)
+
         if is_macro_counter:
             # Defensive guard: Cap leverage to 6x max for counter-macro-trend setups and enforce Maker entry
             lev = min(lev, 6)
@@ -401,6 +416,17 @@ class AIOrderResearcher:
                 opt_type = "POST_ONLY"
                 fee_tier = "MAKER (0.02%)"
                 order_rationale = f"🛡️ PHÒNG THỦ VĨ MÔ 1W/1M: Lệnh {opt_side} ngược sóng Tuần/Tháng. AI chuyển về POST_ONLY đón giá chiết khấu, hạ đòn bẩy an toàn còn {lev}x!"
+        elif gov_enabled and gov_regime == "TARGET_ACHIEVED":
+            if opt_type == "MARKET":
+                opt_type = "POST_ONLY"
+                fee_tier = "MAKER (0.02%)"
+                order_rationale = f"🎉 BẢO TOÀN LỢI NHUẬN THÁNG: Đã đạt mục tiêu tháng! AI chuyển về POST_ONLY đón giá chiết khấu, khóa đòn bẩy an toàn {lev}x bảo vệ lãi!"
+
+        # Enforce Governor Minimum R:R for deficit catch-up / behind schedule
+        if gov_enabled and opt_side != "SIDEWAY" and rr_ratio < gov_min_rr and risk_dist > 0:
+            rr_ratio = gov_min_rr
+            reward_dist = risk_dist * gov_min_rr
+            struct_tp = round(entry_price + reward_dist if opt_side == "BUY" else entry_price - reward_dist, 1)
 
         risk_budget = min(current_balance * 0.02, max(30.0, current_balance * 0.015))
         sl_pct = max(risk_dist / entry_price, 0.005)
@@ -480,7 +506,9 @@ class AIOrderResearcher:
             current_position_contracts=curr_contracts,
             current_drawdown_pct=cro_dd,
             effective_leverage=lev,
-            contract_step=0.001
+            contract_step=0.001,
+            monthly_target_pct=gov_target_pct,
+            governor_multiplier=gov_size_mult
         )
 
         # Harmonize optimal_margin with Carver Volatility-Targeted Position Sizing
@@ -498,6 +526,10 @@ class AIOrderResearcher:
             elif exp_usdt <= 0:
                 kelly_mult = 0.50 # Penalty for negative expectancy edge
             optimal_margin = round(max(30.0, optimal_margin * kelly_mult), 0)
+
+        # Monthly Governor Position Size Throttling (0.5x if target achieved, 0.85x if deficit catchup)
+        if gov_enabled and gov_size_mult < 1.0:
+            optimal_margin = round(max(30.0, optimal_margin * gov_size_mult), 0)
 
         # 12. VisualHFT Microstructure Safety & Defensive Small-Capital Throttling
         vpin_val = getattr(visual_hft_metrics, "vpin", 0.35) if visual_hft_metrics else 0.35
@@ -564,7 +596,8 @@ class AIOrderResearcher:
             total_equity=current_balance,
             active_positions=[current_position] if current_position else [],
             pending_orders=pending_orders or [],
-            min_trade_margin=30.0
+            min_trade_margin=30.0,
+            reserve_ratio_override=gov_reserve_override
         )
         optimal_margin = alloc_res.allocated_margin
         sleeve_info = {
@@ -646,5 +679,7 @@ class AIOrderResearcher:
             twap_interval_seconds=twap_interval,
             strategy_horizon=strategy_horizon,
             is_vpin_throttled=is_vpin_throttled,
-            sleeve_allocation=sleeve_info
+            sleeve_allocation=sleeve_info,
+            monthly_regime=gov_regime,
+            monthly_size_multiplier=gov_size_mult
         )

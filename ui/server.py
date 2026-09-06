@@ -315,6 +315,11 @@ class LiveTradingState:
             auto_compensate_deficit=compensate_def,
             storage=self.storage
         )
+        self.capital_allocator = PortfolioCapitalAllocator(
+            short_term_ratio=0.40,
+            long_term_ratio=0.45,
+            reserve_ratio=0.15
+        )
 
         self.active_timeframe = "15m"
         self.data_map: Dict[str, pd.DataFrame] = {}
@@ -887,7 +892,8 @@ class LiveTradingState:
             visual_hft_metrics=snapshot.context["hft"],
             jesse_metrics=self.jesse_engine.compute_metrics(),
             octobot_consensus=self.octobot_consensus,
-            pending_orders=self.order_manager.pending_orders
+            pending_orders=self.order_manager.pending_orders,
+            monthly_governor_status=self.monthly_governor.evaluate(self.current_balance, self.trades)
         )
 
 
@@ -1193,6 +1199,12 @@ class LiveTradingState:
                 return StageOutcome.unavailable(verdict.availability_reason, **details)
             if not verdict.approved:
                 return StageOutcome.veto(verdict.council_rationale, **details)
+            governor = self.monthly_governor.evaluate(self.current_balance, self.trades)
+            if governor.enabled and hasattr(verdict, "confidence") and verdict.confidence < governor.min_ai_confidence:
+                return StageOutcome.veto(
+                    f"Độ tin cậy Hội đồng AI ({verdict.confidence}%) chưa đạt ngưỡng tối thiểu ({governor.min_ai_confidence}%) cho chế độ {governor.protection_mode}",
+                    **details
+                )
             return StageOutcome("PASS", verdict.council_rationale, details=details)
 
         def sizing_gate(order: CandidateOrder, _snapshot: MarketSnapshot) -> StageOutcome:
@@ -1301,8 +1313,12 @@ class LiveTradingState:
             if position:
                 skew = self.hummingbot_skew.calculate_reservation_price(_snapshot.price, position, self.indicators.get("atr"), self.current_balance)
                 quantity *= max(0.0, 1.0 - abs(skew.inventory_ratio_q))
-            if abs(order.take_profit - order.entry_price) / stop_distance < 1.0:
-                return StageOutcome.veto("Risk/reward below 1:1")
+
+            rr_val = abs(order.take_profit - order.entry_price) / max(0.1, stop_distance)
+            min_required_rr = governor.min_risk_reward_ratio if governor.enabled else 1.0
+            if rr_val < min_required_rr:
+                return StageOutcome.veto(f"Tỷ lệ R:R ({rr_val:.2f}:1) chưa đạt yêu cầu tối thiểu ({min_required_rr:.1f}:1) cho chế độ {governor.protection_mode}")
+
             adjusted_margin_cap = order.metadata.get("copilot_max_margin")
             if adjusted_margin_cap is not None:
                 try:
@@ -1328,6 +1344,33 @@ class LiveTradingState:
             quantity = math.floor((quantity + 1e-12) / min_step) * min_step
             if quantity <= 0:
                 return StageOutcome.veto(f"final risk clamp below {order.symbol} minimum step")
+
+            # Dual-Horizon Capital Sleeve Allocation Enforcement
+            order_tf = order.metadata.get("timeframe", self.active_timeframe)
+            order_hz = self.capital_allocator.get_horizon(order_tf)
+            order.metadata["horizon"] = order_hz
+            order.metadata["timeframe"] = order_tf
+
+            req_margin = quantity * order.entry_price / max(1, proposal.leverage)
+            alloc_res = self.capital_allocator.evaluate_allocation(
+                horizon=order_hz,
+                requested_margin=req_margin,
+                total_equity=self.current_balance,
+                active_positions=[position] if position else [],
+                pending_orders=pending,
+                min_trade_margin=30.0,
+                reserve_ratio_override=governor.reserve_ratio_recommended if governor.enabled else None
+            )
+            if not alloc_res.allowed:
+                return StageOutcome.veto(alloc_res.rationale)
+
+            if alloc_res.is_throttled and alloc_res.allocated_margin < req_margin and req_margin > 0:
+                sleeve_scale = alloc_res.allocated_margin / req_margin
+                quantity = max(min_step, quantity * sleeve_scale)
+                quantity = math.floor((quantity + 1e-12) / min_step) * min_step
+                if quantity <= 0:
+                    return StageOutcome.veto(f"Hạn mức ngăn vốn {order_hz} không đủ cho khối lượng tối thiểu {min_step}")
+
             margin = quantity * order.entry_price / proposal.leverage
             return StageOutcome.pass_(
                 f"Carver delta {contracts:+.4f}; CRO/monthly clamp applied",
@@ -2055,7 +2098,9 @@ class LiveTradingState:
                 "twap_interval_seconds": getattr(self.order_research, "twap_interval_seconds", 6),
                 "strategy_horizon": getattr(self.order_research, "strategy_horizon", "SHORT_TERM"),
                 "is_vpin_throttled": getattr(self.order_research, "is_vpin_throttled", False),
-                "sleeve_allocation": getattr(self.order_research, "sleeve_allocation", {})
+                "sleeve_allocation": getattr(self.order_research, "sleeve_allocation", {}),
+                "monthly_regime": getattr(self.order_research, "monthly_regime", "ON_TRACK"),
+                "monthly_size_multiplier": getattr(self.order_research, "monthly_size_multiplier", 1.0)
             },
             "carver_systematic": (
                 self.order_research.carver_output if (self.order_research and self.order_research.carver_output) else {
@@ -2224,6 +2269,12 @@ class LiveTradingState:
                 "models": self.vibe_swarm.agent_models
             },
             "monthly_target": asdict(self.monthly_governor.evaluate(self.current_balance, self.trades)),
+            "capital_allocation": self.capital_allocator.export_state(
+                self.current_balance,
+                [self.current_position] if self.current_position else [],
+                self.order_manager.pending_orders,
+                reserve_ratio_override=self.monthly_governor.evaluate(self.current_balance, self.trades).reserve_ratio_recommended if self.monthly_governor.enabled else None
+            ),
             "decision_mode": getattr(self, "decision_mode", "AI_REQUIRED")
         }
 
@@ -2828,7 +2879,13 @@ async def update_monthly_target(payload: dict):
     return {
         "status": "ok",
         "message": f"Đã lưu cấu hình mục tiêu tháng: {target_pct:.1f}% (Tự động điều tiết an toàn: BẬT, Tự động bù thiếu hụt: {'BẬT' if auto_compensate else 'TẮT'})",
-        "monthly_target": asdict(gov_status)
+        "monthly_target": asdict(gov_status),
+        "capital_allocation": state.capital_allocator.export_state(
+            state.current_balance,
+            [state.current_position] if state.current_position else [],
+            state.order_manager.pending_orders,
+            reserve_ratio_override=gov_status.reserve_ratio_recommended if gov_status.enabled else None
+        )
     }
 
 
