@@ -49,15 +49,17 @@ class GridPlanner:
         values = (price, best_bid, best_ask, support, resistance, vwap, atr, adx, hurst)
         if any(not math.isfinite(float(value)) for value in values) or min(price, best_bid, best_ask, support, resistance, vwap, atr) <= 0:
             return GridPlan("NO_TRADE", "Grid inputs are incomplete or invalid")
-        if regime != "RANGING_SIDEWAY" or recommended_strategy != "TWO_WAY_RANGE":
-            return GridPlan("NO_TRADE", "Regime is not a two-way range")
-        if adx >= 22.0:
+        acceptable_regimes = ("RANGING_SIDEWAY", "SIDEWAY_GRID", "CHOPPY", "NEUTRAL", "EQUILIBRIUM_FAIR")
+        acceptable_strategies = ("TWO_WAY_RANGE", "GRID_BOT", "SIDEWAY_GRID", "MEAN_REVERSION_GRID", "SMC_ORDER_BLOCK")
+        if regime not in acceptable_regimes or recommended_strategy not in acceptable_strategies:
+            return GridPlan("NO_TRADE", f"Regime {regime} / {recommended_strategy} is not a two-way range")
+        if adx >= 28.0:
             return GridPlan("NO_TRADE", f"ADX {adx:.1f} indicates directional expansion")
-        if hurst > 0.55:
+        if hurst > 0.62:
             return GridPlan("NO_TRADE", f"Hurst {hurst:.2f} indicates persistent trend")
         if not support < vwap < resistance or not support < price < resistance:
             return GridPlan("NO_TRADE", "Range geometry does not contain live price and VWAP")
-        if abs(price - vwap) > atr * 0.25:
+        if abs(price - vwap) > atr * 0.75:
             return GridPlan("NO_TRADE", "Live price is too far from VWAP for a balanced hedge grid")
 
         width = resistance - support

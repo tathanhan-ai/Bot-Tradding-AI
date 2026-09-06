@@ -37,19 +37,24 @@ class EnsembleResult:
 class TrendFollowingSubEngine:
     def evaluate(
         self,
-        df_15m: pd.DataFrame,
-        df_1h: pd.DataFrame,
-        current_price: float,
+        df_15m: Optional[pd.DataFrame] = None,
+        df_1h: Optional[pd.DataFrame] = None,
+        current_price: float = 0.0,
         df_1w: Optional[pd.DataFrame] = None,
-        df_1M: Optional[pd.DataFrame] = None
+        df_1M: Optional[pd.DataFrame] = None,
+        base_tf: str = "15m",
+        htf_tf: str = "1h",
+        **kwargs
     ) -> StrategyVote:
-        if df_15m is None or len(df_15m) < 30:
-            return StrategyVote("Xu Hướng (Trend Following)", 0, 0.0, 0.3, "Chưa đủ dữ liệu nến.")
+        df_base = df_15m if df_15m is not None else kwargs.get("df_base")
+        df_htf = df_1h if df_1h is not None else kwargs.get("df_htf")
+        if df_base is None or len(df_base) < 30:
+            return StrategyVote(f"Xu Hướng ({base_tf.upper()})", 0, 0.0, 0.3, "Chưa đủ dữ liệu nến.")
 
-        close = df_15m["close"]
+        close = df_base["close"]
         ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
         ema50 = float(close.ewm(span=50, adjust=False).mean().iloc[-1])
-        macro_ema100 = float(df_1h["close"].ewm(span=100, adjust=False).mean().iloc[-1]) if (df_1h is not None and len(df_1h) >= 50) else ema50
+        macro_ema100 = float(df_htf["close"].ewm(span=100, adjust=False).mean().iloc[-1]) if (df_htf is not None and len(df_htf) >= 50) else ema50
 
         # Secular / Macro Weekly & Monthly EMA calculation
         weekly_ema20 = None
@@ -60,7 +65,7 @@ class TrendFollowingSubEngine:
         if df_1M is not None and len(df_1M) >= 8:
             monthly_ema10 = float(df_1M["close"].ewm(span=10, adjust=False).mean().iloc[-1])
 
-        # MACD (12, 26, 9) on 15m
+        # MACD (12, 26, 9) on base timeframe
         ema12 = close.ewm(span=12, adjust=False).mean()
         ema26 = close.ewm(span=26, adjust=False).mean()
         macd_line = ema12 - ema26
@@ -91,58 +96,58 @@ class TrendFollowingSubEngine:
                 # Strong Secular Bull Tailwind
                 score = round(min(100.0, 85.0 + (15.0 if macd_hist > 0 else 0.0)), 1)
                 return StrategyVote(
-                    "Xu Hướng (Trend Following)", 1, score, 0.40,
-                    f"🚀 Đại Chu Kỳ Tăng: Giá (${current_price:,.1f}) trên cụm EMA20/50/100 & thuận sóng Tuần{macro_suffix}, MACD histogram ({macd_hist:+.1f}) bùng nổ đà tăng."
+                    f"Xu Hướng ({base_tf.upper()})", 1, score, 0.40,
+                    f"🚀 Đại Chu Kỳ Tăng: Giá (${current_price:,.1f}) trên cụm EMA20/50/{htf_tf.upper()} & thuận sóng Tuần{macro_suffix}, MACD histogram ({macd_hist:+.1f}) bùng nổ đà tăng."
                 )
             else:
                 # Counter-trend Relief Rally under Macro Resistance
                 score = round(min(65.0, 50.0 + (10.0 if macd_hist > 0 else 0.0)), 1)
                 return StrategyVote(
-                    "Xu Hướng (Trend Following)", 1, score, 0.28,
-                    f"⚠️ Sóng Hồi Tăng (Gặp Cản Tuần): Giá vượt EMA20/50 15m nhưng dưới EMA20 Tuần{macro_suffix}. Khuyến nghị chốt lời từng phần, phòng thủ cản vĩ mô."
+                    f"Xu Hướng ({base_tf.upper()})", 1, score, 0.30,
+                    f"⚠️ Sóng Hồi Ngắn Hạn: Giá trên EMA20/50 ({base_tf.upper()}) nhưng dưới cản vĩ mô Tuần{macro_suffix} -> Ưu tiên Take Profit nhanh."
                 )
         elif bearish_alignment:
             if macro_bear:
-                # Strong Secular Bear Headwind
+                # Secular Bear Market Dominance
                 score = round(max(-100.0, -85.0 - (15.0 if macd_hist < 0 else 0.0)), 1)
                 return StrategyVote(
-                    "Xu Hướng (Trend Following)", -1, score, 0.40,
-                    f"🩸 Đại Chu Kỳ Giảm: Giá (${current_price:,.1f}) dưới cụm EMA20/50/100 & thuận sóng xả Tuần{macro_suffix}, MACD histogram ({macd_hist:+.1f}) xác nhận đà rơi."
+                    f"Xu Hướng ({base_tf.upper()})", -1, score, 0.40,
+                    f"🔻 Xu Hướng Giảm Sâu: Giá thủng hoàn toàn EMA20/50/{htf_tf.upper()} & thuận sóng giảm vĩ mô{macro_suffix}, MACD ({macd_hist:+.1f}) chịu áp lực xả mạnh."
                 )
             else:
-                # Counter-trend Dip in Secular Bull
                 score = round(max(-65.0, -50.0 - (10.0 if macd_hist < 0 else 0.0)), 1)
                 return StrategyVote(
-                    "Xu Hướng (Trend Following)", -1, score, 0.28,
-                    f"📉 Nhịp Rũ Ngắn Hạn (Nền Tăng Tuần): Giá giảm thủng EMA 15m nhưng vẫn giữ trên EMA20 Tuần{macro_suffix}. Canh điểm kết thúc nhịp chỉnh để Buy the Dip."
+                    f"Xu Hướng ({base_tf.upper()})", -1, score, 0.30,
+                    f"⚠️ Nhịp Rũ Ngắn Hạn: Giá dưới EMA20/50 ({base_tf.upper()}) trong xu hướng vĩ mô tăng -> Cẩn trọng bẫy gấu (Bear Trap)."
                 )
         elif above_ema20 and macd_hist > 0:
             score = round(min(65.0, 35.0 + (macd_hist * 0.5)), 1)
             return StrategyVote(
-                "Xu Hướng (Trend Following)", 1, score, 0.25,
+                f"Xu Hướng ({base_tf.upper()})", 1, score, 0.25,
                 f"Chớm Tăng Hồi: Giá vượt EMA20 (${ema20:,.1f}), MACD phân kỳ dương ({macd_hist:+.1f}){macro_suffix} -> Đang hình thành sóng tăng."
             )
         elif below_ema20 and macd_hist < 0:
             score = round(max(-65.0, -35.0 + (macd_hist * 0.5)), 1)
             return StrategyVote(
-                "Xu Hướng (Trend Following)", -1, score, 0.25,
+                f"Xu Hướng ({base_tf.upper()})", -1, score, 0.25,
                 f"Chớm Giảm Điều Chỉnh: Giá thủng EMA20 (${ema20:,.1f}), MACD phân kỳ âm ({macd_hist:+.1f}){macro_suffix} -> Đang chịu áp lực giảm."
             )
         else:
             neutral_score = round(max(-15.0, min(15.0, (current_price - ema20) / max(ema20, 1.0) * 1000.0)), 1)
             dir_val = 1 if neutral_score > 5 else (-1 if neutral_score < -5 else 0)
             return StrategyVote(
-                "Xu Hướng (Trend Following)", dir_val, neutral_score, 0.15,
+                f"Xu Hướng ({base_tf.upper()})", dir_val, neutral_score, 0.15,
                 f"Tích Lũy Đi Ngang: EMA20 (${ema20:,.1f}) & EMA50 (${ema50:,.1f}) co cụm, MACD phẳng ({macd_hist:+.1f}){macro_suffix} -> Thị trường nén biên."
             )
 
 
 class MeanReversionSubEngine:
-    def evaluate(self, df_15m: pd.DataFrame, current_price: float) -> StrategyVote:
-        if df_15m is None or len(df_15m) < 30:
-            return StrategyVote("Bắt Đảo Chiều (Mean Reversion)", 0, 0.0, 0.25, "Đang nạp nến...")
+    def evaluate(self, df_15m: Optional[pd.DataFrame] = None, current_price: float = 0.0, base_tf: str = "15m", **kwargs) -> StrategyVote:
+        df_base = df_15m if df_15m is not None else kwargs.get("df_base")
+        if df_base is None or len(df_base) < 30:
+            return StrategyVote(f"Bắt Đảo Chiều ({base_tf.upper()})", 0, 0.0, 0.25, "Đang nạp nến...")
 
-        close = df_15m["close"]
+        close = df_base["close"]
         bb_mid = close.rolling(20).mean().iloc[-1]
         bb_std = close.rolling(20).std().iloc[-1]
         bb_upper = bb_mid + 2.0 * bb_std
@@ -155,20 +160,21 @@ class MeanReversionSubEngine:
 
         # Oversold Snapback (Long opportunity)
         if current_price <= bb_lower or rsi <= 30.0:
-            return StrategyVote("Bắt Đảo Chiều (Mean Reversion)", 1, 80.0, 0.35, f"Giá chạm cận dưới Bollinger Bands, RSI={rsi:.1f} quá bán cực đại $\rightarrow$ Kỳ vọng hồi phục về trục giữa.")
+            return StrategyVote(f"Bắt Đảo Chiều ({base_tf.upper()})", 1, 80.0, 0.35, f"Giá chạm cận dưới Bollinger Bands, RSI={rsi:.1f} quá bán cực đại $\rightarrow$ Kỳ vọng hồi phục về trục giữa.")
         # Overbought Snapback (Short opportunity)
         elif current_price >= bb_upper or rsi >= 70.0:
-            return StrategyVote("Bắt Đảo Chiều (Mean Reversion)", -1, -80.0, 0.35, f"Giá chạm dải trên Bollinger Bands, RSI={rsi:.1f} quá mua cực đại $\rightarrow$ Kỳ vọng điều chỉnh về trục giữa.")
+            return StrategyVote(f"Bắt Đảo Chiều ({base_tf.upper()})", -1, -80.0, 0.35, f"Giá chạm dải trên Bollinger Bands, RSI={rsi:.1f} quá mua cực đại $\rightarrow$ Kỳ vọng điều chỉnh về trục giữa.")
         else:
-            return StrategyVote("Bắt Đảo Chiều (Mean Reversion)", 0, 0.0, 0.2, f"RSI ở mức trung tính {rsi:.1f}, dao động trong lòng dải Bollinger Bands.")
+            return StrategyVote(f"Bắt Đảo Chiều ({base_tf.upper()})", 0, 0.0, 0.2, f"RSI ở mức trung tính {rsi:.1f}, dao động trong lòng dải Bollinger Bands.")
 
 
 class LiquiditySweepSubEngine:
-    def evaluate(self, df_15m: pd.DataFrame, current_price: float) -> StrategyVote:
-        if df_15m is None or len(df_15m) < 20:
-            return StrategyVote("Săn Rút Chân Cá Mập (Liquidity Sweep)", 0, 0.0, 0.2, "Đang nạp nến...")
+    def evaluate(self, df_15m: Optional[pd.DataFrame] = None, current_price: float = 0.0, base_tf: str = "15m", **kwargs) -> StrategyVote:
+        df_base = df_15m if df_15m is not None else kwargs.get("df_base")
+        if df_base is None or len(df_base) < 20:
+            return StrategyVote(f"Săn Rút Chân ({base_tf.upper()})", 0, 0.0, 0.2, "Đang nạp nến...")
 
-        last_candle = df_15m.iloc[-1]
+        last_candle = df_base.iloc[-1]
         c_open = last_candle["open"]
         c_high = last_candle["high"]
         c_low = last_candle["low"]
@@ -177,16 +183,16 @@ class LiquiditySweepSubEngine:
 
         lower_wick = min(c_open, c_close) - c_low
         upper_wick = c_high - max(c_open, c_close)
-        vol_ratio = (last_candle["volume"] / df_15m["volume"].iloc[-10:].mean()) if len(df_15m) >= 10 else 1.0
+        vol_ratio = (last_candle["volume"] / df_base["volume"].iloc[-10:].mean()) if len(df_base) >= 10 else 1.0
 
         # Bullish Pinbar / Sweep low
         if (lower_wick / candle_range) >= 0.55 and vol_ratio >= 1.4:
-            return StrategyVote("Săn Rút Chân Cá Mập (Liquidity Sweep)", 1, 90.0, 0.25, f"Xuất hiện nến rút chân bẫy gấu (Volume x{vol_ratio:.1f}), cá mập quét thanh khoản đáy rồi mua thốc lên.")
+            return StrategyVote(f"Săn Rút Chân ({base_tf.upper()})", 1, 90.0, 0.25, f"Xuất hiện nến rút chân bẫy gấu (Volume x{vol_ratio:.1f}), cá mập quét thanh khoản đáy rồi mua thốc lên.")
         # Bearish Shooting Star / Sweep high
         elif (upper_wick / candle_range) >= 0.55 and vol_ratio >= 1.4:
-            return StrategyVote("Săn Rút Chân Cá Mập (Liquidity Sweep)", -1, -90.0, 0.25, f"Xuất hiện nến rút râu trên (Volume x{vol_ratio:.1f}), cá mập xả hàng từ chối giá cao.")
+            return StrategyVote(f"Săn Rút Chân ({base_tf.upper()})", -1, -90.0, 0.25, f"Xuất hiện nến rút râu trên (Volume x{vol_ratio:.1f}), cá mập xả hàng từ chối giá cao.")
         else:
-            return StrategyVote("Săn Rút Chân Cá Mập (Liquidity Sweep)", 0, 0.0, 0.15, "Thân nến tiêu chuẩn, không có dấu hiệu quét thanh khoản bất thường.")
+            return StrategyVote(f"Săn Rút Chân ({base_tf.upper()})", 0, 0.0, 0.15, "Thân nến tiêu chuẩn, không có dấu hiệu quét thanh khoản bất thường.")
 
 
 from strategy.multi_candle_patterns import MultiTimeframeCandleStrategyEngine, MTFCandleConfluenceResult
@@ -196,11 +202,11 @@ class MultiCandlePatternSubEngine:
     def __init__(self):
         self.engine = MultiTimeframeCandleStrategyEngine()
 
-    def evaluate(self, data_map: Dict[str, pd.DataFrame], current_price: float) -> Tuple[StrategyVote, MTFCandleConfluenceResult]:
-        res = self.engine.evaluate(data_map, current_price)
+    def evaluate(self, data_map: Dict[str, pd.DataFrame], current_price: float, active_timeframe: str = "15m") -> Tuple[StrategyVote, MTFCandleConfluenceResult]:
+        res = self.engine.evaluate(data_map, current_price, active_timeframe=active_timeframe)
         dir_val = 1 if res.confluence_score >= 25.0 else (-1 if res.confluence_score <= -25.0 else 0)
         vote = StrategyVote(
-            name="Mẫu Hình Nến Đa Khung (MTF Patterns)",
+            name=f"Mẫu Hình Nến Đa Khung ({active_timeframe.upper()} Focus)",
             direction=dir_val,
             score=res.confluence_score,
             weight=0.25,
@@ -221,17 +227,33 @@ class EnsembleCoordinator:
         self,
         data_map: Dict[str, pd.DataFrame],
         current_price: float,
-        market_regime: str
+        market_regime: str,
+        active_timeframe: str = "15m"
     ) -> EnsembleResult:
-        df_15m = data_map.get("15m")
-        df_1h = data_map.get("1h")
+        htf_map = {
+            "1m": "15m", "3m": "15m", "5m": "1h", "15m": "1h",
+            "30m": "1h", "1h": "4h", "4h": "1d", "1d": "1w", "1w": "1M", "1M": "1M"
+        }
+        htf_tf = htf_map.get(active_timeframe, "1h")
+
+        df_base = data_map.get(active_timeframe)
+        if df_base is None or df_base.empty:
+            df_base = data_map.get("15m")
+            active_timeframe = "15m"
+
+        df_htf = data_map.get(htf_tf)
+        if df_htf is None or df_htf.empty:
+            df_htf = data_map.get("1h")
+            if df_htf is None or df_htf.empty:
+                df_htf = df_base
+
         df_1w = data_map.get("1w")
         df_1M = data_map.get("1M")
 
-        v_trend = self.trend_engine.evaluate(df_15m, df_1h, current_price, df_1w=df_1w, df_1M=df_1M)
-        v_reversion = self.reversion_engine.evaluate(df_15m, current_price)
-        v_sweep = self.sweep_engine.evaluate(df_15m, current_price)
-        v_candle, candle_res = self.candle_engine.evaluate(data_map, current_price)
+        v_trend = self.trend_engine.evaluate(df_base, df_htf, current_price, df_1w=df_1w, df_1M=df_1M, base_tf=active_timeframe, htf_tf=htf_tf)
+        v_reversion = self.reversion_engine.evaluate(df_base, current_price, base_tf=active_timeframe)
+        v_sweep = self.sweep_engine.evaluate(df_base, current_price, base_tf=active_timeframe)
+        v_candle, candle_res = self.candle_engine.evaluate(data_map, current_price, active_timeframe=active_timeframe)
         self.last_candle_confluence = candle_res
 
         # Dynamic Weight Rebalancing across all 4 quant strategies (Total weights = 1.0)
@@ -259,6 +281,16 @@ class EnsembleCoordinator:
             v_reversion.weight = 0.25
             v_sweep.weight = 0.25
             mode = "BALANCED_ENSEMBLE"
+
+        # Adaptive Timeframe Fine-Tuning
+        if active_timeframe in ("1m", "3m"):
+            v_sweep.weight += 0.05
+            v_candle.weight += 0.05
+            v_trend.weight = max(0.05, v_trend.weight - 0.10)
+        elif active_timeframe in ("4h", "1d", "1w"):
+            v_trend.weight += 0.10
+            v_sweep.weight = max(0.05, v_sweep.weight - 0.05)
+            v_reversion.weight = max(0.05, v_reversion.weight - 0.05)
 
         # Calculate Weighted Consensus Score (-100 to +100)
         consensus_score = (

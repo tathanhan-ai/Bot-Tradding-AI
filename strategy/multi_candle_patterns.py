@@ -292,29 +292,43 @@ class MultiTimeframeCandleStrategyEngine:
     Combines timeframe weights to produce an institutional confluence signal.
     """
     TIMEFRAME_WEIGHTS = {
-        "1m": 0.10,   # Fast entry trigger / micro timing
-        "5m": 0.15,   # Day trade confirmation / immediate momentum
-        "15m": 0.25,  # Primary swing structure
-        "1h": 0.20,   # Intraday macro structure
-        "1w": 0.15,   # Institutional Weekly Cycle
-        "1M": 0.15    # Secular Monthly Trend
+        "1m": 0.08,
+        "3m": 0.08,
+        "5m": 0.12,
+        "15m": 0.18,
+        "30m": 0.10,
+        "1h": 0.16,
+        "4h": 0.10,
+        "1d": 0.08,
+        "1w": 0.05,
+        "1M": 0.05,
     }
 
     def __init__(self):
         self.detector = CandlePatternDetector()
 
-    def evaluate(self, data_map: Dict[str, pd.DataFrame], current_price: float) -> MTFCandleConfluenceResult:
-        patterns: Dict[str, CandlePatternResult] = {}
-        for tf in ("1m", "5m", "15m", "1h", "1w", "1M"):
-            df_tf = data_map.get(tf)
-            patterns[tf] = self.detector.detect_patterns(df_tf, timeframe=tf)
+    def evaluate(self, data_map: Dict[str, pd.DataFrame], current_price: float, active_timeframe: str = "15m") -> MTFCandleConfluenceResult:
+        base_weights = dict(self.TIMEFRAME_WEIGHTS)
+        if active_timeframe in base_weights:
+            base_weights[active_timeframe] += 0.15
 
-        # 1. Macro HTF Direction (1h, 1w, 1M)
+        valid_tfs = [tf for tf, df in data_map.items() if df is not None and not df.empty and tf in base_weights]
+        total_w = sum(base_weights[tf] for tf in valid_tfs) or 1.0
+
+        patterns: Dict[str, CandlePatternResult] = {}
+        for tf in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"):
+            df_tf = data_map.get(tf)
+            if df_tf is not None and not df_tf.empty:
+                patterns[tf] = self.detector.detect_patterns(df_tf, timeframe=tf)
+
+        # 1. Macro HTF Direction (1h, 4h, 1d, 1w, 1M)
         p_1h = patterns.get("1h")
+        p_4h = patterns.get("4h")
+        p_1d = patterns.get("1d")
         p_1w = patterns.get("1w")
         p_1M = patterns.get("1M")
 
-        htf_biases = [p.bias for p in [p_1h, p_1w, p_1M] if p and p.bias != "NEUTRAL"]
+        htf_biases = [p.bias for p in [p_1h, p_4h, p_1d, p_1w, p_1M] if p and p.bias != "NEUTRAL"]
         if htf_biases.count("BULLISH") > htf_biases.count("BEARISH"):
             macro_bias = "BULLISH"
         elif htf_biases.count("BEARISH") > htf_biases.count("BULLISH"):
@@ -328,7 +342,7 @@ class MultiTimeframeCandleStrategyEngine:
         bearish_count = 0
 
         for tf, pat in patterns.items():
-            w = self.TIMEFRAME_WEIGHTS.get(tf, 0.15)
+            w = (base_weights.get(tf, 0.10) / total_w)
             direction_mult = 1.0 if pat.bias == "BULLISH" else (-1.0 if pat.bias == "BEARISH" else 0.0)
             weighted_score += direction_mult * pat.strength * w
 

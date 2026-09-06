@@ -722,10 +722,11 @@ class LiveTradingState:
         self.update_leverage_advice()
 
         regime = self.ai_verdict.regime if self.ai_verdict else "RANGING_SIDEWAY"
+        act_tf = snapshot.context.get("active_timeframe", getattr(self, "active_timeframe", "15m"))
         self.ensemble_result = self.ensemble_coordinator.evaluate_ensemble(
-            frames, price, regime
+            frames, price, regime, active_timeframe=act_tf
         )
-        self.candle_confluence = self.ensemble_coordinator.last_candle_confluence or self.multi_candle_engine.evaluate(frames, price)
+        self.candle_confluence = self.ensemble_coordinator.last_candle_confluence or self.multi_candle_engine.evaluate(frames, price, active_timeframe=act_tf)
 
         atr_val = self.indicators.get("atr") or (price * 0.008)
         atr_pct = (atr_val / price * 100.0) if price > 0 else 0.8
@@ -872,20 +873,43 @@ class LiveTradingState:
             nonlocal research
             self.analyze_snapshot(_snapshot)
             research = self.order_research
-            if order.source == "auto" and not order.metadata.get("copilot_revalidated"):
+            if order.source in ("auto", "auto-grid") and order.order_type != "GRID" and not order.metadata.get("copilot_revalidated"):
                 if research.recommended_side not in ("BUY", "SELL"):
-                    return StageOutcome.veto("No directional research setup")
-                order.direction = 1 if research.recommended_side == "BUY" else -1
-                order.order_type = research.recommended_type
-                order.entry_price = research.optimal_price
-                order.stop_loss = research.structural_sl
-                order.take_profit = research.structural_tp
+                    verdict = self.ai_verdict
+                    regime = getattr(verdict, "regime", "")
+                    strategy = getattr(verdict, "recommended_strategy", "")
+                    ensemble_verdict = getattr(self.ensemble_result, "consensus_verdict", "") if self.ensemble_result else ""
+                    if (
+                        not getattr(self, "is_grid_active", False)
+                        and not getattr(self, "current_position", None)
+                        and not getattr(self, "hedge_positions", {})
+                        and (
+                            ensemble_verdict == "SIDEWAY_GRID"
+                            or regime in ("RANGING_SIDEWAY", "SIDEWAY_GRID", "CHOPPY", "NEUTRAL", "EQUILIBRIUM_FAIR")
+                            or strategy in ("TWO_WAY_RANGE", "GRID_BOT", "SIDEWAY_GRID", "MEAN_REVERSION_GRID")
+                        )
+                    ):
+                        atr = float(self.indicators.get("atr") or _snapshot.price * .008)
+                        order.order_type = "GRID"
+                        order.source = "auto-grid"
+                        order.direction = 0
+                        order.entry_price = _snapshot.price
+                        order.stop_loss = _snapshot.price - 2 * atr
+                        order.take_profit = _snapshot.price + 2 * atr
+                    else:
+                        return StageOutcome.veto("No directional research setup")
+                else:
+                    order.direction = 1 if research.recommended_side == "BUY" else -1
+                    order.order_type = research.recommended_type
+                    order.entry_price = research.optimal_price
+                    order.stop_loss = research.structural_sl
+                    order.take_profit = research.structural_tp
             validation = self.deterministic_validation
             return StageOutcome.pass_(validation.validation_notes, regime=self.ai_verdict.regime, confidence=self.ai_verdict.confidence)
 
         def alpha_regime_gate(order: CandidateOrder, _snapshot: MarketSnapshot) -> StageOutcome:
             matrix = self.octobot_consensus
-            if order.order_type == "GRID" and order.source == "manual-grid":
+            if order.order_type == "GRID" and order.source in ("manual-grid", "auto-grid", "auto"):
                 verdict = self.ai_verdict
                 atr = float(self.indicators.get("atr") or _snapshot.price * .008)
                 plan = GridPlanner.plan_hedge_grid(
@@ -969,7 +993,7 @@ class LiveTradingState:
             leverage = min(order.leverage, self.get_effective_leverage())
             governor = self.monthly_governor.evaluate(self.current_balance, self.trades)
             leverage = min(leverage, governor.max_leverage_cap)
-            if order.order_type == "GRID" and order.source == "manual-grid":
+            if order.order_type == "GRID" and order.source in ("manual-grid", "auto-grid", "auto"):
                 plan = order.metadata.get("grid_plan", {})
                 legs = plan.get("legs", []) if isinstance(plan, dict) else []
                 if not legs or len(legs) % 2:
@@ -1092,7 +1116,7 @@ class LiveTradingState:
         def memory_gate(order: CandidateOrder, _snapshot: MarketSnapshot) -> StageOutcome:
             if order.metadata.get("reduce_only"):
                 return StageOutcome.pass_("Risk-reducing inventory exit; no new entry memory exposure")
-            if order.order_type == "GRID" and order.source == "manual-grid":
+            if order.order_type == "GRID" and order.source in ("manual-grid", "auto-grid", "auto"):
                 for direction in (1, -1):
                     check = self.trade_memory.query_similarity_against_losses(direction, self.indicators.get("rsi", 50.0),
                         getattr(self.ai_verdict, "vwap_status", "EQUILIBRIUM_FAIR"), self.order_flow_verdict.absorption_signal if self.order_flow_verdict else "NONE")
@@ -1223,6 +1247,14 @@ class LiveTradingState:
         return self.submit_candidate(candidate)
 
     def queue_approved_candidate(self, candidate, research=None, execution_group=""):
+        if candidate.order_type == "GRID":
+            plan = candidate.metadata.get("grid_plan")
+            if plan and plan.get("legs"):
+                result = self.execution.queue_grid(candidate, plan["legs"])
+                self.is_grid_active = result.get("status") == "active"
+                self.grid_status = "ACTIVE" if self.is_grid_active else "BLOCKED"
+                self.grid_plan = {**plan, "grid_plan_id": candidate.order_id, "status": self.grid_status}
+                return result
         if candidate.metadata.get("reduce_only"):
             position = self.current_position
             if not position or candidate.direction != -position["direction"] or candidate.quantity > position["units"]:
@@ -1401,6 +1433,7 @@ class LiveTradingState:
         if now - self.last_auto_order_time < 15.0:
             return
         self.last_auto_order_time = now
+
         candidate = self.build_candidate_order(0, "AUTO", current_price, 0.0, 0.0, "auto")
         decision = self.evaluate_candidate_pipeline(candidate)
         if decision.approved:
@@ -2244,9 +2277,20 @@ def set_timeframe(timeframe: str = "15m"):
     if timeframe not in state.data_map:
         return {"status": "error", "message": "No closed history for timeframe"}
     state.active_timeframe = timeframe
+    state.update_indicators()
+    try:
+        snap = state.build_market_snapshot()
+        state.analyze_snapshot(snap)
+    except Exception:
+        pass
     state.last_auto_order_time = 0
     state.persist_current_state()
-    return {"status": "ok", "active_timeframe": timeframe}
+    return {
+        "status": "ok",
+        "active_timeframe": timeframe,
+        "indicators": state.indicators,
+        "regime": state.ai_verdict.regime if state.ai_verdict else "NEUTRAL"
+    }
 
 
 @app.post("/api/action/place_dual_bracket")
