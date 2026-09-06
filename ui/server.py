@@ -54,6 +54,7 @@ from strategy.ai_position_manager import AIPositionCoordinator, AIPositionDecisi
 from strategy.ensemble_strategy import EnsembleCoordinator, EnsembleResult
 from risk.risk_manager import FuturesRiskManager
 from risk.dynamic_leverage import DynamicLeverageEngine, LeverageAdvice
+from risk.capital_allocator import PortfolioCapitalAllocator, AllocationResult
 from risk.order_manager import OrderQueueManager, FuturesOrder
 from risk.fee_and_spread_engine import SpreadFeeEngine, BINANCE_VIP_TIERS, MEXC_VIP_TIERS
 from risk.ai_order_researcher import AIOrderResearcher, AIOrderResearchResult
@@ -195,6 +196,7 @@ class LiveTradingState:
 
         # Dynamic Leverage Strategy
         self.leverage_engine = DynamicLeverageEngine()
+        self.capital_allocator = PortfolioCapitalAllocator()
         self.leverage_mode = "AI_AUTO"  # 'AI_AUTO' or 'MANUAL'
         self.manual_leverage = 3
         self.leverage_advice: Optional[LeverageAdvice] = None
@@ -665,14 +667,29 @@ class LiveTradingState:
         return repaired
 
     def update_leverage_advice(self):
-        atr_val = self.indicators["atr"] or (self.live_price * 0.008)
+        atr_val = (self.indicators.get("atr") if self.indicators else None) or (self.live_price * 0.008)
         regime = self.ai_verdict.regime if self.ai_verdict else "RANGING_SIDEWAY"
         conf = self.ai_verdict.confidence if self.ai_verdict else 75
+        hft = self.visual_hft.get_metrics() if hasattr(self, "visual_hft") else None
+        vpin_val = getattr(hft, "vpin", 0.20) if hft else 0.20
+        resil = getattr(hft, "market_resilience_pct", 85.0) if hft else 85.0
+        cro = getattr(self.risk_manager, "ai_cro", None)
+        dd_pct = getattr(cro, "current_drawdown_pct", 0.0) if cro else 0.0
+        res = getattr(self, "order_research", None)
+        hz = getattr(res, "strategy_horizon", "SHORT_TERM") if res else "SHORT_TERM"
+        win_p = getattr(res, "win_probability", 70) if res else 70
+
         self.leverage_advice = self.leverage_engine.calculate_optimal_leverage(
             current_price=self.live_price,
             atr=atr_val,
             regime=regime,
-            confidence=conf
+            confidence=conf,
+            horizon=hz,
+            vpin=vpin_val,
+            market_resilience_pct=resil,
+            current_drawdown_pct=dd_pct,
+            win_probability=win_p,
+            timeframe=self.active_timeframe
         )
 
     def get_effective_leverage(self) -> int:
@@ -907,14 +924,31 @@ class LiveTradingState:
                     order.order_type = "POST_ONLY"
                 order.metadata["hft_toxic_margin_cap"] = True
                 return StageOutcome.pass_(f"Microstructure warmup ({metrics.completed_bucket_count}/5 buckets); adaptive Maker risk scaling applied")
-            if metrics.vpin >= 0.88 or metrics.market_resilience_pct < 30.0:
-                return StageOutcome.veto(f"Critical toxic flow: VPIN={metrics.vpin:.2f}, resilience={metrics.market_resilience_pct:.1f}%")
-            if metrics.is_toxic_flow:
-                # Elevated VPIN [0.70, 0.88): adaptively enforce Maker execution & defensive margin cap
-                if order.order_type == "MARKET":
-                    order.order_type = "POST_ONLY"
-                order.metadata["hft_toxic_margin_cap"] = True
-                return StageOutcome.pass_(f"Elevated VPIN={metrics.vpin:.2f}; adaptive Maker risk scaling applied")
+            # Check for extreme liquidity vacuum (flash crash risk)
+            if metrics.market_resilience_pct < 20.0:
+                return StageOutcome.veto(f"Critical liquidity drought: resilience={metrics.market_resilience_pct:.1f}%")
+
+            # Defensive Small-Capital Throttling when VPIN is elevated / toxic:
+            # User requirement: "Đối với VPIN (Toxic Flow): nếu dòng tiền bất ổn quá cao mà vị thế ổn thì có thể điều tiết lệnh với vốn nhỏ an toàn"
+            is_high_vpin = (metrics.vpin >= 0.70) or metrics.is_toxic_flow
+            if is_high_vpin:
+                is_throttled_defensive = order.metadata.get("is_vpin_throttled", False) or (order.order_type in ("POST_ONLY", "LIMIT", "SCALE_RATIO"))
+                # If order is already throttled with defensive small capital and passive maker execution, pass it safely
+                if is_throttled_defensive and metrics.market_resilience_pct >= 25.0:
+                    if order.order_type == "MARKET":
+                        order.order_type = "POST_ONLY"
+                    order.metadata["hft_toxic_margin_cap"] = True
+                    order.metadata["throttled_toxic_entry"] = True
+                    return StageOutcome.pass_(f"Điều tiết vốn nhỏ an toàn (VPIN={metrics.vpin:.2f}, Resilience={metrics.market_resilience_pct:.1f}%, Maker thụ động)")
+                elif metrics.vpin >= 0.90 and metrics.market_resilience_pct < 30.0:
+                    return StageOutcome.veto(f"Critical toxic flow without resilience: VPIN={metrics.vpin:.2f}, resilience={metrics.market_resilience_pct:.1f}%")
+                else:
+                    # Enforce Maker execution & defensive margin cap
+                    if order.order_type == "MARKET":
+                        order.order_type = "POST_ONLY"
+                    order.metadata["hft_toxic_margin_cap"] = True
+                    return StageOutcome.pass_(f"Elevated VPIN={metrics.vpin:.2f}; adaptive Maker risk scaling applied")
+
             if metrics.liquidity_drought_warning:
                 return StageOutcome.veto(f"liquidity drought resilience={metrics.market_resilience_pct:.1f}%")
             return StageOutcome.pass_(f"L2 healthy; VPIN={metrics.vpin:.2f}")
@@ -1674,6 +1708,9 @@ class LiveTradingState:
                 "execution_horizon": getattr(res, "execution_horizon", "IMMEDIATE"),
                 "win_probability": getattr(res, "win_probability", 75),
                 "carver_contracts": getattr(res, "carver_contracts", 0.0),
+                "strategy_horizon": getattr(res, "strategy_horizon", "SHORT_TERM"),
+                "is_vpin_throttled": getattr(res, "is_vpin_throttled", False),
+                "sleeve_allocation": getattr(res, "sleeve_allocation", {})
             })
             if res.optimal_margin > 0:
                 candidate.margin = res.optimal_margin
@@ -1887,8 +1924,19 @@ class LiveTradingState:
                 "ai_leverage": self.leverage_advice.leverage if self.leverage_advice else 3,
                 "rationale": self.leverage_advice.rationale if self.leverage_advice else "Đang phân tích đòn bẩy an toàn...",
                 "liq_distance_pct": self.leverage_advice.est_liq_distance_pct if self.leverage_advice else 30.0,
-                "safety_rating": self.leverage_advice.safety_rating if self.leverage_advice else "AN TOÀN"
+                "safety_rating": self.leverage_advice.safety_rating if self.leverage_advice else "AN TOÀN",
+                "horizon": self.leverage_advice.horizon if self.leverage_advice else "SHORT_TERM",
+                "base_leverage": self.leverage_advice.base_leverage if self.leverage_advice else 5,
+                "vpin_impact": self.leverage_advice.vpin_impact if self.leverage_advice else "CLEAN",
+                "drawdown_impact": self.leverage_advice.drawdown_impact if self.leverage_advice else "NONE",
+                "liq_clearance_ratio": self.leverage_advice.liq_clearance_ratio if self.leverage_advice else 3.0,
+                "factor_breakdown": self.leverage_advice.factor_breakdown if self.leverage_advice else {}
             },
+            "capital_allocation": self.capital_allocator.export_state(
+                self.current_balance,
+                [self.current_position] if self.current_position else [],
+                self.order_manager.pending_orders
+            ) if hasattr(self, "capital_allocator") else {},
             "book_ticker": self.fee_engine.get_state_dict(),
             "market_quote": {
                 "exchange": self.active_exchange,
@@ -1970,7 +2018,10 @@ class LiveTradingState:
                 "octobot_tradable": getattr(self.order_research, "octobot_tradable", False),
                 "active_timeframe": getattr(self.order_research, "active_timeframe", self.active_timeframe),
                 "dca_ladder_step": getattr(self.order_research, "dca_ladder_step", 0.005),
-                "twap_interval_seconds": getattr(self.order_research, "twap_interval_seconds", 6)
+                "twap_interval_seconds": getattr(self.order_research, "twap_interval_seconds", 6),
+                "strategy_horizon": getattr(self.order_research, "strategy_horizon", "SHORT_TERM"),
+                "is_vpin_throttled": getattr(self.order_research, "is_vpin_throttled", False),
+                "sleeve_allocation": getattr(self.order_research, "sleeve_allocation", {})
             },
             "carver_systematic": (
                 self.order_research.carver_output if (self.order_research and self.order_research.carver_output) else {

@@ -19,6 +19,7 @@ from strategy.hummingbot_inventory_skew import HummingbotInventorySkewEngine, In
 from strategy.carver_systematic_engine import CarverSystematicEngine, CarverSystematicOutput
 from strategy.quant_skills_brain import QuantSkillsBrain
 from risk.structural_sl_tp import StructuralRiskCalculator, StructuralTradeSetup
+from risk.capital_allocator import PortfolioCapitalAllocator, AllocationResult
 
 
 @dataclass
@@ -57,11 +58,15 @@ class AIOrderResearchResult:
     active_timeframe: str = "15m"
     dca_ladder_step: float = 0.005
     twap_interval_seconds: int = 6
+    strategy_horizon: str = "SHORT_TERM"
+    is_vpin_throttled: bool = False
+    sleeve_allocation: Optional[Dict[str, Any]] = None
 
 
 class AIOrderResearcher:
     def __init__(self):
         self.structural_calculator = StructuralRiskCalculator(atr_buffer_mult=0.3)
+        self.capital_allocator = PortfolioCapitalAllocator()
         self.smc_engine = SmartMoneyEngine(atr_mult=1.2)
         self.vwap_engine = InstitutionalVWAPEngine()
         self.hummingbot_skew = HummingbotInventorySkewEngine(risk_aversion_gamma=0.15, refresh_tolerance_pct=0.08)
@@ -482,24 +487,49 @@ class AIOrderResearcher:
                 kelly_mult = 0.50 # Penalty for negative expectancy edge
             optimal_margin = round(max(30.0, optimal_margin * kelly_mult), 0)
 
-        # 12. VisualHFT Microstructure Safety & Order Gating
+        # 12. VisualHFT Microstructure Safety & Defensive Small-Capital Throttling
         vpin_val = getattr(visual_hft_metrics, "vpin", 0.35) if visual_hft_metrics else 0.35
         tox_regime = getattr(visual_hft_metrics, "toxicity_regime", "CLEAN") if visual_hft_metrics else "CLEAN"
         is_toxic = getattr(visual_hft_metrics, "is_toxic_flow", False) if visual_hft_metrics else False
         resil_pct = getattr(visual_hft_metrics, "market_resilience_pct", 85.0) if visual_hft_metrics else 85.0
         lob_20_imb = getattr(visual_hft_metrics, "lob_imbalance_20", 0.0) if visual_hft_metrics else 0.0
 
+        strategy_horizon = self.capital_allocator.get_horizon(active_timeframe)
+        is_vpin_throttled = False
         hft_note = ""
-        if is_toxic:
-            # Dangerous informed toxic flow sweep in progress:
-            # Downgrade market taker orders to post-only maker to avoid adverse slippage
-            if opt_type == "MARKET":
-                opt_type = "POST_ONLY"
-                fee_tier = "MAKER (0.02%)"
-            lev = min(lev, 3) # Cap leverage to 3x max
-            optimal_margin = round(optimal_margin * 0.50, 0) # Cut position in half
-            win_prob = max(50, win_prob - 12)
-            hft_note = f" | 🚨 VisualHFT Toxic Flow VPIN={vpin_val:.2f} (Hạ đòn bẩy {lev}x, giảm 50% margin)"
+
+        # Check if VPIN is elevated or critical
+        is_high_vpin = (vpin_val >= 0.70) or is_toxic
+        has_solid_structure = (win_prob >= 55) and (resil_pct >= 30.0) and (rr_ratio >= 1.0)
+
+        if is_high_vpin:
+            is_vpin_throttled = True
+            if has_solid_structure:
+                # User requirement: "Đối với VPIN (Toxic Flow): nếu dòng tiền bất ổn quá cao mà vị thế ổn
+                # thì có thể điều tiết lệnh với vốn nhỏ an toàn , nên định rõ lại cái vấn đề này"
+                # DEFENSIVE SMALL-CAPITAL THROTTLED ENTRY:
+                if opt_type == "MARKET":
+                    opt_type = "POST_ONLY"
+                    fee_tier = "MAKER (0.02%)"
+                # Cap leverage strictly to safe 2x (max 3x)
+                lev = min(lev, 2 if vpin_val >= 0.85 else 3)
+                # Throttle margin to 30% of normal allocation ("vốn nhỏ an toàn")
+                optimal_margin = round(max(30.0, optimal_margin * 0.30), 0)
+                # Widen structural SL buffer by 30% to withstand toxic volatility sweeps
+                if opt_side == "BUY" and struct_sl > 0:
+                    struct_sl = round(entry_price - (entry_price - struct_sl) * 1.30, 2)
+                elif opt_side == "SELL" and struct_sl > 0:
+                    struct_sl = round(entry_price + (struct_sl - entry_price) * 1.30, 2)
+                hft_note = f" | 🛡️ Điều Tiết Vốn Nhỏ An Toàn (VPIN={vpin_val:.2f}, Margin 30%, Đòn bẩy {lev}x, Maker thụ động)"
+            else:
+                # Weak structure + high toxicity: heavy defensive downscaling
+                if opt_type == "MARKET":
+                    opt_type = "POST_ONLY"
+                    fee_tier = "MAKER (0.02%)"
+                lev = min(lev, 2)
+                optimal_margin = round(max(25.0, optimal_margin * 0.20), 0)
+                win_prob = max(50, win_prob - 15)
+                hft_note = f" | 🚨 Cảnh Báo VPIN={vpin_val:.2f} + Thanh Khoản Thấp: Ép vốn tối thiểu $25, đòn bẩy {lev}x"
         elif resil_pct < 35.0:
             lev = min(lev, 4)
             hft_note = f" | 💧 VisualHFT Khô Thanh Khoản (Resilience {resil_pct:.0f}%)"
@@ -514,6 +544,24 @@ class AIOrderResearcher:
         octo_tradable = getattr(octobot_consensus, "is_tradable", True) if octobot_consensus else True
         if not octo_tradable:
             win_prob = max(50, win_prob - 10)
+
+        # 14. Dual-Horizon Portfolio Capital Allocation
+        alloc_res = self.capital_allocator.evaluate_allocation(
+            horizon=strategy_horizon,
+            requested_margin=optimal_margin,
+            total_equity=current_balance,
+            min_trade_margin=30.0
+        )
+        optimal_margin = alloc_res.allocated_margin
+        sleeve_info = {
+            "horizon": strategy_horizon,
+            "allocated_margin": alloc_res.allocated_margin,
+            "sleeve_budget": alloc_res.sleeve_budget,
+            "sleeve_used": alloc_res.sleeve_used,
+            "sleeve_available": alloc_res.sleeve_available,
+            "reserve_buffer": alloc_res.reserve_buffer,
+            "is_throttled": alloc_res.is_throttled
+        }
 
         carver_dict = {
             "raw_forecast": carver_out.raw_forecast,
@@ -544,7 +592,7 @@ class AIOrderResearcher:
         else:
             final_rationale = (
                 f"{order_rationale} "
-                f"Vị thế: {opt_side} quanh ${entry_price:,.1f} | SL cấu trúc: ${struct_sl:,.1f} (-${risk_dist:,.1f}) | "
+                f"Vị thế [{strategy_horizon}]: {opt_side} quanh ${entry_price:,.1f} | SL cấu trúc: ${struct_sl:,.1f} (-${risk_dist:,.1f}) | "
                 f"TP mục tiêu: ${struct_tp:,.1f} (+${reward_dist:,.1f}) | Tỷ lệ R:R chuẩn {rr_ratio}:1 ({win_prob}% xác suất){skew_note}{hft_note}."
             )
 
@@ -581,5 +629,8 @@ class AIOrderResearcher:
             octobot_tradable=octo_tradable,
             active_timeframe=active_timeframe,
             dca_ladder_step=dca_step,
-            twap_interval_seconds=twap_interval
+            twap_interval_seconds=twap_interval,
+            strategy_horizon=strategy_horizon,
+            is_vpin_throttled=is_vpin_throttled,
+            sleeve_allocation=sleeve_info
         )
