@@ -52,6 +52,13 @@ class AIRegimeVerdict:
     supply_zone: Optional[Tuple[float, float]] = None
     active_fvgs: List[Dict[str, Any]] = field(default_factory=list)
     last_sweep_info: str = ""
+    dist_demand_pct: float = 0.0
+    dist_supply_pct: float = 0.0
+    is_testing_ob: bool = False
+    tested_ob_type: str = "NONE"
+    dist_vwap_pct: float = 0.0
+    dist_vwap_usd: float = 0.0
+    vwap_sigma_dev: float = 0.0
 
 
 class AIQuantBrain:
@@ -447,6 +454,16 @@ class AIQuantBrain:
         verdict.hurst_regime = primary_ind.get("hurst_regime", "RANDOM_WALK")
         verdict.garman_klass_vol = primary_ind.get("gk_vol", 0.0)
         verdict.volatility_regime = primary_ind.get("vol_regime", "NORMAL")
+
+        # Real-time SMC & VWAP distance metrics
+        verdict.dist_demand_pct = smc_res.dist_demand_pct
+        verdict.dist_supply_pct = smc_res.dist_supply_pct
+        verdict.is_testing_ob = smc_res.is_testing_ob
+        verdict.tested_ob_type = smc_res.tested_ob_type
+        if vwap_res:
+            verdict.dist_vwap_pct = vwap_res.dist_vwap_pct
+            verdict.dist_vwap_usd = vwap_res.dist_vwap_usd
+            verdict.vwap_sigma_dev = vwap_res.current_deviation
 
         self.last_verdict = verdict
         return verdict

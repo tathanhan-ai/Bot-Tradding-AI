@@ -148,24 +148,42 @@ class MeanReversionSubEngine:
             return StrategyVote(f"Bắt Đảo Chiều ({base_tf.upper()})", 0, 0.0, 0.25, "Đang nạp nến...")
 
         close = df_base["close"]
-        bb_mid = close.rolling(20).mean().iloc[-1]
-        bb_std = close.rolling(20).std().iloc[-1]
+        bb_mid = float(close.rolling(20).mean().iloc[-1])
+        bb_std = float(close.rolling(20).std().iloc[-1])
         bb_upper = bb_mid + 2.0 * bb_std
         bb_lower = bb_mid - 2.0 * bb_std
+        bb_band_width = max(1e-6, bb_upper - bb_lower)
 
         delta = close.diff()
         gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean().iloc[-1]
         loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean().iloc[-1]
-        rsi = 100 - (100 / (1 + (gain / (loss if loss > 0 else 1e-6))))
+        rsi = float(100 - (100 / (1 + (gain / (loss if loss > 0 else 1e-6)))))
 
-        # Oversold Snapback (Long opportunity)
-        if current_price <= bb_lower or rsi <= 30.0:
-            return StrategyVote(f"Bắt Đảo Chiều ({base_tf.upper()})", 1, 80.0, 0.35, f"Giá chạm cận dưới Bollinger Bands, RSI={rsi:.1f} quá bán cực đại $\rightarrow$ Kỳ vọng hồi phục về trục giữa.")
-        # Overbought Snapback (Short opportunity)
-        elif current_price >= bb_upper or rsi >= 70.0:
-            return StrategyVote(f"Bắt Đảo Chiều ({base_tf.upper()})", -1, -80.0, 0.35, f"Giá chạm dải trên Bollinger Bands, RSI={rsi:.1f} quá mua cực đại $\rightarrow$ Kỳ vọng điều chỉnh về trục giữa.")
+        eff_price = float(current_price) if current_price > 0 else float(close.iloc[-1])
+        # Continuous Bollinger %B: 0.0 = Lower band, 0.5 = Middle band, 1.0 = Upper band
+        pct_b = (eff_price - bb_lower) / bb_band_width
+
+        # Real-time continuous score (-100 to +100):
+        # When %B < 0.5 and RSI < 50, price is undervalued -> positive score (pulls towards Long)
+        # When %B > 0.5 and RSI > 50, price is overextended -> negative score (pulls towards Short)
+        base_score = (0.5 - pct_b) * 120.0 + (50.0 - rsi) * 0.8
+        score = round(max(-100.0, min(100.0, base_score)), 1)
+
+        # Extreme thresholds overrides
+        if eff_price <= bb_lower or (rsi <= 30.0 and eff_price <= bb_mid):
+            score = max(score, 75.0)
+            direction = 1
+            rationale = f"Giá chạm cận dưới Bollinger Bands (%B={pct_b*100:.1f}%), RSI={rsi:.1f} quá bán cực đại $\rightarrow$ Kỳ vọng hồi phục về trục giữa."
+        elif eff_price >= bb_upper or (rsi >= 70.0 and eff_price >= bb_mid):
+            score = min(score, -75.0)
+            direction = -1
+            rationale = f"Giá chạm dải trên Bollinger Bands (%B={pct_b*100:.1f}%), RSI={rsi:.1f} quá mua cực đại $\rightarrow$ Kỳ vọng điều chỉnh về trục giữa."
         else:
-            return StrategyVote(f"Bắt Đảo Chiều ({base_tf.upper()})", 0, 0.0, 0.2, f"RSI ở mức trung tính {rsi:.1f}, dao động trong lòng dải Bollinger Bands.")
+            direction = 1 if score >= 15.0 else (-1 if score <= -15.0 else 0)
+            bias_text = "Hồi phục Long" if score > 5.0 else ("Điều chỉnh Short" if score < -5.0 else "Cân bằng BB")
+            rationale = f"Bollinger %B={pct_b*100:.1f}%, RSI={rsi:.1f} -> {bias_text} (Score: {score:+.1f})."
+
+        return StrategyVote(f"Bắt Đảo Chiều ({base_tf.upper()})", direction, score, 0.25, rationale)
 
 
 class LiquiditySweepSubEngine:
@@ -175,24 +193,49 @@ class LiquiditySweepSubEngine:
             return StrategyVote(f"Săn Rút Chân ({base_tf.upper()})", 0, 0.0, 0.2, "Đang nạp nến...")
 
         last_candle = df_base.iloc[-1]
-        c_open = last_candle["open"]
-        c_high = last_candle["high"]
-        c_low = last_candle["low"]
-        c_close = last_candle["close"]
-        candle_range = max(1.0, c_high - c_low)
+        c_open = float(last_candle["open"])
+        c_high = float(last_candle["high"])
+        c_low = float(last_candle["low"])
+        c_close = float(last_candle["close"])
+        eff_price = float(current_price) if current_price > 0 else c_close
 
-        lower_wick = min(c_open, c_close) - c_low
-        upper_wick = c_high - max(c_open, c_close)
-        vol_ratio = (last_candle["volume"] / df_base["volume"].iloc[-10:].mean()) if len(df_base) >= 10 else 1.0
+        # Dynamic high/low including real-time tick
+        eff_high = max(c_high, eff_price)
+        eff_low = min(c_low, eff_price)
+        candle_range = max(1.0, eff_high - eff_low)
+
+        lower_wick = min(c_open, eff_price) - eff_low
+        upper_wick = eff_high - max(c_open, eff_price)
+        vol_ratio = float((last_candle["volume"] / df_base["volume"].iloc[-10:].mean())) if len(df_base) >= 10 else 1.0
+
+        # Check recent 5-candle high/low liquidity sweep
+        recent_high = float(np.max(df_base["high"].iloc[-6:-1])) if len(df_base) >= 6 else c_high
+        recent_low = float(np.min(df_base["low"].iloc[-6:-1])) if len(df_base) >= 6 else c_low
+        is_sweep_high = (eff_high >= recent_high and eff_price < recent_high)
+        is_sweep_low = (eff_low <= recent_low and eff_price > recent_low)
+
+        lower_ratio = lower_wick / candle_range
+        upper_ratio = upper_wick / candle_range
 
         # Bullish Pinbar / Sweep low
-        if (lower_wick / candle_range) >= 0.55 and vol_ratio >= 1.4:
-            return StrategyVote(f"Săn Rút Chân ({base_tf.upper()})", 1, 90.0, 0.25, f"Xuất hiện nến rút chân bẫy gấu (Volume x{vol_ratio:.1f}), cá mập quét thanh khoản đáy rồi mua thốc lên.")
+        if (lower_ratio >= 0.55 and vol_ratio >= 1.4) or (is_sweep_low and lower_ratio >= 0.4):
+            return StrategyVote(f"Săn Rút Chân ({base_tf.upper()})", 1, 90.0, 0.25, f"Xuất hiện nến rút chân bẫy gấu (Râu {lower_ratio*100:.0f}%, Vol x{vol_ratio:.1f}), cá mập quét thanh khoản đáy rồi mua thốc lên.")
         # Bearish Shooting Star / Sweep high
-        elif (upper_wick / candle_range) >= 0.55 and vol_ratio >= 1.4:
-            return StrategyVote(f"Săn Rút Chân ({base_tf.upper()})", -1, -90.0, 0.25, f"Xuất hiện nến rút râu trên (Volume x{vol_ratio:.1f}), cá mập xả hàng từ chối giá cao.")
+        elif (upper_ratio >= 0.55 and vol_ratio >= 1.4) or (is_sweep_high and upper_ratio >= 0.4):
+            return StrategyVote(f"Săn Rút Chân ({base_tf.upper()})", -1, -90.0, 0.25, f"Xuất hiện nến rút râu trên (Râu {upper_ratio*100:.0f}%, Vol x{vol_ratio:.1f}), cá mập xả hàng từ chối giá cao.")
         else:
-            return StrategyVote(f"Săn Rút Chân ({base_tf.upper()})", 0, 0.0, 0.15, "Thân nến tiêu chuẩn, không có dấu hiệu quét thanh khoản bất thường.")
+            # Continuous absorption gradient based on real-time wick asymmetry
+            wick_bias = (lower_wick - upper_wick) / candle_range
+            score = round(max(-60.0, min(60.0, wick_bias * 80.0)), 1)
+            direction = 1 if score >= 15.0 else (-1 if score <= -15.0 else 0)
+            bias_str = "Hấp thụ Mua (Rút râu dưới)" if score > 5 else ("Áp lực Xả (Rút râu trên)" if score < -5 else "Cân bằng")
+            return StrategyVote(
+                f"Săn Rút Chân ({base_tf.upper()})",
+                direction,
+                score,
+                0.15,
+                f"Râu dưới {lower_ratio*100:.0f}%, Râu trên {upper_ratio*100:.0f}% -> {bias_str} (Score: {score:+.1f})."
+            )
 
 
 from strategy.multi_candle_patterns import MultiTimeframeCandleStrategyEngine, MTFCandleConfluenceResult

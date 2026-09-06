@@ -505,24 +505,34 @@
           <!-- SMC Zones & VWAP -->
           <div class="bg-[#080b11] p-3 rounded-xl border border-gray-800/80 text-xs space-y-1.5">
             <div class="flex justify-between items-center">
-              <span class="font-bold text-gray-300 flex items-center gap-1">
+              <span class="font-bold text-gray-300 flex items-center gap-1.5">
                 <span>🎯</span> <span data-i18n="smc_title">SMC Vùng Gom Order Blocks & VWAP</span>
+                <span class="inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[9px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-800/60">
+                  <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                  <span>LIVE</span>
+                </span>
               </span>
               <span id="smc-structure-badge" class="px-2 py-0.5 text-[10px] font-bold rounded bg-cyan-950 text-cyan-300 border border-cyan-700 mono" data-i18n="smc_struct_ranging">CẤU TRÚC: RANGING</span>
             </div>
             <div class="grid grid-cols-2 gap-2 text-[10px] mono">
               <div class="bg-[#121722] p-1.5 rounded border border-emerald-900/60">
-                <div class="text-emerald-400 font-sans font-bold" data-i18n="smc_demand_ob">VÙNG CẦU (DEMAND OB)</div>
+                <div class="flex justify-between items-center">
+                  <span class="text-emerald-400 font-sans font-bold" data-i18n="smc_demand_ob">VÙNG CẦU (DEMAND OB)</span>
+                  <span id="smc-demand-dist" class="text-[9px] text-emerald-400 font-bold"></span>
+                </div>
                 <div id="smc-demand-zone" class="text-gray-300 mt-0.5">$0 - $0</div>
               </div>
               <div class="bg-[#121722] p-1.5 rounded border border-rose-900/60">
-                <div class="text-rose-400 font-sans font-bold" data-i18n="smc_supply_ob">VÙNG CUNG (SUPPLY OB)</div>
+                <div class="flex justify-between items-center">
+                  <span class="text-rose-400 font-sans font-bold" data-i18n="smc_supply_ob">VÙNG CUNG (SUPPLY OB)</span>
+                  <span id="smc-supply-dist" class="text-[9px] text-rose-400 font-bold"></span>
+                </div>
                 <div id="smc-supply-zone" class="text-gray-300 mt-0.5">$0 - $0</div>
               </div>
             </div>
             <div class="flex justify-between items-center text-[10px] mono text-gray-400 pt-1 border-t border-gray-800/60">
               <span><span data-i18n="smc_fvg_label">FVG:</span> <b id="smc-fvg-count" class="text-amber-400">0</b></span>
-              <span>VWAP: <b id="smc-vwap-price" class="text-cyan-300">$0</b> (<span id="smc-vwap-status">EQUILIBRIUM</span>)</span>
+              <span>VWAP: <b id="smc-vwap-price" class="text-cyan-300">$0</b> (<span id="smc-vwap-status">EQUILIBRIUM</span>) <span id="smc-vwap-dev" class="text-[9px] text-cyan-400"></span></span>
               <span id="smc-sweep-alert" class="text-gray-400 truncate max-w-[120px]" data-i18n="smc_no_sweep">Chưa có Sweep</span>
             </div>
           </div>
@@ -536,7 +546,13 @@
         <div class="bg-[#080b11] p-3 rounded-xl border border-gray-800/80 text-xs">
           <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 pb-2 border-b border-gray-800">
             <div class="flex items-center gap-2 flex-wrap">
-              <span class="font-bold text-amber-400" data-i18n="ens_title">⚡ ĐỒNG THUẬN MA TRẬN ĐA CHIẾN LƯỢC (ENSEMBLE):</span>
+              <span class="font-bold text-amber-400 flex items-center gap-1.5">
+                <span data-i18n="ens_title">⚡ ĐỒNG THUẬN MA TRẬN ĐA CHIẾN LƯỢC (ENSEMBLE):</span>
+                <span class="inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-950/80 text-amber-300 border border-amber-800/60">
+                  <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
+                  <span>LIVE MATRIX</span>
+                </span>
+              </span>
               <span id="ensemble-consensus-badge" class="px-2 py-0.5 text-[10px] font-bold rounded bg-cyan-950 text-cyan-300 border border-cyan-700 mono">SIDEWAY GRID ⚖️</span>
               <span class="text-gray-400 text-[10px]"><span data-i18n="ens_confidence">Độ tự tin:</span> <b id="ensemble-confidence" class="text-amber-400 mono">80%</b></span>
             </div>
@@ -628,6 +644,10 @@
             <div class="flex justify-between items-center pb-1.5 border-b border-gray-800">
               <span class="font-bold text-gray-300 flex items-center gap-1.5">
                 <span>⚖️</span> <span data-i18n="hb_title">Hummingbot Lệch Vị Thế (Inventory Skew)</span>
+                <span class="inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[9px] font-bold bg-cyan-950/80 text-cyan-300 border border-cyan-800/60">
+                  <span class="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                  <span>LIVE SKEW</span>
+                </span>
               </span>
               <div class="flex items-center gap-1.5">
                 <span id="hb-status-badge" class="px-1.5 py-0.5 rounded text-[10px] font-bold mono bg-cyan-950 text-cyan-300 border border-cyan-800/80">ACTIVE</span>
@@ -648,7 +668,7 @@
               <span data-i18n="hb_desc_1">Tự động điều chỉnh giá đón (Reservation Price) để bảo vệ danh mục khi nắm giữ vị thế.</span>
             </p>
             <div class="text-[10px] text-gray-400 mono bg-[#121722] p-1.5 rounded border border-gray-800 flex justify-between items-center">
-              <span data-i18n="hb_desc_2">Avellaneda-Stoikov + Anti-Spam Refresh (&le;0.08%)</span>
+              <span id="hb-avellaneda-spread" data-i18n="hb_desc_2">Avellaneda-Stoikov + Anti-Spam Refresh (&le;0.08%)</span>
               <span id="hb-side-tag" class="text-emerald-400 font-bold">FLAT</span>
             </div>
           </div>
@@ -3994,18 +4014,51 @@
         }
 
         const demEl = document.getElementById('smc-demand-zone');
+        const demDistEl = document.getElementById('smc-demand-dist');
         if (demEl) {
           demEl.innerText = brain.demand_zone ? `$${brain.demand_zone[0].toLocaleString('en-US', {maximumFractionDigits: 1})} - $${brain.demand_zone[1].toLocaleString('en-US', {maximumFractionDigits: 1})}` : '--';
         }
+        if (demDistEl) {
+          if (brain.is_testing_ob && brain.tested_ob_type === 'DEMAND') {
+            demDistEl.innerText = '🎯 ĐANG TEST';
+            demDistEl.className = 'text-[9px] text-amber-300 font-bold animate-pulse';
+          } else if (brain.dist_demand_pct !== undefined && brain.demand_zone) {
+            demDistEl.innerText = `${brain.dist_demand_pct >= 0 ? '+' : ''}${brain.dist_demand_pct.toFixed(2)}%`;
+            demDistEl.className = `text-[9px] font-bold ${brain.dist_demand_pct <= 0.5 ? 'text-emerald-400 font-extrabold' : 'text-emerald-500/80'}`;
+          } else {
+            demDistEl.innerText = '';
+          }
+        }
 
         const supEl = document.getElementById('smc-supply-zone');
+        const supDistEl = document.getElementById('smc-supply-dist');
         if (supEl) {
           supEl.innerText = brain.supply_zone ? `$${brain.supply_zone[0].toLocaleString('en-US', {maximumFractionDigits: 1})} - $${brain.supply_zone[1].toLocaleString('en-US', {maximumFractionDigits: 1})}` : '--';
+        }
+        if (supDistEl) {
+          if (brain.is_testing_ob && brain.tested_ob_type === 'SUPPLY') {
+            supDistEl.innerText = '🎯 ĐANG TEST';
+            supDistEl.className = 'text-[9px] text-amber-300 font-bold animate-pulse';
+          } else if (brain.dist_supply_pct !== undefined && brain.supply_zone) {
+            supDistEl.innerText = `${brain.dist_supply_pct >= 0 ? '+' : ''}${brain.dist_supply_pct.toFixed(2)}%`;
+            supDistEl.className = `text-[9px] font-bold ${brain.dist_supply_pct <= 0.5 ? 'text-rose-400 font-extrabold' : 'text-rose-500/80'}`;
+          } else {
+            supDistEl.innerText = '';
+          }
         }
 
         const vwapPriceEl = document.getElementById('smc-vwap-price');
         if (vwapPriceEl) {
           vwapPriceEl.innerText = brain.vwap_fair_price ? `$${brain.vwap_fair_price.toLocaleString('en-US', {minimumFractionDigits: 1, maximumFractionDigits: 1})}` : '--';
+        }
+
+        const vwapDevEl = document.getElementById('smc-vwap-dev');
+        if (vwapDevEl) {
+          if (brain.vwap_sigma_dev !== undefined && brain.dist_vwap_pct !== undefined) {
+            vwapDevEl.innerText = `(${brain.dist_vwap_pct >= 0 ? '+' : ''}${brain.dist_vwap_pct.toFixed(2)}% | ${brain.vwap_sigma_dev >= 0 ? '+' : ''}${brain.vwap_sigma_dev.toFixed(1)}σ)`;
+          } else {
+            vwapDevEl.innerText = '';
+          }
         }
 
         const vwapStatEl = document.getElementById('smc-vwap-status');
@@ -4134,7 +4187,11 @@
             if (scoreEl) {
               const dirTag = strat.direction === 1 ? 'LONG 🟢' : (strat.direction === -1 ? 'SHORT 🔴' : `${t('ens_neutral') || 'TRUNG LẬP'} ⚪`);
               scoreEl.innerText = `${strat.score >= 0 ? '+' : ''}${strat.score.toFixed(1)} ${dirTag}`;
-              scoreEl.className = `font-bold mono my-1 text-xs ${strat.direction === 1 ? 'text-emerald-400' : (strat.direction === -1 ? 'text-rose-400' : 'text-amber-300')}`;
+              let colorClass = 'text-amber-300';
+              if (strat.score >= 20.0 || strat.direction === 1) colorClass = 'text-emerald-400 font-bold';
+              else if (strat.score <= -20.0 || strat.direction === -1) colorClass = 'text-rose-400 font-bold';
+              else if (Math.abs(strat.score) > 0.0) colorClass = 'text-cyan-300 font-semibold';
+              scoreEl.className = `font-bold mono my-1 text-xs ${colorClass}`;
             }
             if (descEl) descEl.innerText = strat.rationale;
           });
@@ -5156,11 +5213,23 @@
                 ? `持有空头 (q = ${hb.inventory_ratio_q}): 挂单价上调 $${Math.abs(hb.price_skew_offset).toFixed(1)}, 防止过度积累空头库存。`
                 : `Short position (q = ${hb.inventory_ratio_q}): Raises reservation ask by $${Math.abs(hb.price_skew_offset).toFixed(1)} to prevent over-shorting.`);
           } else {
+            const spreadNote = (hb.prospective_bid_spread > 0 && hb.prospective_bid_price > 0)
+              ? ` (Maker: $${hb.prospective_bid_price.toLocaleString('en-US', {maximumFractionDigits: 1})} - $${hb.prospective_ask_price.toLocaleString('en-US', {maximumFractionDigits: 1})} | ±$${hb.prospective_bid_spread.toFixed(2)})`
+              : '';
             descEl.innerText = currentLanguage === 'vi'
-              ? 'Tài khoản Flat (chưa giữ vị thế): Giá kỳ vọng cân bằng bằng đúng giá thị trường Mid-Price.'
+              ? `Tài khoản Flat: Giá kỳ vọng cân bằng Mid-Price${spreadNote}. Tự động lệch giá ngay khi khớp lệnh.`
               : (currentLanguage === 'zh'
-                ? '空仓 (Flat): 保留价等于市场中间价, 买卖盘中性对称。'
-                : 'Flat inventory: Reservation price equals fair mid-price with neutral symmetry.');
+                ? `空仓 (Flat): 保留价等于市场中间价${spreadNote}。`
+                : `Flat inventory: Reservation price equals fair mid-price${spreadNote}.`);
+          }
+        }
+
+        const avSpreadEl = document.getElementById('hb-avellaneda-spread');
+        if (avSpreadEl) {
+          if (hb.prospective_bid_spread > 0 && hb.prospective_bid_price > 0) {
+            avSpreadEl.innerText = `Avellaneda Maker: $${hb.prospective_bid_price.toLocaleString('en-US', {maximumFractionDigits: 1})} - $${hb.prospective_ask_price.toLocaleString('en-US', {maximumFractionDigits: 1})} (±$${hb.prospective_bid_spread.toFixed(2)})`;
+          } else {
+            avSpreadEl.innerText = 'Avellaneda-Stoikov + Anti-Spam Refresh (≤0.08%)';
           }
         }
       }

@@ -21,6 +21,8 @@ class VWAPBandResult:
     current_deviation: float  # How many sigmas current price is away from VWAP
     valuation_status: str     # 'DISCOUNT_CHEAP', 'EQUILIBRIUM_FAIR', 'PREMIUM_EXPENSIVE'
     rationale: str
+    dist_vwap_pct: float = 0.0
+    dist_vwap_usd: float = 0.0
 
 
 class InstitutionalVWAPEngine:
@@ -61,18 +63,22 @@ class InstitutionalVWAPEngine:
         # Calculate deviation in standard deviations
         sigma_dev = (current_price - current_vwap) / std_dev if std_dev > 0 else 0.0
 
+        # Real-time dollar and percentage distance from VWAP
+        dist_vwap_usd = round(current_price - current_vwap, 2)
+        dist_vwap_pct = round((dist_vwap_usd / current_vwap) * 100.0, 2) if current_vwap > 0 else 0.0
+
         if sigma_dev <= -1.8:
             status = "DISCOUNT_CHEAP"
-            rationale = f"📐 VÙNG CHIẾT KHẤU CAO (Giá lệch {sigma_dev:.1f}σ dưới VWAP ${current_vwap:,.1f}). Xác suất bật hồi Mean-Reversion cực lớn!"
+            rationale = f"📐 VÙNG CHIẾT KHẤU CAO (Giá lệch {sigma_dev:.1f}σ dưới VWAP ${current_vwap:,.1f} | {dist_vwap_pct:+.2f}%). Xác suất bật hồi Mean-Reversion cực lớn!"
         elif sigma_dev >= 1.8:
             status = "PREMIUM_EXPENSIVE"
-            rationale = f"📐 VÙNG ĐỊNH GIÁ CAO (Giá lệch +{sigma_dev:.1f}σ trên VWAP ${current_vwap:,.1f}). Không FOMO Mua, ưu tiên canh chốt hoặc Short!"
+            rationale = f"📐 VÙNG ĐỊNH GIÁ CAO (Giá lệch +{sigma_dev:.1f}σ trên VWAP ${current_vwap:,.1f} | {dist_vwap_pct:+.2f}%). Không FOMO Mua, ưu tiên canh chốt hoặc Short!"
         elif abs(sigma_dev) <= 0.8:
             status = "EQUILIBRIUM_FAIR"
-            rationale = f"📐 GIÁ TRỊ CÂN BẰNG (Quanh VWAP ${current_vwap:,.1f} lệch {sigma_dev:.1f}σ). Thị trường đang tôn trọng giá trị dòng tiền."
+            rationale = f"📐 GIÁ TRỊ CÂN BẰNG (Quanh VWAP ${current_vwap:,.1f} lệch {sigma_dev:.1f}σ | {dist_vwap_pct:+.2f}%). Thị trường đang tôn trọng giá trị dòng tiền."
         else:
             status = "TRENDING_EXPANSION"
-            rationale = f"Giá đang mở rộng theo xu hướng ({sigma_dev:+.1f}σ so với VWAP ${current_vwap:,.1f})."
+            rationale = f"Giá đang mở rộng theo xu hướng ({sigma_dev:+.1f}σ so với VWAP ${current_vwap:,.1f} | {dist_vwap_pct:+.2f}%)."
 
         return VWAPBandResult(
             vwap=round(float(current_vwap), 2),
@@ -82,5 +88,7 @@ class InstitutionalVWAPEngine:
             lower_band_2=round(float(lower_2), 2),
             current_deviation=round(float(sigma_dev), 2),
             valuation_status=status,
-            rationale=rationale
+            rationale=rationale,
+            dist_vwap_pct=dist_vwap_pct,
+            dist_vwap_usd=dist_vwap_usd
         )

@@ -1533,7 +1533,8 @@ class LiveTradingState:
         flow = self.order_flow_engine.evaluate(self.live_price)
         jesse = self.jesse_engine.compute_metrics()
         hb_skew = self.hummingbot_skew.calculate_reservation_price(
-            self.live_price, self.current_position, self.indicators.get("atr", 200.0), self.current_balance
+            self.live_price, self.current_position, self.indicators.get("atr", 200.0), self.current_balance,
+            hedge_positions=self.hedge_positions
         )
         wins = [t for t in self.trades if t["pnl"] > 0]
         losses = [t for t in self.trades if t["pnl"] <= 0]
@@ -1602,6 +1603,13 @@ class LiveTradingState:
                 "vwap_status": self.ai_verdict.vwap_status if self.ai_verdict else "EQUILIBRIUM_FAIR",
                 "demand_zone": list(self.ai_verdict.demand_zone) if (self.ai_verdict and self.ai_verdict.demand_zone) else None,
                 "supply_zone": list(self.ai_verdict.supply_zone) if (self.ai_verdict and self.ai_verdict.supply_zone) else None,
+                "dist_demand_pct": getattr(self.ai_verdict, "dist_demand_pct", 0.0) if self.ai_verdict else 0.0,
+                "dist_supply_pct": getattr(self.ai_verdict, "dist_supply_pct", 0.0) if self.ai_verdict else 0.0,
+                "is_testing_ob": getattr(self.ai_verdict, "is_testing_ob", False) if self.ai_verdict else False,
+                "tested_ob_type": getattr(self.ai_verdict, "tested_ob_type", "NONE") if self.ai_verdict else "NONE",
+                "dist_vwap_pct": getattr(self.ai_verdict, "dist_vwap_pct", 0.0) if self.ai_verdict else 0.0,
+                "dist_vwap_usd": getattr(self.ai_verdict, "dist_vwap_usd", 0.0) if self.ai_verdict else 0.0,
+                "vwap_sigma_dev": getattr(self.ai_verdict, "vwap_sigma_dev", 0.0) if self.ai_verdict else 0.0,
                 "active_fvgs": self.ai_verdict.active_fvgs if self.ai_verdict else [],
                 "last_sweep_info": self.ai_verdict.last_sweep_info if self.ai_verdict else "",
                 "hurst_exponent": getattr(self.ai_verdict, "hurst_exponent", 0.50) if self.ai_verdict else 0.50,
@@ -1850,7 +1858,10 @@ class LiveTradingState:
                 "price_skew_offset": hb_skew.price_skew_offset,
                 "inventory_ratio_q": hb_skew.inventory_ratio_q,
                 "volatility_sigma": hb_skew.volatility_sigma,
-                "skew_code": "DISCOURAGE_BUY" if hb_skew.current_position_side == "LONG" else ("DISCOURAGE_SELL" if hb_skew.current_position_side == "SHORT" else "NEUTRAL")
+                "prospective_bid_price": hb_skew.prospective_bid_price,
+                "prospective_ask_price": hb_skew.prospective_ask_price,
+                "prospective_bid_spread": hb_skew.prospective_bid_spread,
+                "skew_code": "DISCOURAGE_BUY" if "LONG" in hb_skew.current_position_side else ("DISCOURAGE_SELL" if "SHORT" in hb_skew.current_position_side else "NEUTRAL")
             },
             "settings": {
                 "active_exchange": self.active_exchange,

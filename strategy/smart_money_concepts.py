@@ -53,13 +53,17 @@ class SMCAnalysisResult:
     nearest_supply_zone: Optional[Tuple[float, float]] = None
     institutional_bias: str = "NEUTRAL"
     bias_rationale: str = ""
+    dist_demand_pct: float = 0.0
+    dist_supply_pct: float = 0.0
+    is_testing_ob: bool = False
+    tested_ob_type: str = "NONE"
 
 
 class SmartMoneyEngine:
     def __init__(self, atr_mult: float = 1.2):
         self.atr_mult = atr_mult
 
-    def detect_order_blocks(self, df: pd.DataFrame, max_lookback: int = 60) -> Tuple[List[OrderBlock], List[OrderBlock]]:
+    def detect_order_blocks(self, df: pd.DataFrame, max_lookback: int = 60, current_price: Optional[float] = None) -> Tuple[List[OrderBlock], List[OrderBlock]]:
         """
         Detects Institutional Order Blocks:
         Bullish OB: Bearish candle followed by an impulsive displacement candle (> 1.5x ATR) breaking previous high
@@ -83,7 +87,7 @@ class SmartMoneyEngine:
 
         bull_obs: List[OrderBlock] = []
         bear_obs: List[OrderBlock] = []
-        current_price = closes[-1]
+        eff_price = float(current_price) if (current_price is not None and current_price > 0) else float(closes[-1])
 
         # Scan for displacement moves
         for i in range(2, len(recent) - 1):
@@ -98,10 +102,10 @@ class SmartMoneyEngine:
                 ob_bot = lows[i-1]
                 # Check if invalidated (broken downwards)
                 min_after = np.min(lows[i:])
-                valid = min_after >= (ob_bot - 0.2 * atr)
-                tested = min_after <= ob_top and valid
+                valid = min_after >= (ob_bot - 0.2 * atr) and eff_price >= (ob_bot - 0.2 * atr)
+                tested = (min_after <= ob_top or eff_price <= ob_top) and valid
 
-                if valid and ob_top < current_price:
+                if valid and eff_price >= (ob_bot - 0.1 * atr):
                     bull_obs.append(OrderBlock(
                         type="BULLISH",
                         top_price=round(float(ob_top), 2),
@@ -119,10 +123,10 @@ class SmartMoneyEngine:
                 ob_bot = min(opens[i-1], closes[i-1], lows[i-1])
                 # Check if invalidated (broken upwards)
                 max_after = np.max(highs[i:])
-                valid = max_after <= (ob_top + 0.2 * atr)
-                tested = max_after >= ob_bot and valid
+                valid = max_after <= (ob_top + 0.2 * atr) and eff_price <= (ob_top + 0.2 * atr)
+                tested = (max_after >= ob_bot or eff_price >= ob_bot) and valid
 
-                if valid and ob_bot > current_price:
+                if valid and eff_price <= (ob_top + 0.1 * atr):
                     bear_obs.append(OrderBlock(
                         type="BEARISH",
                         top_price=round(float(ob_top), 2),
@@ -247,7 +251,7 @@ class SmartMoneyEngine:
         if df is None or len(df) < 20:
             return SMCAnalysisResult(market_structure="RANGING", institutional_bias="NEUTRAL")
 
-        bull_obs, bear_obs = self.detect_order_blocks(df)
+        bull_obs, bear_obs = self.detect_order_blocks(df, current_price=current_price)
         fvgs = self.detect_fair_value_gaps(df)
         sweep = self.detect_liquidity_sweep_and_choch(df)
 
@@ -271,6 +275,24 @@ class SmartMoneyEngine:
             recent_high = float(np.max(df["high"].values[-20:]))
             nearest_supply = (round(recent_high, 2), round(recent_high * 1.002, 2))
 
+        # Real-time distance and testing state
+        dist_demand_pct = 0.0
+        if nearest_demand and current_price > 0:
+            dist_demand_pct = round((current_price - nearest_demand[1]) / current_price * 100.0, 2)
+
+        dist_supply_pct = 0.0
+        if nearest_supply and current_price > 0:
+            dist_supply_pct = round((nearest_supply[0] - current_price) / current_price * 100.0, 2)
+
+        is_testing_ob = False
+        tested_ob_type = "NONE"
+        if nearest_demand and nearest_demand[0] <= current_price <= nearest_demand[1]:
+            is_testing_ob = True
+            tested_ob_type = "DEMAND"
+        elif nearest_supply and nearest_supply[0] <= current_price <= nearest_supply[1]:
+            is_testing_ob = True
+            tested_ob_type = "SUPPLY"
+
         # Determine Market Structure via Higher Highs / Lower Lows
         closes = df["close"].values
         sma20 = np.mean(closes[-20:])
@@ -293,12 +315,18 @@ class SmartMoneyEngine:
         elif sweep and sweep.type == "BULLISH_SWEEP":
             bias = "BULLISH_REVERSAL"
             rationale = f"🚨 BẪY THANH KHOẢN ĐÁY: Cá mập vừa quét râu qua ${sweep.swept_price:,.1f} ép bán cắt lỗ rồi rút chân. Xu hướng đảo chiều Tăng!"
+        elif is_testing_ob and tested_ob_type == "DEMAND":
+            bias = "DEMAND_ZONE_BOUNCE"
+            rationale = f"🧱 ĐANG TEST VÙNG CẦU TỔ CHỨC: Giá đang trong Order Block Demand ${nearest_demand[0]:,.1f} - ${nearest_demand[1]:,.1f}. Lực hấp thụ mua mạnh!"
+        elif is_testing_ob and tested_ob_type == "SUPPLY":
+            bias = "SUPPLY_ZONE_REJECT"
+            rationale = f"🧱 ĐANG TEST VÙNG CUNG TỔ CHỨC: Giá đang trong Order Block Supply ${nearest_supply[0]:,.1f} - ${nearest_supply[1]:,.1f}. Áp lực xả hàng lớn!"
         elif nearest_demand and abs(current_price - nearest_demand[1]) / current_price < 0.004:
             bias = "DEMAND_ZONE_BOUNCE"
-            rationale = f"🧱 TEST KHỐI LỆNH TỔ CHỨC (BULLISH OB): Giá đang chạm vùng Demand ${nearest_demand[0]:,.1f} - ${nearest_demand[1]:,.1f}. Lực hấp thụ mua mạnh!"
+            rationale = f"🧱 TEST KHỐI LỆNH TỔ CHỨC (BULLISH OB): Giá đang tiệm cận Demand ${nearest_demand[0]:,.1f} - ${nearest_demand[1]:,.1f} ({dist_demand_pct:+.2f}%). Lực hấp thụ mua mạnh!"
         elif nearest_supply and abs(current_price - nearest_supply[0]) / current_price < 0.004:
             bias = "SUPPLY_ZONE_REJECT"
-            rationale = f"🧱 TEST KHỐI LỆNH TỔ CHỨC (BEARISH OB): Giá đang chạm vùng Supply ${nearest_supply[0]:,.1f} - ${nearest_supply[1]:,.1f}. Áp lực xả hàng lớn!"
+            rationale = f"🧱 TEST KHỐI LỆNH TỔ CHỨC (BEARISH OB): Giá đang tiệm cận Supply ${nearest_supply[0]:,.1f} - ${nearest_supply[1]:,.1f} ({dist_supply_pct:+.2f}%). Áp lực xả hàng lớn!"
         elif structure == "BULLISH_TREND":
             bias = "BULLISH_CONTINUATION"
             rationale = "Cấu trúc thị trường phe Mua kiểm soát (BOS Up). Ưu tiên canh gom tại FVG hoặc Bullish OB."
@@ -315,5 +343,9 @@ class SmartMoneyEngine:
             nearest_demand_zone=nearest_demand,
             nearest_supply_zone=nearest_supply,
             institutional_bias=bias,
-            bias_rationale=rationale
+            bias_rationale=rationale,
+            dist_demand_pct=dist_demand_pct,
+            dist_supply_pct=dist_supply_pct,
+            is_testing_ob=is_testing_ob,
+            tested_ob_type=tested_ob_type
         )
