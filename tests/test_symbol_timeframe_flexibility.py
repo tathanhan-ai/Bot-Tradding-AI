@@ -210,19 +210,25 @@ class TestSymbolTimeframeFlexibility(unittest.TestCase):
         self.assertEqual(res_exp["status"], "rejected")
         self.assertIn("đang có vị thế", res_exp["reason"])
         state.current_position = None
+        state.hedge_positions = {}
+        saved_orders = list(state.order_manager.orders)
+        state.order_manager.orders.clear()
 
         # 3. Successful symbol switch
-        with patch.object(state, "restart_market_data", new_callable=AsyncMock) as mock_restart:
-            res_ok = asyncio.run(set_symbol("ETHUSDT", session=session))
-            self.assertEqual(res_ok["status"], "ok")
-            self.assertEqual(state.symbol, "ETHUSDT")
-            self.assertEqual(state.strategy_config.symbol, "ETHUSDT")
-            self.assertEqual(state.fee_engine.symbol, "ETHUSDT")
-            mock_restart.assert_awaited_once()
+        try:
+            with patch.object(state, "restart_market_data", new_callable=AsyncMock) as mock_restart:
+                res_ok = asyncio.run(set_symbol("ETHUSDT", session=session))
+                self.assertEqual(res_ok["status"], "ok")
+                self.assertEqual(state.symbol, "ETHUSDT")
+                self.assertEqual(state.strategy_config.symbol, "ETHUSDT")
+                self.assertEqual(state.fee_engine.symbol, "ETHUSDT")
+                mock_restart.assert_awaited_once()
 
-        # Switch back to BTCUSDT for other tests
-        with patch.object(state, "restart_market_data", new_callable=AsyncMock):
-            asyncio.run(set_symbol("BTCUSDT", session=session))
+            # Switch back to BTCUSDT for other tests
+            with patch.object(state, "restart_market_data", new_callable=AsyncMock):
+                asyncio.run(set_symbol("BTCUSDT", session=session))
+        finally:
+            state.order_manager.orders.extend(saved_orders)
 
 
 if __name__ == "__main__":

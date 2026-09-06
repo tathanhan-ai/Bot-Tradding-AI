@@ -4353,7 +4353,10 @@
 
         if (typeEl) typeEl.innerText = `${res.recommended_type} (${res.recommended_side})`;
         if (priceEl) priceEl.innerText = `$${res.optimal_price.toLocaleString('en-US', {minimumFractionDigits: 1})}`;
-        if (marginEl) marginEl.innerText = `$${res.optimal_margin.toFixed(0)} (${res.optimal_leverage}x)`;
+        if (marginEl) {
+          const vpinBadge = res.is_vpin_throttled ? ' <span class="text-amber-300 font-bold text-[9px] bg-amber-950/80 px-1.5 py-0.5 rounded border border-amber-700/80">🛡️ VPIN ÉP VỐN NHỎ</span>' : '';
+          marginEl.innerHTML = `$${res.optimal_margin.toFixed(0)} (${res.optimal_leverage}x)${vpinBadge}`;
+        }
         if (feeEl) feeEl.innerText = `${res.fee_tier} (${t('fee_saved_prefix')} ~$${res.estimated_fee_saved_usdt.toFixed(2)})`;
         if (ratEl) ratEl.innerText = res.research_rationale;
         if (badgeEl) badgeEl.innerText = res.ready === false || !res.structural_sl || !res.structural_tp ? 'WAIT — CHƯA QUA DEFENSE GATES' : `${t('ai_recommend_prefix')} ${res.recommended_type} ${res.recommended_side} • score ${res.win_probability}/100 (chưa hiệu chuẩn OOS)`;

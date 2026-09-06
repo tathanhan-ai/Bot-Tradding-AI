@@ -63,12 +63,18 @@ class GridPlanner:
                 return GridPlan("NO_TRADE", f"ADX {adx:.1f} indicates directional expansion")
             if hurst > 0.65:
                 return GridPlan("NO_TRADE", f"Hurst {hurst:.2f} indicates persistent trend")
-        if not (support < vwap < resistance and support < price < resistance) or (resistance - support) < effective_atr * 2.0:
-            support = min(support if (price - support) >= effective_atr * 1.5 else price - 2.5 * effective_atr, price - 2.0 * effective_atr, vwap - 1.5 * effective_atr)
-            resistance = max(resistance if (resistance - price) >= effective_atr * 1.5 else price + 2.5 * effective_atr, price + 2.0 * effective_atr, vwap + 1.5 * effective_atr)
-        max_dist = max(effective_atr * 2.5, price * 0.015)
-        if abs(price - vwap) > max_dist:
-            vwap = round((support + resistance) / 2.0, 1)
+        if not is_manual:
+            if not (support < vwap < resistance and support < price < resistance):
+                return GridPlan("NO_TRADE", "Price or VWAP sits outside structural boundaries")
+            if abs(price - vwap) > atr * .75:
+                return GridPlan("NO_TRADE", f"Price sits {abs(price - vwap):.2f} from VWAP (threshold {atr * .75:.2f})")
+        else:
+            if not (support < vwap < resistance and support < price < resistance) or (resistance - support) < effective_atr * 2.0:
+                support = min(support if (price - support) >= effective_atr * 1.5 else price - 2.5 * effective_atr, price - 2.0 * effective_atr, vwap - 1.5 * effective_atr)
+                resistance = max(resistance if (resistance - price) >= effective_atr * 1.5 else price + 2.5 * effective_atr, price + 2.0 * effective_atr, vwap + 1.5 * effective_atr)
+            max_dist = max(effective_atr * 2.5, price * 0.015)
+            if abs(price - vwap) > max_dist:
+                vwap = round((support + resistance) / 2.0, 1)
 
         width = resistance - support
         if width < effective_atr * 1.5:

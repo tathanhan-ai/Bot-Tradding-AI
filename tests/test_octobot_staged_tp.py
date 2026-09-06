@@ -1,4 +1,4 @@
-﻿import unittest
+import unittest
 from strategy.octobot_matrix import MatrixConsensus
 from strategy.octobot_trading_modes import (
     OctoBotTradingCoordinator,
@@ -71,8 +71,12 @@ class TestOctoBotStagedTP(unittest.TestCase):
         tp = data["octobot"]["staged_tp"]
         self.assertIsNotNone(tp)
         self.assertGreater(tp["tp1"], 0)
-        self.assertGreater(tp["tp2"], tp["tp1"])
-        self.assertGreater(tp["tp3"], tp["tp2"])
+        if state.current_position and state.current_position.get("direction", 1) == -1:
+            self.assertGreater(tp["tp1"], tp["tp2"])
+            self.assertGreater(tp["tp2"], tp["tp3"])
+        else:
+            self.assertGreater(tp["tp2"], tp["tp1"])
+            self.assertGreater(tp["tp3"], tp["tp2"])
 
 if __name__ == "__main__":
     unittest.main()
