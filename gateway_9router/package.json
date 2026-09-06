@@ -7,6 +7,6 @@
     "start": "node run_9router.js"
   },
   "dependencies": {
-    "9router": "^0.5.65"
+    "9router": "^0.5.69"
   }
 }
