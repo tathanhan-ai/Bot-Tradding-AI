@@ -408,7 +408,7 @@ class LiveTradingState:
             self.fee_engine.update_book(bids[0][0], asks[0][0])
             self.on_tick((bids[0][0] + asks[0][0]) / 2)
             self.market_source_times["book_ticker"] = time.time()
-            self.market_source_times["depth"] = (event_time - (self.ws_engine.clock_offset_ms or 0)) / 1000.0
+            self.market_source_times["depth"] = time.time()
             self.visual_hft.update_order_book(bids, asks)
 
         @atomic_event
@@ -417,7 +417,7 @@ class LiveTradingState:
             if not self.order_flow_engine.add_trade(price, qty, is_buyer_maker, local_time_ms):
                 return
             t_sec = local_time_ms / 1000.0
-            self.market_source_times["agg_trade"] = t_sec
+            self.market_source_times["agg_trade"] = time.time()
             self.visual_hft.update_trade(price, qty, is_buyer_maker, timestamp=t_sec)
 
         @atomic_event
@@ -1345,7 +1345,54 @@ class LiveTradingState:
             self.reconcile_binance_testnet_orders()
             self.process_execution_tick(self.live_price)
             self.repair_closed_history()
+
+            # Continual quantitative analysis (indicators, SMC, multi-candle patterns, OctoBot, Carver research)
+            try:
+                snapshot = self.build_market_snapshot()
+                self.analyze_snapshot(snapshot)
+            except Exception:
+                pass
+
+            # Automated Seven-Stage Pipeline execution check
             self.evaluate_ensemble_automated_decision(self.live_price)
+
+            # Periodic non-blocking AI Council deliberation (every 30s) so Tab 6 always displays live agent debates
+            now = time.time()
+            vibe = getattr(self, "vibe_swarm", None)
+            if (
+                vibe is not None
+                and getattr(vibe, "enabled", True)
+                and (now - getattr(vibe, "last_completed_at", 0.0)) > 30.0
+                and not getattr(vibe, "_background_pending", False)
+                and getattr(self, "live_price", 0.0) > 0
+            ):
+                try:
+                    res = getattr(self, "order_research", None)
+                    cand_dir = 1 if (res and res.recommended_side == "BUY") else (-1 if (res and res.recommended_side == "SELL") else 0)
+                    cand_entry = res.optimal_price if (res and res.optimal_price > 0) else self.live_price
+                    cand_sl = res.structural_sl if (res and res.structural_sl > 0) else (cand_entry * 0.99 if cand_dir == 1 else cand_entry * 1.01)
+                    cand_tp = res.structural_tp if (res and res.structural_tp > 0) else (cand_entry * 1.02 if cand_dir == 1 else cand_entry * 0.98)
+                    cand = self.build_candidate_order(cand_dir, "AUTO", cand_entry, cand_sl, cand_tp, "auto")
+                    if res and res.optimal_margin > 0:
+                        cand.margin = res.optimal_margin
+                        cand.quantity = round(res.optimal_margin * res.optimal_leverage / max(1.0, cand_entry), 4)
+                        cand.leverage = res.optimal_leverage
+                    vibe.schedule_council(
+                        current_price=getattr(self, "live_price", 0.0),
+                        indicators=getattr(self, "indicators", None),
+                        ai_verdict=getattr(self, "ai_verdict", None),
+                        ensemble_result=getattr(self, "ensemble_result", None),
+                        order_research=getattr(self, "order_research", None),
+                        alpha_zoo_metrics=getattr(self.vibe_alpha_zoo, "get_latest_metrics", lambda: {})() if hasattr(self, "vibe_alpha_zoo") else {},
+                        visual_hft_metrics=getattr(getattr(self, "visual_hft", None), "latest_metrics", {}),
+                        jesse_metrics=getattr(self.jesse_engine, "compute_metrics", lambda: {})() if hasattr(self, "jesse_engine") else {},
+                        octobot_metrics=getattr(self, "octobot_consensus", None),
+                        current_position=getattr(self, "current_position", None),
+                        candidate=cand,
+                        snapshot=self.build_market_snapshot() if hasattr(self, "build_market_snapshot") else None,
+                    )
+                except Exception:
+                    pass
 
     def evaluate_ensemble_automated_decision(self, current_price: float):
         if not self.is_running or self.order_manager.pending_orders:

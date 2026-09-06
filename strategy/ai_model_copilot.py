@@ -43,12 +43,13 @@ class AIModelCopilot:
         self,
         gateway_url: str = "http://127.0.0.1:8039/v1",
         default_model: str = "gemini-2.0-flash",
-        api_key: str = "sk-9router-local",
+        api_key: Optional[str] = None,
         timeout_sec: float = 12.0
     ):
         self.gateway_url = gateway_url.rstrip("/")
         self.default_model = default_model
-        self.api_key = api_key
+        import os
+        self.api_key = api_key or os.environ.get("NINEROUTER_API_KEY", "sk-b4a922a69924f20a-b6s8st-780e9a2f")
         self.timeout_sec = timeout_sec
         self.last_verdict: Optional[AICopilotVerdict] = None
         self.user_instruction: str = ""
@@ -238,6 +239,7 @@ class AIModelCopilot:
 
         payload = {
             "model": self.default_model,
+            "stream": False,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content}
@@ -256,8 +258,25 @@ class AIModelCopilot:
             )
             with urllib.request.urlopen(req, timeout=self.timeout_sec) as response:
                 if response.status == 200:
-                    resp_data = json.loads(response.read().decode("utf-8"))
-                    raw_text = resp_data["choices"][0]["message"]["content"].strip()
+                    body_bytes = response.read()
+                    raw_text = ""
+                    try:
+                        resp_data = json.loads(body_bytes.decode("utf-8"))
+                        raw_text = resp_data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                    except Exception:
+                        text = body_bytes.decode("utf-8", errors="replace")
+                        parts = []
+                        for line in text.splitlines():
+                            if line.startswith("data: ") and line.strip() != "data: [DONE]":
+                                try:
+                                    chunk = json.loads(line[6:])
+                                    c_part = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                    if c_part:
+                                        parts.append(c_part)
+                                except Exception:
+                                    pass
+                        raw_text = "".join(parts).strip()
+
                     if raw_text.startswith("```json"):
                         raw_text = raw_text[7:]
                     if raw_text.startswith("```"):

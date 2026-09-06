@@ -73,7 +73,7 @@ class VisualHFTMicrostructureEngine:
         self,
         bucket_size_btc: float = 10.0,
         num_buckets: int = 30,
-        toxic_vpin_threshold: float = 0.65,
+        toxic_vpin_threshold: float = 0.70,
         min_resilience_threshold: float = 35.0
     ):
         if not math.isfinite(bucket_size_btc) or bucket_size_btc <= 0 or not isinstance(num_buckets, int) or num_buckets < 5:

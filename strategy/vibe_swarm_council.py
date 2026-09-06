@@ -62,13 +62,14 @@ class VibeSwarmCouncil:
         self,
         gateway_url: str = "http://127.0.0.1:8039/v1",
         default_model: str = "gemini-2.0-flash",
-        api_key: str = "sk-9router-local",
+        api_key: Optional[str] = None,
         min_votes_required: int = 3,
         enabled: bool = True,
     ):
         self.gateway_url = gateway_url.rstrip("/")
         self.default_model = default_model
-        self.api_key = api_key
+        import os
+        self.api_key = api_key or os.environ.get("NINEROUTER_API_KEY", "sk-b4a922a69924f20a-b6s8st-780e9a2f")
         self.min_votes_required = max(3, min(4, min_votes_required))
         self.enabled = enabled
         self.agent_models = {agent_id: default_model for agent_id in self.AGENT_META}
@@ -273,6 +274,7 @@ class VibeSwarmCouncil:
         payload = {
             "model": model,
             "temperature": 0.0,
+            "stream": False,
             "messages": [
                 {"role": "system", "content": f"You are the {agent_id} trading reviewer. Use only the supplied role-scoped data. Return JSON only: {{\"vote\": \"APPROVE|REJECT|ABSTAIN\", \"confidence\": 0-100, \"thesis\": \"short reason\"}}."},
                 {"role": "user", "content": json.dumps(context, ensure_ascii=False, separators=(",", ":"))},
@@ -284,9 +286,27 @@ class VibeSwarmCouncil:
                 data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
             )
-            with urllib.request.urlopen(request, timeout=4.0) as response:
-                response_data = json.loads(response.read().decode("utf-8"))
-            raw = response_data["choices"][0]["message"]["content"].strip()
+            with urllib.request.urlopen(request, timeout=18.0) as response:
+                body_bytes = response.read()
+            raw = ""
+            try:
+                response_data = json.loads(body_bytes.decode("utf-8"))
+                raw = response_data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            except Exception:
+                # Fallback for SSE streaming
+                text = body_bytes.decode("utf-8", errors="replace")
+                parts = []
+                for line in text.splitlines():
+                    if line.startswith("data: ") and line.strip() != "data: [DONE]":
+                        try:
+                            chunk = json.loads(line[6:])
+                            c_part = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                            if c_part:
+                                parts.append(c_part)
+                        except Exception:
+                            pass
+                raw = "".join(parts).strip()
+
             raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
             parsed = json.loads(raw)
             vote = str(parsed.get("vote", "ABSTAIN")).upper()
