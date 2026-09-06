@@ -1063,41 +1063,75 @@
               <div class="flex justify-between items-center border-b border-gray-800 pb-1.5">
                 <div class="text-xs font-bold text-teal-400 uppercase flex items-center gap-1.5">
                   <span>🔬</span> <span>12 Alpha Factors Toàn Diện (Alpha Zoo HKUDS)</span>
+                  <span class="inline-flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-bold rounded bg-emerald-950 text-emerald-400 border border-emerald-800 mono">
+                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span> Realtime
+                  </span>
                 </div>
-                <span id="vibe-alpha-regime" class="text-[10px] font-bold px-2 py-0.5 rounded bg-teal-950 text-teal-300 border border-teal-800 mono">BULLISH</span>
+                <div class="flex items-center gap-2">
+                  <span class="text-[10px] text-gray-400 mono">Score: <b id="vibe-alpha-score" class="text-teal-300 font-bold">+0.0</b></span>
+                  <span id="vibe-alpha-regime" class="text-[10px] font-bold px-2 py-0.5 rounded bg-teal-950 text-teal-300 border border-teal-800 mono">NEUTRAL</span>
+                </div>
               </div>
               <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 text-xs mono">
+                <!-- 1. EMA Acceleration -->
                 <div class="bg-[#151c2c] p-2 rounded border border-gray-800">
-                  <div class="text-[10px] text-gray-400 font-sans">EMA Gia Tốc d²(EMA)</div>
+                  <div class="text-[10px] text-gray-400 font-sans">1. Gia Tốc d²(EMA)</div>
                   <div id="vibe-alpha-accel" class="font-bold text-cyan-300 mt-0.5">+0.00</div>
                 </div>
+                <!-- 2. EMA Slope -->
                 <div class="bg-[#151c2c] p-2 rounded border border-gray-800">
-                  <div class="text-[10px] text-gray-400 font-sans">Kyle's Lambda (Tác động)</div>
+                  <div class="text-[10px] text-gray-400 font-sans">2. Độ Dốc d(EMA)</div>
+                  <div id="vibe-alpha-slope" class="font-bold text-cyan-400 mt-0.5">+0.00</div>
+                </div>
+                <!-- 3. Momentum Z-Score -->
+                <div class="bg-[#151c2c] p-2 rounded border border-gray-800">
+                  <div class="text-[10px] text-gray-400 font-sans">3. Động Lượng Z-Score</div>
+                  <div id="vibe-alpha-zscore" class="font-bold text-emerald-300 mt-0.5">0.00σ</div>
+                </div>
+                <!-- 4. Kyle's Lambda -->
+                <div class="bg-[#151c2c] p-2 rounded border border-gray-800">
+                  <div class="text-[10px] text-gray-400 font-sans">4. Kyle's Lambda (Tác động)</div>
                   <div id="vibe-alpha-lambda" class="font-bold text-amber-300 mt-0.5">0.000000</div>
                 </div>
+                <!-- 5. Amihud Illiquidity -->
                 <div class="bg-[#151c2c] p-2 rounded border border-gray-800">
-                  <div class="text-[10px] text-gray-400 font-sans">Amihud Illiquidity</div>
+                  <div class="text-[10px] text-gray-400 font-sans">5. Amihud Illiquidity</div>
                   <div id="vibe-alpha-amihud" class="font-bold text-purple-300 mt-0.5">0.0000</div>
                 </div>
+                <!-- 6. Yang-Zhang Vol -->
                 <div class="bg-[#151c2c] p-2 rounded border border-gray-800">
-                  <div class="text-[10px] text-gray-400 font-sans">Yang-Zhang Vol Realized</div>
+                  <div class="text-[10px] text-gray-400 font-sans">6. Yang-Zhang Vol Realized</div>
                   <div id="vibe-alpha-yz" class="font-bold text-blue-300 mt-0.5">1.50%</div>
                 </div>
+                <!-- 7. OU VWAP Half-Life -->
                 <div class="bg-[#151c2c] p-2 rounded border border-gray-800">
-                  <div class="text-[10px] text-gray-400 font-sans">OU VWAP Half-Life</div>
+                  <div class="text-[10px] text-gray-400 font-sans">7. OU VWAP Half-Life</div>
                   <div id="vibe-alpha-ou" class="font-bold text-emerald-300 mt-0.5">12.0 nến</div>
                 </div>
+                <!-- 8. Squeeze Intensity -->
                 <div class="bg-[#151c2c] p-2 rounded border border-gray-800">
-                  <div class="text-[10px] text-gray-400 font-sans">Squeeze Độ Nén Nến</div>
+                  <div class="text-[10px] text-gray-400 font-sans">8. Squeeze Độ Nén Nến</div>
                   <div id="vibe-alpha-squeeze" class="font-bold text-rose-300 mt-0.5">0.50</div>
                 </div>
+                <!-- 9. Volume Force Ratio -->
                 <div class="bg-[#151c2c] p-2 rounded border border-gray-800">
-                  <div class="text-[10px] text-gray-400 font-sans">Lực Đẩy Khối Lượng</div>
+                  <div class="text-[10px] text-gray-400 font-sans">9. Lực Đẩy Khối Lượng</div>
                   <div id="vibe-alpha-force" class="font-bold text-teal-300 mt-0.5">1.0x</div>
                 </div>
+                <!-- 10. Tail Risk Skewness -->
                 <div class="bg-[#151c2c] p-2 rounded border border-gray-800">
-                  <div class="text-[10px] text-gray-400 font-sans">Tỷ Lệ Hấp Thụ Vốn</div>
+                  <div class="text-[10px] text-gray-400 font-sans">10. Độ Lệch Đuôi Skew</div>
+                  <div id="vibe-alpha-skew" class="font-bold text-yellow-300 mt-0.5">0.00</div>
+                </div>
+                <!-- 11. Institutional Absorption -->
+                <div class="bg-[#151c2c] p-2 rounded border border-gray-800">
+                  <div class="text-[10px] text-gray-400 font-sans">11. Hấp Thụ Thanh Khoản</div>
                   <div id="vibe-alpha-absorb" class="font-bold text-indigo-300 mt-0.5">0.50</div>
+                </div>
+                <!-- 12. Dominant Factor -->
+                <div class="bg-[#151c2c] p-2 rounded border border-gray-800">
+                  <div class="text-[10px] text-gray-400 font-sans">12. Factor Thống Trị</div>
+                  <div id="vibe-alpha-dominant" class="font-bold text-orange-300 mt-0.5 truncate text-[11px]">EMA_MOMENTUM</div>
                 </div>
               </div>
               <div class="text-[10px] text-gray-400 mono italic" id="vibe-alpha-thesis">
@@ -4608,15 +4642,32 @@
           if (ratEl) ratEl.innerText = lc.council_rationale;
         }
 
-        // 2. Alpha Zoo Factors
+        // 2. Alpha Zoo Factors (All 12 Realtime Factors)
         if (vt.alpha_zoo) {
           const az = vt.alpha_zoo;
           const scoreEl = document.getElementById('vibe-alpha-score');
-          if (scoreEl) scoreEl.innerText = (az.composite_alpha_score >= 0 ? '+' : '') + az.composite_alpha_score.toFixed(1);
+          if (scoreEl) {
+            scoreEl.innerText = (az.composite_alpha_score >= 0 ? '+' : '') + az.composite_alpha_score.toFixed(1);
+            scoreEl.className = az.composite_alpha_score >= 15 ? 'text-emerald-400 font-bold' : (az.composite_alpha_score <= -15 ? 'text-rose-400 font-bold' : 'text-amber-400 font-bold');
+          }
           const regimeEl = document.getElementById('vibe-alpha-regime');
-          if (regimeEl) regimeEl.innerText = az.alpha_regime;
+          if (regimeEl) {
+            regimeEl.innerText = az.alpha_regime;
+            if (az.alpha_regime.includes('BULL')) {
+              regimeEl.className = 'text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 mono';
+            } else if (az.alpha_regime.includes('BEAR')) {
+              regimeEl.className = 'text-[10px] font-bold px-2 py-0.5 rounded bg-rose-950 text-rose-400 border border-rose-800 mono';
+            } else {
+              regimeEl.className = 'text-[10px] font-bold px-2 py-0.5 rounded bg-teal-950 text-teal-300 border border-teal-800 mono';
+            }
+          }
           const accelEl = document.getElementById('vibe-alpha-accel');
           if (accelEl) accelEl.innerText = (az.ema_acceleration >= 0 ? '+' : '') + az.ema_acceleration.toFixed(2);
+          const slopeEl = document.getElementById('vibe-alpha-slope');
+          if (slopeEl) slopeEl.innerText = (az.ema_slope >= 0 ? '+' : '') + az.ema_slope.toFixed(2);
+          const zscoreEl = document.getElementById('vibe-alpha-zscore');
+          if (zscoreEl) zscoreEl.innerText = (az.momentum_zscore >= 0 ? '+' : '') + az.momentum_zscore.toFixed(2) + 'σ';
+
           const lambdaEl = document.getElementById('vibe-alpha-lambda');
           if (lambdaEl) lambdaEl.innerText = az.kyles_lambda.toFixed(6);
           const amihudEl = document.getElementById('vibe-alpha-amihud');
@@ -4629,8 +4680,13 @@
           if (squeezeEl) squeezeEl.innerText = az.squeeze_intensity.toFixed(2);
           const forceEl = document.getElementById('vibe-alpha-force');
           if (forceEl) forceEl.innerText = `${az.volume_force_ratio.toFixed(1)}x`;
+          const skewEl = document.getElementById('vibe-alpha-skew');
+          if (skewEl) skewEl.innerText = (az.tail_risk_skew >= 0 ? '+' : '') + az.tail_risk_skew.toFixed(2);
           const absorbEl = document.getElementById('vibe-alpha-absorb');
           if (absorbEl) absorbEl.innerText = az.absorption_ratio.toFixed(2);
+          const dominantEl = document.getElementById('vibe-alpha-dominant');
+          if (dominantEl) dominantEl.innerText = az.dominant_factor || 'EMA_MOMENTUM';
+
           const thesisEl = document.getElementById('vibe-alpha-thesis');
           if (thesisEl) thesisEl.innerText = az.summary_thesis;
         }

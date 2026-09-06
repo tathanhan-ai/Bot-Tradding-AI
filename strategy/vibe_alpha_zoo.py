@@ -63,18 +63,32 @@ class VibeAlphaZooEngine:
         current_price: float,
         best_bid: float = 0.0,
         best_ask: float = 0.0,
-        spread: float = 0.0
+        spread: float = 0.0,
+        lob_imbalance: float = 0.0,
+        vpin: float = 0.0,
     ) -> VibeAlphaMetrics:
-        """Computes all 12 Alpha Zoo factors from candlestick DataFrame."""
+        """Computes all 12 Alpha Zoo factors in real time from candlestick DataFrame and live tick."""
         if df is None or len(df) < 25:
             return self.latest_metrics
 
         try:
-            closes = df["close"].values
-            highs = df["high"].values
-            lows = df["low"].values
-            opens = df["open"].values
-            volumes = df["volume"].values if "volume" in df.columns else np.ones(len(df))
+            closes = df["close"].to_numpy(dtype=float, copy=True)
+            highs = df["high"].to_numpy(dtype=float, copy=True)
+            lows = df["low"].to_numpy(dtype=float, copy=True)
+            opens = df["open"].to_numpy(dtype=float, copy=True)
+            volumes = df["volume"].to_numpy(dtype=float, copy=True) if "volume" in df.columns else np.ones(len(df))
+
+            # Real-time tick integration:
+            # If a valid live current_price is provided, incorporate it into the real-time forming tick
+            if current_price > 0 and abs(current_price - closes[-1]) / max(1.0, closes[-1]) < 0.25:
+                last_c = closes[-1]
+                live_h = max(last_c, current_price)
+                live_l = min(last_c, current_price)
+                closes = np.append(closes, current_price)
+                highs = np.append(highs, live_h)
+                lows = np.append(lows, live_l)
+                opens = np.append(opens, last_c)
+                volumes = np.append(volumes, max(0.01, volumes[-1] * 0.05))
 
             n = len(closes)
             
@@ -158,14 +172,15 @@ class VibeAlphaZooEngine:
             absorption = float(min(1.0, rel_vol / (body_ratio + 0.1) * 0.25))
 
             # 11. Composite Alpha Score [-100, +100]
-            # Weights: Momentum/Accel (35%), ZScore (25%), VolForce (20%), Skew (20%)
+            # Weights: Momentum/Accel (35%), ZScore (25%), VolForce (20%), Skew (10%), LOB Imbalance (10%)
             mom_component = max(-40.0, min(40.0, (slope_now * 15.0) + (accel * 25.0)))
             z_component = max(-30.0, min(30.0, mom_zscore * 12.0))
             force_dir = 1.0 if closes[-1] >= opens[-1] else -1.0
             force_component = max(-20.0, min(20.0, vol_force * 8.0 * force_dir))
             skew_component = max(-10.0, min(10.0, skewness * 8.0))
+            lob_component = max(-10.0, min(10.0, float(lob_imbalance) * 10.0))
 
-            composite_score = round(mom_component + z_component + force_component + skew_component, 1)
+            composite_score = round(mom_component + z_component + force_component + skew_component + lob_component, 1)
             composite_score = max(-100.0, min(100.0, composite_score))
 
             # Regime
@@ -185,7 +200,7 @@ class VibeAlphaZooEngine:
                 alpha_regime = "NEUTRAL"
                 dominant_factor = "MEAN_REVERSION_OU"
 
-            thesis = f"Alpha Zoo: {alpha_regime} ({composite_score:+.1f}đ). Gia tốc sóng={accel:+.2f}, OU Half-Life={half_life:.1f} nến, YZ-Vol={yz_vol*100:.2f}%."
+            thesis = f"Alpha Zoo: {alpha_regime} ({composite_score:+.1f} pts). Gia toc song={accel:+.2f}, OU Half-Life={half_life:.1f} bars, YZ-Vol={yz_vol*100:.2f}%."
 
             self.latest_metrics = VibeAlphaMetrics(
                 ema_slope=round(slope_now, 3),

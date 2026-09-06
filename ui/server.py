@@ -789,12 +789,19 @@ class LiveTradingState:
 
         # Evaluate HKUDS Vibe Alpha Zoo (12 Quantitative Factors)
         if df_struct is not None and not df_struct.empty:
+            hft_metrics = snapshot.context.get("hft") if (snapshot and snapshot.context) else None
+            lob_imb = float(getattr(hft_metrics, "lob_imbalance_20", 0.0) or 0.0)
+            vpin_val = float(getattr(hft_metrics, "vpin", 0.2) or 0.2)
+            best_bid_val = snapshot.bids[0][0] if (snapshot and snapshot.bids) else price
+            best_ask_val = snapshot.asks[0][0] if (snapshot and snapshot.asks) else price
             self.vibe_alpha_zoo.evaluate(
                 df=df_struct,
                 current_price=price,
-                best_bid=snapshot.bids[0][0],
-                best_ask=snapshot.asks[0][0],
-                spread=(snapshot.asks[0][0] - snapshot.bids[0][0])
+                best_bid=best_bid_val,
+                best_ask=best_ask_val,
+                spread=(best_ask_val - best_bid_val) if (snapshot and snapshot.bids and snapshot.asks) else 0.1,
+                lob_imbalance=lob_imb,
+                vpin=vpin_val
             )
 
         # Research is deliberately last: it consumes the corrected regime,
