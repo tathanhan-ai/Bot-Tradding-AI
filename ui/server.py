@@ -903,9 +903,11 @@ class LiveTradingState:
                 return StageOutcome.veto(self.execution_blocker)
             equity = self.current_balance + (self.current_position["unrealized_pnl"] if self.current_position else 0.0) + sum(pos.get("unrealized_pnl", 0.0) for pos in self.hedge_positions.values())
             gate_direction = 1 if order.direction == 0 else order.direction
+            # For Grid, profit comes from grid leg oscillations rather than a single directional TP
+            target_price = 0.0 if (order.order_type == "GRID" or order.source in ("manual-grid", "auto-grid")) else order.take_profit
             allowed, reason, _status = self.freqtrade_protections.validate_new_trade(
                 entry_price=order.entry_price,
-                target_price=order.take_profit,
+                target_price=target_price,
                 direction=gate_direction,
                 balance=self.current_balance,
                 equity=equity,
@@ -955,12 +957,23 @@ class LiveTradingState:
 
         def jesse_gate(order: CandidateOrder, _snapshot: MarketSnapshot) -> StageOutcome:
             metrics = self.jesse_engine.compute_metrics()
-            if metrics.current_consecutive_losses >= 3 or self.risk_manager.circuit_breaker_active:
-                return StageOutcome.veto("Jesse loss-streak / daily circuit breaker")
+            now = time.time()
+            last_trade_closed = self.trades[-1].get("closed_at_ts", 0.0) if self.trades else 0.0
+            cooldown_seconds = 300.0  # 5-minute recovery cooldown
+            is_cooldown_expired = (now - last_trade_closed) > cooldown_seconds
+
+            if metrics.current_consecutive_losses >= 3:
+                if is_cooldown_expired:
+                    # Allow probation trading with safe defensive sizing rather than permanent deadlock
+                    return StageOutcome.pass_("Probation entry after loss streak cooldown: defensive sizing active", probation=True, risk_cap_pct=0.0025)
+                remaining = max(1, int(cooldown_seconds - (now - last_trade_closed)))
+                return StageOutcome.veto(f"Jesse loss-streak cooldown active: {remaining}s remaining")
+            if self.risk_manager.circuit_breaker_active:
+                return StageOutcome.veto("Jesse daily circuit breaker active")
             if metrics.total_trades < 30:
                 return StageOutcome.pass_("probation: insufficient expectancy sample", probation=True, risk_cap_pct=0.0025)
-            if metrics.expectancy_usdt <= 0 or metrics.current_consecutive_losses >= 3:
-                return StageOutcome.veto(f"expectancy={metrics.expectancy_usdt:.2f}, loss streak={metrics.current_consecutive_losses}")
+            if metrics.expectancy_usdt <= 0:
+                return StageOutcome.veto(f"expectancy={metrics.expectancy_usdt:.2f}")
             return StageOutcome.pass_(f"positive expectancy={metrics.expectancy_usdt:.2f}")
 
         def deterministic_gate(order: CandidateOrder, _snapshot: MarketSnapshot) -> StageOutcome:
@@ -972,12 +985,13 @@ class LiveTradingState:
                 strategy = getattr(verdict, "recommended_strategy", "")
                 ensemble_verdict = getattr(self.ensemble_result, "consensus_verdict", "") if self.ensemble_result else ""
 
-                # Only engage GRID if specifically in a GRID strategy or order explicitly requested GRID
+                # Engage GRID if regime is ranging/sideway or strategy indicates range/grid
                 is_grid_specific = (
                     order.order_type == "GRID"
                     or order.source == "auto-grid"
                     or (research and getattr(research, "recommended_type", "") == "GRID")
-                    or (strategy in ("GRID_BOT", "SIDEWAY_GRID") and ensemble_verdict == "SIDEWAY_GRID")
+                    or (strategy in ("GRID_BOT", "SIDEWAY_GRID", "TWO_WAY_RANGE", "MEAN_REVERSION_GRID") and ensemble_verdict in ("SIDEWAY_GRID", "RANGING_SIDEWAY", "NEUTRAL"))
+                    or (getattr(verdict, "regime", "") in ("RANGING_SIDEWAY", "CHOPPY", "SIDEWAY_GRID") and ensemble_verdict in ("SIDEWAY_GRID", "RANGING_SIDEWAY", "NEUTRAL"))
                 )
                 atr = float(self.indicators.get("atr") or _snapshot.price * .008)
                 vwap_val = float(getattr(verdict, "vwap_fair_price", 0.0) or 0.0)
@@ -1021,13 +1035,14 @@ class LiveTradingState:
             if order.order_type == "GRID" and order.source in ("manual-grid", "auto-grid", "auto"):
                 verdict = self.ai_verdict
                 atr = float(self.indicators.get("atr") or _snapshot.price * .008)
+                grid_atr = max(atr, _snapshot.price * 0.005)
                 supp = float(getattr(verdict, "support_price", 0.0) or 0.0)
                 resis = float(getattr(verdict, "resistance_price", 0.0) or 0.0)
                 vwap_val = float(getattr(verdict, "vwap_fair_price", 0.0) or 0.0)
-                if supp <= 0 or supp >= _snapshot.price:
-                    supp = round(_snapshot.price - 2.5 * atr, 1)
-                if resis <= 0 or resis <= _snapshot.price:
-                    resis = round(_snapshot.price + 2.5 * atr, 1)
+                if supp <= 0 or supp >= _snapshot.price or (_snapshot.price - supp) < grid_atr * 1.5:
+                    supp = round(_snapshot.price - 2.5 * grid_atr, 1)
+                if resis <= 0 or resis <= _snapshot.price or (resis - _snapshot.price) < grid_atr * 1.5:
+                    resis = round(_snapshot.price + 2.5 * grid_atr, 1)
                 if vwap_val <= 0 or not (supp < vwap_val < resis):
                     vwap_val = round((supp + resis) / 2.0, 1)
 
@@ -1037,15 +1052,18 @@ class LiveTradingState:
                     vwap=vwap_val, atr=atr,
                     regime=getattr(verdict, "regime", ""), recommended_strategy=getattr(verdict, "recommended_strategy", ""),
                     adx=float(self.indicators.get("adx") or 0.0), hurst=float(getattr(verdict, "hurst_exponent", 1.0)),
+                    is_manual=order.source == "manual-grid",
                 )
                 if not plan.is_tradeable:
                     return StageOutcome.veto(plan.reason)
                 alpha = self.vibe_alpha_zoo.get_latest_metrics()
-                # Only veto Grid if OctoBot has a confirmed STRONG trend
-                if matrix and matrix.is_tradable and matrix.consensus_state in ("STRONG_BULLISH", "STRONG_BEARISH"):
-                    return StageOutcome.veto(f"OctoBot has a strong trend ({matrix.consensus_state}); hedge grid is paused")
-                if abs(alpha.composite_alpha_score) > 20.0:
-                    return StageOutcome.veto(f"Alpha Zoo is strongly directional ({alpha.composite_alpha_score:+.1f})")
+                is_manual_grid = order.source == "manual-grid"
+                # Only veto Grid if OctoBot has a confirmed STRONG trend (for auto-grid) or extreme Alpha breakout
+                if not is_manual_grid:
+                    if matrix and matrix.is_tradable and matrix.consensus_state in ("STRONG_BULLISH", "STRONG_BEARISH"):
+                        return StageOutcome.veto(f"OctoBot has a strong trend ({matrix.consensus_state}); hedge grid is paused")
+                    if abs(alpha.composite_alpha_score) > 60.0:
+                        return StageOutcome.veto(f"Alpha Zoo is strongly directional ({alpha.composite_alpha_score:+.1f})")
                 order.entry_price = plan.center
                 order.stop_loss = plan.lower - .5 * atr
                 order.take_profit = plan.upper + .5 * atr
@@ -1141,6 +1159,8 @@ class LiveTradingState:
             )
 
         def council_gate(order: CandidateOrder, _snapshot: MarketSnapshot) -> StageOutcome:
+            if order.order_type == "GRID":
+                return StageOutcome.pass_("Hedge Grid is quantitative non-directional market making; validated by GridPlanner")
             verdict = self.vibe_swarm.evaluate_council(
                 current_price=_snapshot.price, indicators=self.indicators,
                 ai_verdict=self.ai_verdict, ensemble_result=self.ensemble_result,
@@ -1183,11 +1203,13 @@ class LiveTradingState:
                 legs = plan.get("legs", []) if isinstance(plan, dict) else []
                 if not legs or len(legs) % 2:
                     return StageOutcome.veto("No paired grid legs after regime validation")
-                quant = research.carver_output or {}
+                quant = (research.carver_output if research else None) or getattr(self, "carver_output", None) or {}
                 daily_target = float(quant.get("daily_cash_vol_target", 0.0))
                 instrument_vol = float(quant.get("instrument_value_vol", 0.0))
-                if not all(math.isfinite(value) and value > 0 for value in (daily_target, instrument_vol)):
-                    return StageOutcome.veto("No measured Carver volatility budget for grid")
+                if not (math.isfinite(daily_target) and daily_target > 0 and math.isfinite(instrument_vol) and instrument_vol > 0):
+                    atr_val = float(self.indicators.get("atr") or _snapshot.price * 0.008)
+                    daily_target = self.current_balance * self.risk_config.max_account_risk_pct
+                    instrument_vol = max(1.0, atr_val * 4.0)
                 pending = [item for item in self.order_manager.pending_orders if item.group_type != "GRID"]
                 used_risk = sum(max(0, item.units - item.exchange_executed_quantity) * abs(item.price - item.stop_loss) for item in pending)
                 used_margin = sum(max(0, item.units - item.exchange_executed_quantity) * item.price / item.leverage for item in pending)
@@ -1199,8 +1221,12 @@ class LiveTradingState:
                 total_quantity = min(daily_target / instrument_vol, remaining_risk / max_stop_distance,
                     remaining_margin * leverage / _snapshot.price, probation_cap / max_stop_distance) * min(1.0, governor.size_multiplier)
                 total_quantity = math.floor(total_quantity / .001 + 1e-12) * .001
-                if total_quantity < len(legs) * .001:
-                    return StageOutcome.veto("Dynamic Grid budget cannot fund every paired child")
+                min_grid_qty = len(legs) * 0.001
+                if total_quantity < min_grid_qty:
+                    if remaining_margin * leverage >= min_grid_qty * _snapshot.price:
+                        total_quantity = min_grid_qty
+                    else:
+                        return StageOutcome.veto("Dynamic Grid budget cannot fund every paired child")
                 return StageOutcome.pass_("Carver/CRO dynamic gross grid budget applied", quantity=total_quantity,
                     margin=round(total_quantity * _snapshot.price / leverage, 2), leverage=leverage,
                     grid_budget={"daily_vol_contracts": daily_target / instrument_vol, "remaining_risk": remaining_risk,
@@ -1666,12 +1692,15 @@ class LiveTradingState:
         if pending:
             stale_orders = []
             for o in pending:
+                # Do not cancel GRID orders based on single-price drift; GRID orders intentionally span the channel
+                if o.group_type == "GRID":
+                    continue
                 price_drift = abs(current_price - o.price) / max(1.0, current_price)
                 if o.order_type in ("POST_ONLY", "LIMIT", "SCALE_RATIO") and price_drift > 0.008:
                     stale_orders.append(o)
             for stale in stale_orders:
                 self.order_manager.cancel_order(stale.order_id)
-            if len(self.order_manager.pending_orders) > 0:
+            if any(o.group_type != "GRID" for o in self.order_manager.pending_orders):
                 return
 
         if now - self.last_auto_order_time < 10.0:

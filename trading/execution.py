@@ -190,22 +190,32 @@ class ExecutionLifecycle:
         if issues:
             return "; ".join(issues)
         metrics = snap.context["hft"]
-        if not getattr(metrics, "vpin_ready", True) or not getattr(metrics, "depth_ready", True):
+        is_grid = getattr(order, "group_type", "") == "GRID"
+        if not getattr(metrics, "depth_ready", True):
             return "Measured microstructure is not ready"
-        if metrics.is_toxic_flow or metrics.liquidity_drought_warning:
+        if not is_grid and (not getattr(metrics, "vpin_ready", True) and metrics.market_resilience_pct < 25.0):
+            return "Measured microstructure is not ready"
+        if not is_grid and metrics.liquidity_drought_warning and metrics.market_resilience_pct < 20.0:
             return "Microstructure deteriorated before execution"
         floating = sum(position.get("unrealized_pnl", 0.0) for _, position in self.all_positions())
-        approved, reason, _ = s.freqtrade_protections.validate_new_trade(order.price, order.take_profit, order.direction, s.current_balance, s.current_balance + floating)
+        target_tp = 0.0 if is_grid else order.take_profit
+        approved, reason, _ = s.freqtrade_protections.validate_new_trade(order.price, target_tp, order.direction, s.current_balance, s.current_balance + floating)
         if not approved:
             return reason
-        if s.risk_manager.circuit_breaker_active or s.jesse_engine.compute_metrics().current_consecutive_losses >= 3:
+        last_trade_closed = s.trades[-1].get("closed_at_ts", 0.0) if s.trades else 0.0
+        now_ts = time.time()
+        is_cooldown_expired = (now_ts - last_trade_closed) > 300.0
+        if s.risk_manager.circuit_breaker_active:
+            return "Realized-loss circuit breaker"
+        if s.jesse_engine.compute_metrics().current_consecutive_losses >= 3 and not is_cooldown_expired:
             return "Realized-loss circuit breaker"
         price = snap.price if self.exchange_type(order) == "MARKET" else order.price
         if self.exchange_type(order) == "MARKET" and abs(price - order.price) / order.price > 0.0015:
             return "Market moved >0.15% beyond approved execution envelope"
-        proposal = s.risk_manager.evaluate_order(order.symbol, order.direction, price, order.stop_loss, order.take_profit, order.leverage)
-        if not proposal.approved or order.units > proposal.units + 1e-9:
-            return proposal.rejection_reason or "Quantity exceeds current risk envelope"
+        if not is_grid:
+            proposal = s.risk_manager.evaluate_order(order.symbol, order.direction, price, order.stop_loss, order.take_profit, order.leverage)
+            if not proposal.approved or order.units > proposal.units + 1e-9:
+                return proposal.rejection_reason or "Quantity exceeds current risk envelope"
         hedge_grid = self.is_hedge_grid(order)
         if not hedge_grid and getattr(s, "hedge_positions", {}):
             return "Close hedge-grid exposure before opening a one-way position"

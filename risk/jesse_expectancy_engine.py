@@ -45,11 +45,12 @@ class JesseExpectancyEngine:
 
     def record_trade(self, net_pnl: float):
         self.trade_pnls.append(net_pnl)
-        if net_pnl <= 0:
+        # Ignore micro-rebate/fee noise (pnl between -0.05 and 0.0) as full strategy loss
+        if net_pnl < -0.05:
             self.current_consecutive_losses += 1
             if self.current_consecutive_losses > self.max_consecutive_losses:
                 self.max_consecutive_losses = self.current_consecutive_losses
-        else:
+        elif net_pnl > 0.05:
             self.current_consecutive_losses = 0
 
     def compute_metrics(self) -> JesseMetrics:

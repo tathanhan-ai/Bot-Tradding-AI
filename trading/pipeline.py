@@ -210,8 +210,8 @@ class SevenStagePipeline:
         snapshot_issues = snapshot.freshness_issues(now)
         if candidate.symbol != snapshot.symbol:
             snapshot_issues.append("candidate and snapshot symbols differ")
-        is_grid_plan = candidate.source == "manual-grid" and candidate.order_type == "GRID" and candidate.direction == 0
-        if candidate.direction not in (-1, 1) and not (candidate.source == "auto" and candidate.direction == 0) and not is_grid_plan:
+        is_grid_plan = candidate.source in ("manual-grid", "auto-grid") and candidate.order_type == "GRID" and candidate.direction == 0
+        if candidate.direction not in (-1, 1) and not (candidate.source in ("auto", "auto-grid") and candidate.direction == 0) and not is_grid_plan:
             snapshot_issues.append("invalid candidate direction")
         if any(not math.isfinite(x) or x < 0 for x in (candidate.entry_price, candidate.stop_loss, candidate.take_profit)):
             snapshot_issues.append("non-finite or negative candidate price")
