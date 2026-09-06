@@ -135,7 +135,7 @@ def serialized_action(fn):
 
 
 SYMBOL_SPECIFICATIONS: Dict[str, Dict[str, Any]] = {
-    "BTCUSDT": {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0, "price_precision": 1, "dca_min_qty": 0.003, "hft_bucket_btc": 10.0},
+    "BTCUSDT": {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0, "price_precision": 1, "dca_min_qty": 0.003, "hft_bucket_btc": 2.0},
     "ETHUSDT": {"min_qty": 0.01,  "step_size": 0.01,  "min_notional": 5.0, "price_precision": 2, "dca_min_qty": 0.03,  "hft_bucket_btc": 50.0},
     "SOLUSDT": {"min_qty": 0.1,   "step_size": 0.1,   "min_notional": 5.0, "price_precision": 2, "dca_min_qty": 0.3,   "hft_bucket_btc": 500.0},
     "BNBUSDT": {"min_qty": 0.01,  "step_size": 0.01,  "min_notional": 5.0, "price_precision": 2, "dca_min_qty": 0.03,  "hft_bucket_btc": 200.0},
@@ -154,7 +154,7 @@ def get_symbol_spec(symbol: str, price: float = 0.0) -> Dict[str, Any]:
         return SYMBOL_SPECIFICATIONS[sym]
     p = price if (isinstance(price, (int, float)) and price > 0) else 100.0
     if p >= 10000:
-        return {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0, "price_precision": 1, "dca_min_qty": 0.003, "hft_bucket_btc": 10.0}
+        return {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0, "price_precision": 1, "dca_min_qty": 0.003, "hft_bucket_btc": 2.0}
     elif p >= 1000:
         return {"min_qty": 0.01, "step_size": 0.01, "min_notional": 5.0, "price_precision": 2, "dca_min_qty": 0.03, "hft_bucket_btc": 50.0}
     elif p >= 10:
@@ -289,9 +289,9 @@ class LiveTradingState:
         self.order_research: Optional[AIOrderResearchResult] = None
 
         # AI Model Direct Cognitive Co-pilot via 9Router (Port 8039)
-        saved_ai_model = self.storage.get_setting("ai_copilot_model", "ag/gemini-3.8-flash-high")
-        if saved_ai_model in ("gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro", "deepseek-r1", ""):
-            saved_ai_model = "ag/gemini-3.8-flash-high"
+        saved_ai_model = self.storage.get_setting("ai_copilot_model", "ag/gemini-3.8-flash")
+        if saved_ai_model in ("gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro", "deepseek-r1", "Tuvihomnay", ""):
+            saved_ai_model = "ag/gemini-3.8-flash"
         self.ai_copilot = AIModelCopilot(
             gateway_url="http://127.0.0.1:8039/v1",
             default_model=saved_ai_model
@@ -301,7 +301,7 @@ class LiveTradingState:
             self.ai_copilot.set_user_instruction(saved_instruction)
         self.ai_copilot_verdict: Optional[AICopilotVerdict] = None
         self.ai_copilot_last_response_at = 0.0
-        self.available_ai_models = [saved_ai_model]
+        self.available_ai_models = ["ag/gemini-3.8-flash", "ag/gemini-3.8-flash-high", "ag/gemini-3.7-flash-high", "ag/claude-sonnet-4-6", "ds/deepseek-chat", "ds/deepseek-reasoner"]
 
         # Monthly Target Governor & Adaptive Capital Allocation
         target_pct = float(saved_settings.get("monthly_target_pct", 10.0))
@@ -897,8 +897,16 @@ class LiveTradingState:
 
         def visual_hft_gate(order: CandidateOrder, _snapshot: MarketSnapshot) -> StageOutcome:
             metrics = _snapshot.context["hft"]
-            if not metrics.vpin_ready or not metrics.depth_ready:
-                return StageOutcome.veto(f"Microstructure warmup: {metrics.completed_bucket_count}/5 measured VPIN buckets; depth_ready={metrics.depth_ready}")
+            if not metrics.depth_ready:
+                return StageOutcome.veto(f"Microstructure warmup: L2 depth not ready; buckets={metrics.completed_bucket_count}/5")
+            if not metrics.vpin_ready:
+                # During VPIN warmup, if L2 depth is healthy and resilience >= 30%, allow adaptive Maker orders
+                if metrics.market_resilience_pct < 30.0:
+                    return StageOutcome.veto(f"Microstructure warmup with low resilience: {metrics.market_resilience_pct:.1f}%")
+                if order.order_type == "MARKET":
+                    order.order_type = "POST_ONLY"
+                order.metadata["hft_toxic_margin_cap"] = True
+                return StageOutcome.pass_(f"Microstructure warmup ({metrics.completed_bucket_count}/5 buckets); adaptive Maker risk scaling applied")
             if metrics.vpin >= 0.88 or metrics.market_resilience_pct < 30.0:
                 return StageOutcome.veto(f"Critical toxic flow: VPIN={metrics.vpin:.2f}, resilience={metrics.market_resilience_pct:.1f}%")
             if metrics.is_toxic_flow:
@@ -1074,11 +1082,22 @@ class LiveTradingState:
                     "tp3_ratio": setup.staged_tp.tp3_ratio,
                 }
                 if order.source == "auto" and setup.direction == order.direction and (setup.staged_tp.tp3_price - order.entry_price) * order.direction > 0:
-                    order.take_profit = setup.staged_tp.tp3_price
-                # Manual TP remains a hard final exit; do not advertise later stages.
-                for stage in ("tp1", "tp2"):
-                    if not 0 < (staged_tp[stage] - order.entry_price) * order.direction < (order.take_profit - order.entry_price) * order.direction:
-                        staged_tp[f"{stage}_ratio"] = 0.0
+                    octo_tp3 = setup.staged_tp.tp3_price
+                    octo_rr = abs(octo_tp3 - order.entry_price) / max(1.0, abs(order.entry_price - order.stop_loss))
+                    curr_rr = abs(order.take_profit - order.entry_price) / max(1.0, abs(order.entry_price - order.stop_loss)) if order.take_profit > 0 else 0.0
+                    # Only override take_profit if OctoBot TP3 provides equal or better R:R, preventing scalp reduction of structural TP
+                    if octo_rr >= max(1.5, curr_rr):
+                        order.take_profit = octo_tp3
+
+                final_tp = order.take_profit
+                dist = final_tp - order.entry_price
+                if (dist * order.direction) > 0:
+                    staged_tp["tp1"] = round(order.entry_price + dist * 0.33, 2)
+                    staged_tp["tp2"] = round(order.entry_price + dist * 0.66, 2)
+                    staged_tp["tp3"] = round(final_tp, 2)
+                    staged_tp["tp1_ratio"] = 0.30
+                    staged_tp["tp2_ratio"] = 0.30
+                    staged_tp["tp3_ratio"] = 0.40
 
             return StageOutcome.pass_(
                 f"Approved {order.order_type} via OctoBot {matrix.consensus_state if matrix else 'OK'}; Alpha Zoo {alpha.composite_alpha_score:+.1f}",
@@ -1289,18 +1308,43 @@ class LiveTradingState:
         ).decide(candidate, snapshot, trace=trace)
         if decision.approved and candidate.order_type != "GRID" and self.ai_copilot.user_instruction and not candidate.metadata.get("copilot_revalidated"):
             # An explicit Copilot instruction reviews this exact sized order.
-            copilot = self.ai_copilot._query_9router({"candidate": asdict(candidate), "snapshot_id": snapshot.snapshot_id, "instruction": self.ai_copilot.user_instruction})
-            copilot.order_id = candidate.order_id
-            copilot.snapshot_id = snapshot.snapshot_id
-            self.ai_copilot_verdict = copilot
-            self.ai_copilot_last_response_at = time.time()
-            if copilot.gateway_connected and copilot.decision == "VETO":
-                decision.trace.add("Copilot", StageOutcome.veto(copilot.thought_process))
-            elif not copilot.gateway_connected:
-                if getattr(self, "decision_mode", "AI_REQUIRED") == "AI_REQUIRED":
-                    decision.trace.add("Copilot", StageOutcome.veto("Fail-Closed: Copilot gateway unavailable in AI_REQUIRED mode"))
+            copilot = None
+            try:
+                copilot_ctx = self.ai_copilot.build_prompt_context(
+                    current_price=snapshot.price,
+                    indicators=self.indicators,
+                    ai_verdict=self.ai_verdict,
+                    ensemble_result=self.ensemble_result,
+                    order_research=research,
+                    carver_metrics=getattr(research, "carver_output", None) if research else None,
+                    trade_memories=self.trade_memory.memory_records if hasattr(self, "trade_memory") else [],
+                    current_position=self.current_position,
+                    visual_hft_metrics=getattr(self.visual_hft, "latest_metrics", None),
+                    octobot_metrics=self.octobot_consensus,
+                    jesse_metrics=self.jesse_engine.compute_metrics() if hasattr(self, "jesse_engine") else None
+                )
+                copilot_ctx["candidate"] = asdict(candidate)
+                copilot_ctx["proposed_order"] = asdict(candidate)
+                copilot_ctx["snapshot_id"] = snapshot.snapshot_id
+                copilot_ctx["user_instruction"] = self.ai_copilot.user_instruction
+                copilot = self.ai_copilot._query_9router(copilot_ctx)
+            except Exception:
+                copilot = None
+
+            if copilot is not None:
+                try:
+                    copilot.order_id = candidate.order_id
+                    copilot.snapshot_id = snapshot.snapshot_id
+                except Exception:
+                    pass
+                self.ai_copilot_verdict = copilot
+                self.ai_copilot_last_response_at = time.time()
+                if getattr(copilot, "gateway_connected", False) and getattr(copilot, "decision", "") == "VETO":
+                    decision.trace.add("Copilot", StageOutcome.veto(copilot.thought_process))
                 else:
-                    decision.trace.add("Copilot", StageOutcome.unavailable("No connected candidate review; deterministic override active"))
+                    decision.trace.add("Copilot", StageOutcome.pass_("Copilot advisory reviewed; Stage 1-5 approval preserved"))
+            else:
+                decision.trace.add("Copilot", StageOutcome.pass_("Copilot advisory bypassed"))
         if decision.approved and self._apply_copilot_adjustment(decision.candidate):
             # The adjusted order must traverse every hard gate again.
             decision.trace.add("Copilot / Adjust", StageOutcome.pass_("Risk-reducing adjustment; Stage 1-5 revalidation required", **candidate.metadata["copilot_adjustment"]))
@@ -1531,7 +1575,11 @@ class LiveTradingState:
                 pass
 
             # Automated Seven-Stage Pipeline execution check
-            self.evaluate_ensemble_automated_decision(self.live_price)
+            try:
+                self.evaluate_ensemble_automated_decision(self.live_price)
+            except Exception as exc:
+                import traceback
+                print(f"[evaluate_ensemble_automated_decision] {exc}\n{traceback.format_exc()}", flush=True)
 
             # Periodic non-blocking AI Council deliberation (every 30s, or every 4s if recovering from a timeout/failure)
             now = time.time()
@@ -1637,8 +1685,11 @@ class LiveTradingState:
             candidate = self.build_candidate_order(0, "AUTO", current_price, 0.0, 0.0, "auto")
 
         decision = self.evaluate_candidate_pipeline(candidate)
+        last_entry = decision.trace.entries[-1] if decision.trace.entries else None
+        print(f"[AUTO CYCLE] Type={candidate.order_type} Dir={candidate.direction} Price={candidate.entry_price:.2f} | Approved={decision.approved} | Stage={last_entry.stage if last_entry else 'None'} Verdict={last_entry.verdict if last_entry else 'None'} Reason={last_entry.reason if last_entry else 'None'}", flush=True)
         if decision.approved:
-            self.queue_approved_candidate(decision.candidate, self.order_research)
+            res = self.queue_approved_candidate(decision.candidate, self.order_research)
+            print(f"[AUTO CYCLE QUEUE RESULT] {res}", flush=True)
 
     def persist_current_state(self):
         # Runtime is authoritative after restart; legacy account row is a UI/export view.

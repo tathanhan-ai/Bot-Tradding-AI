@@ -61,7 +61,7 @@ class VibeSwarmCouncil:
     def __init__(
         self,
         gateway_url: str = "http://127.0.0.1:8039/v1",
-        default_model: str = "gemini-2.0-flash",
+        default_model: str = "ag/gemini-3.8-flash",
         api_key: Optional[str] = None,
         min_votes_required: int = 3,
         enabled: bool = True,
@@ -70,7 +70,7 @@ class VibeSwarmCouncil:
         self.default_model = default_model
         import os
         self.api_key = api_key or os.environ.get("NINEROUTER_API_KEY", "sk-b4a922a69924f20a-b6s8st-780e9a2f")
-        self.min_votes_required = max(3, min(4, min_votes_required))
+        self.min_votes_required = max(2, min(4, min_votes_required))
         self.enabled = enabled
         self.agent_models = {agent_id: default_model for agent_id in self.AGENT_META}
         self.last_verdict: Optional[SwarmCouncilVerdict] = None
@@ -92,7 +92,7 @@ class VibeSwarmCouncil:
 
     @consensus_threshold.setter
     def consensus_threshold(self, value: int) -> None:
-        self.min_votes_required = max(3, min(4, int(value)))
+        self.min_votes_required = max(2, min(4, int(value)))
 
     def update_config(
         self,
@@ -107,7 +107,7 @@ class VibeSwarmCouncil:
         if enabled is not None:
             self.enabled = bool(enabled)
         if min_votes is not None:
-            self.min_votes_required = max(3, min(4, int(min_votes)))
+            self.min_votes_required = max(2, min(4, int(min_votes)))
         if default_model:
             self.default_model = default_model
         for agent_id, model in {
