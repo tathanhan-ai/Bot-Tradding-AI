@@ -134,6 +134,37 @@ def serialized_action(fn):
     return run
 
 
+SYMBOL_SPECIFICATIONS: Dict[str, Dict[str, Any]] = {
+    "BTCUSDT": {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0, "price_precision": 1, "dca_min_qty": 0.003, "hft_bucket_btc": 10.0},
+    "ETHUSDT": {"min_qty": 0.01,  "step_size": 0.01,  "min_notional": 5.0, "price_precision": 2, "dca_min_qty": 0.03,  "hft_bucket_btc": 50.0},
+    "SOLUSDT": {"min_qty": 0.1,   "step_size": 0.1,   "min_notional": 5.0, "price_precision": 2, "dca_min_qty": 0.3,   "hft_bucket_btc": 500.0},
+    "BNBUSDT": {"min_qty": 0.01,  "step_size": 0.01,  "min_notional": 5.0, "price_precision": 2, "dca_min_qty": 0.03,  "hft_bucket_btc": 200.0},
+    "DOGEUSDT":{"min_qty": 1.0,   "step_size": 1.0,   "min_notional": 5.0, "price_precision": 5, "dca_min_qty": 3.0,   "hft_bucket_btc": 250000.0},
+    "XRPUSDT": {"min_qty": 0.1,   "step_size": 0.1,   "min_notional": 5.0, "price_precision": 4, "dca_min_qty": 0.3,   "hft_bucket_btc": 50000.0},
+    "ADAUSDT": {"min_qty": 1.0,   "step_size": 1.0,   "min_notional": 5.0, "price_precision": 4, "dca_min_qty": 3.0,   "hft_bucket_btc": 100000.0},
+    "AVAXUSDT":{"min_qty": 0.1,   "step_size": 0.1,   "min_notional": 5.0, "price_precision": 2, "dca_min_qty": 0.3,   "hft_bucket_btc": 1000.0},
+    "NEARUSDT":{"min_qty": 0.1,   "step_size": 0.1,   "min_notional": 5.0, "price_precision": 3, "dca_min_qty": 0.3,   "hft_bucket_btc": 10000.0},
+    "LINKUSDT":{"min_qty": 0.1,   "step_size": 0.1,   "min_notional": 5.0, "price_precision": 3, "dca_min_qty": 0.3,   "hft_bucket_btc": 2000.0},
+}
+
+
+def get_symbol_spec(symbol: str, price: float = 0.0) -> Dict[str, Any]:
+    sym = (symbol or "BTCUSDT").upper().strip()
+    if sym in SYMBOL_SPECIFICATIONS:
+        return SYMBOL_SPECIFICATIONS[sym]
+    p = price if (isinstance(price, (int, float)) and price > 0) else 100.0
+    if p >= 10000:
+        return {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0, "price_precision": 1, "dca_min_qty": 0.003, "hft_bucket_btc": 10.0}
+    elif p >= 1000:
+        return {"min_qty": 0.01, "step_size": 0.01, "min_notional": 5.0, "price_precision": 2, "dca_min_qty": 0.03, "hft_bucket_btc": 50.0}
+    elif p >= 10:
+        return {"min_qty": 0.1, "step_size": 0.1, "min_notional": 5.0, "price_precision": 2, "dca_min_qty": 0.3, "hft_bucket_btc": 500.0}
+    elif p >= 1:
+        return {"min_qty": 1.0, "step_size": 1.0, "min_notional": 5.0, "price_precision": 4, "dca_min_qty": 3.0, "hft_bucket_btc": 5000.0}
+    else:
+        return {"min_qty": 1.0, "step_size": 1.0, "min_notional": 5.0, "price_precision": 5, "dca_min_qty": 3.0, "hft_bucket_btc": 50000.0}
+
+
 class LiveTradingState:
     def __init__(self, symbol: str = "BTCUSDT", balance: float = 5000.0, storage=None):
         self.symbol = symbol
@@ -470,13 +501,21 @@ class LiveTradingState:
             self.chart_klines.clear()
             self.latest_l2_bids = []
             self.latest_l2_asks = []
-            self.visual_hft = VisualHFTMicrostructureEngine(bucket_size_btc=10.0, num_buckets=30)
+            spec = get_symbol_spec(self.symbol, self.live_price)
+            bucket_sz = float(spec.get("hft_bucket_btc", 10.0))
+            self.visual_hft = VisualHFTMicrostructureEngine(bucket_size_btc=bucket_sz, num_buckets=30)
             self.order_flow_engine = OrderFlowCVDEngine(max_ticks=3000, window_seconds=60)
             self.order_flow_verdict = None
         self.execution.startup_reconciled = False
         await asyncio.to_thread(self.initialize_history)
         self.init_ws_engine()
         await self.ws_engine.start()
+        try:
+            self.update_indicators()
+            snap = self.build_market_snapshot()
+            self.analyze_snapshot(snap)
+        except Exception:
+            pass
 
     def fetch_binance_funding(self):
         now = time.time()
@@ -1193,17 +1232,20 @@ class LiveTradingState:
             if order.metadata.get("probation"):
                 stop_distance = abs(order.entry_price - order.stop_loss)
                 probation_quantity = (self.current_balance * order.metadata["risk_cap_pct"]) / risk_per_unit if stop_distance > 0 else 0.0
+            spec = get_symbol_spec(order.symbol, order.entry_price)
+            min_step = spec["step_size"]
+            dca_min = spec["dca_min_qty"]
             if order.metadata.get("hft_toxic_margin_cap"):
-                quantity = max(0.001, quantity * 0.50)
-            # DCA Ladder minimum size guard: 3 tiers (20% - 30% - 50%) require total units >= 0.003
-            if order.order_type == "SCALE_RATIO" and quantity < 0.003:
-                if remaining_margin * proposal.leverage / max(1.0, order.entry_price) >= 0.003:
-                    quantity = 0.003
+                quantity = max(min_step, quantity * 0.50)
+            # DCA Ladder minimum size guard: 3 tiers (20% - 30% - 50%) require total units >= dca_min
+            if order.order_type == "SCALE_RATIO" and quantity < dca_min:
+                if remaining_margin * proposal.leverage / max(1.0, order.entry_price) >= dca_min:
+                    quantity = dca_min
                 else:
                     order.order_type = "LIMIT"
-            quantity = math.floor((quantity + 1e-12) / 0.001) * 0.001
+            quantity = math.floor((quantity + 1e-12) / min_step) * min_step
             if quantity <= 0:
-                return StageOutcome.veto("final risk clamp below BTCUSDT minimum step")
+                return StageOutcome.veto(f"final risk clamp below {order.symbol} minimum step")
             margin = quantity * order.entry_price / proposal.leverage
             return StageOutcome.pass_(
                 f"Carver delta {contracts:+.4f}; CRO/monthly clamp applied",
@@ -1572,6 +1614,9 @@ class LiveTradingState:
 
             candidate = self.build_candidate_order(cand_dir, cand_type, cand_entry, cand_sl, cand_tp, "auto", confidence=res.win_probability)
             candidate.metadata.update({
+                "timeframe": getattr(res, "active_timeframe", self.active_timeframe),
+                "dca_ladder_step": getattr(res, "dca_ladder_step", 0.005),
+                "twap_interval_seconds": getattr(res, "twap_interval_seconds", 6),
                 "trigger_price": getattr(res, "optimal_trigger_price", 0.0),
                 "trigger_condition": getattr(res, "optimal_trigger_cond", "ABOVE"),
                 "callback_pct": getattr(res, "optimal_callback_pct", 0.8),
@@ -1871,7 +1916,10 @@ class LiveTradingState:
                 "market_resilience_pct": getattr(self.order_research, "market_resilience_pct", 0.0),
                 "lob_imbalance_20": getattr(self.order_research, "lob_imbalance_20", 0.0),
                 "kelly_multiplier": getattr(self.order_research, "kelly_multiplier", 1.0),
-                "octobot_tradable": getattr(self.order_research, "octobot_tradable", False)
+                "octobot_tradable": getattr(self.order_research, "octobot_tradable", False),
+                "active_timeframe": getattr(self.order_research, "active_timeframe", self.active_timeframe),
+                "dca_ladder_step": getattr(self.order_research, "dca_ladder_step", 0.005),
+                "twap_interval_seconds": getattr(self.order_research, "twap_interval_seconds", 6)
             },
             "carver_systematic": (
                 self.order_research.carver_output if (self.order_research and self.order_research.carver_output) else {
@@ -2194,19 +2242,25 @@ def close_all(session: UserSession = Depends(require_role(Role.OPERATOR))):
 
 @app.post("/api/action/set_symbol")
 async def set_symbol(symbol: str = "BTCUSDT", session: UserSession = Depends(require_role(Role.OPERATOR))):
-    if symbol.upper().strip() != "BTCUSDT" or state.current_position or state.hedge_positions or state.order_manager.pending_orders:
-        return {"status": "rejected", "reason": "BTCUSDT-only scope; cannot change symbol with exposure"}
     sym = symbol.upper().strip()
+    if not sym or not (sym.endswith("USDT") or sym.endswith("BUSD") or sym.endswith("USDC")):
+        return {"status": "rejected", "reason": f"Cặp tiền '{symbol}' không hợp lệ (phải kết thúc bằng USDT, BUSD hoặc USDC)"}
+    if state.current_position or state.hedge_positions or state.order_manager.pending_orders:
+        return {"status": "rejected", "reason": f"Không thể đổi cặp tiền khi đang có vị thế mở hoặc lệnh chờ trên {state.symbol}. Vui lòng đóng vị thế trước!"}
     if sym != state.symbol:
         state.symbol = sym
+        state.strategy_config.symbol = sym
+        state.fee_engine.symbol = sym
+        state.order_manager.orders.clear()
+        state.order_manager.pending_orders.clear()
         state.current_position = None
-        state.initialize_history()
-        if state.ws_engine:
-            await state.ws_engine.stop()
-            state.init_ws_engine()
-            await state.ws_engine.start()
+        state.hedge_positions = {}
+        state.storage.save_setting("active_symbol", sym)
+        await state.restart_market_data()
+        state.last_auto_order_time = 0.0
+        state.persist_current_state()
         await broadcast_state()
-    return {"status": "ok", "symbol": state.symbol}
+    return {"status": "ok", "symbol": state.symbol, "live_price": state.live_price}
 
 
 @app.post("/api/action/reset_balance")
@@ -2487,9 +2541,12 @@ def update_order_slice(
 @app.post("/api/action/set_timeframe")
 @serialized_action
 def set_timeframe(timeframe: str = "15m"):
-    if timeframe not in state.data_map:
-        return {"status": "error", "message": "No closed history for timeframe"}
-    state.active_timeframe = timeframe
+    tf = timeframe.strip()
+    if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"):
+        return {"status": "error", "message": f"Khung thời gian '{timeframe}' không hợp lệ"}
+    if tf not in state.data_map:
+        return {"status": "error", "message": f"Chưa có dữ liệu nến đóng cho khung {tf}"}
+    state.active_timeframe = tf
     state.update_indicators()
     try:
         snap = state.build_market_snapshot()
@@ -2500,9 +2557,16 @@ def set_timeframe(timeframe: str = "15m"):
     state.persist_current_state()
     return {
         "status": "ok",
-        "active_timeframe": timeframe,
+        "active_timeframe": tf,
         "indicators": state.indicators,
-        "regime": state.ai_verdict.regime if state.ai_verdict else "NEUTRAL"
+        "regime": state.ai_verdict.regime if state.ai_verdict else "NEUTRAL",
+        "order_research": {
+            "recommended_type": state.order_research.recommended_type if state.order_research else "WAIT",
+            "recommended_side": state.order_research.recommended_side if state.order_research else "NONE",
+            "optimal_price": state.order_research.optimal_price if state.order_research else state.live_price,
+            "active_timeframe": tf,
+            "execution_horizon": state.order_research.execution_horizon if state.order_research else "IMMEDIATE"
+        } if state.order_research else None
     }
 
 

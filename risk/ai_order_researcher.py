@@ -54,6 +54,9 @@ class AIOrderResearchResult:
     kelly_multiplier: float = 1.0
     octobot_tradable: bool = True
     ready: bool = True
+    active_timeframe: str = "15m"
+    dca_ladder_step: float = 0.005
+    twap_interval_seconds: int = 6
 
 
 class AIOrderResearcher:
@@ -189,6 +192,7 @@ class AIOrderResearcher:
         execution_horizon = "IMMEDIATE"
         entry_price = current_price
         entry_rationale = ""
+        has_ob_entry = False
 
         if opt_side == "SIDEWAY":
             execution_horizon = "RANGE_GRID"
@@ -250,13 +254,32 @@ class AIOrderResearcher:
             elif (entry_price - current_price) > 0.75 * atr:
                 entry_price = round(current_price + (0.15 * atr), 1)
 
-        # 5. Dynamic Order Type Selection Engine
+        # 5. Dynamic Order Type Selection Engine & Timeframe Calibration
+        tf_lower = str(active_timeframe).lower()
+        if tf_lower in ("1m", "3m"):
+            opt_callback = round(max(0.25, min(0.65, (atr / current_price) * 100.0 * 0.5)), 2)
+            opt_twap_slices = 3
+            twap_interval = 3
+            dca_step = 0.0025
+            horizon_mode = f"SCALP_{tf_lower.upper()}"
+        elif tf_lower in ("5m", "15m", "30m"):
+            opt_callback = round(max(0.4, min(1.2, (atr / current_price) * 100.0 * 0.75)), 2)
+            opt_twap_slices = 5
+            twap_interval = 10 if tf_lower == "5m" else 30
+            dca_step = 0.005
+            horizon_mode = f"INTRADAY_{tf_lower.upper()}"
+        else:
+            opt_callback = round(max(0.8, min(2.5, (atr / current_price) * 100.0 * 1.0)), 2)
+            opt_twap_slices = 5
+            twap_interval = 60
+            dca_step = 0.010
+            horizon_mode = f"SWING_{tf_lower.upper()}"
+
         opt_type = "POST_ONLY"
         opt_trigger_price = 0.0
         opt_trigger_cond = "ABOVE"
-        opt_callback = round(max(0.4, min(1.8, (atr / current_price) * 100.0 * 0.75)), 2)
-        opt_twap_slices = 5
         fee_tier = "MAKER (0.02%)"
+        execution_horizon = horizon_mode
 
         bb_width = indicators.get("bb_width", 0.04)
 
@@ -265,14 +288,14 @@ class AIOrderResearcher:
             opt_type = "MARKET"
             entry_price = current_price
             fee_tier = "TAKER (0.05%)"
-            execution_horizon = "IMMEDIATE"
-            order_rationale = f"⚡ BÙNG NỔ ĐỘNG LƯỢNG: CVD {delta_momentum} áp đảo, ADX {adx:.1f}. AI khuyến nghị vào lệnh MARKET ngay lập tức để không lỡ sóng!"
+            execution_horizon = f"IMMEDIATE_{horizon_mode}"
+            order_rationale = f"⚡ BÙNG NỔ ĐỘNG LƯỢNG ({active_timeframe}): CVD {delta_momentum} áp đảo, ADX {adx:.1f}. AI khuyến nghị vào lệnh MARKET ngay lập tức để không lỡ sóng!"
 
         # 2. CONDITIONAL / STOP-LIMIT (Volatility Squeeze Breakout)
         elif (bb_width < 0.018 or adx < 18.0) and regime in ("RANGING_SIDEWAY", "CHOPPY", "NEUTRAL"):
             opt_type = "CONDITIONAL"
             fee_tier = "STOP-LIMIT (MAKER/TAKER)"
-            execution_horizon = "BREAKOUT"
+            execution_horizon = f"BREAKOUT_{horizon_mode}"
             if opt_side == "BUY" or (opt_side == "SIDEWAY" and dir_score >= 0):
                 opt_trigger_price = round(current_price + (0.25 * atr), 1)
                 opt_trigger_cond = "ABOVE"
@@ -281,44 +304,44 @@ class AIOrderResearcher:
                 opt_trigger_price = round(current_price - (0.25 * atr), 1)
                 opt_trigger_cond = "BELOW"
                 entry_price = round(opt_trigger_price - 0.5, 1)
-            order_rationale = f"📦 THỊ TRƯỜNG NÉN BIÊN (Squeeze): Bollinger co thắt. AI khuyến nghị Stop-Limit đón Breakout tại ngưỡng ${opt_trigger_price:,.1f}!"
+            order_rationale = f"📦 THỊ TRƯỜNG NÉN BIÊN ({active_timeframe}): Bollinger co thắt. AI khuyến nghị Stop-Limit đón Breakout tại ngưỡng ${opt_trigger_price:,.1f}!"
 
         # 3. TRAILING_STOP (Trend Wave Following)
         elif regime in ("TRENDING_BULL", "TRENDING_BEAR") and abs(dir_score) >= 30.0:
             opt_type = "TRAILING_STOP"
             entry_price = current_price
             fee_tier = "TRAILING TAKER"
-            execution_horizon = "IMMEDIATE"
-            order_rationale = f"🏄 BÁM SÓNG XU HƯỚNG: Xu hướng {regime} mạnh ({dir_score:+.1f}đ). AI khuyến nghị Trailing Stop tự động bám đỉnh/đáy rút râu {opt_callback}%!"
+            execution_horizon = f"TRAILING_{horizon_mode}"
+            order_rationale = f"🏄 BÁM SÓNG XU HƯỚNG ({active_timeframe}): Xu hướng {regime} ({dir_score:+.1f}đ). AI khuyến nghị Trailing Stop tự động bám đỉnh/đáy rút râu {opt_callback}%!"
 
         # 4. SCALE_RATIO / DCA LADDER (SMC Liquidity Sweep / Absorption Reversal)
         elif (smc_res and smc_res.last_sweep is not None) or (absorption in ("ABSORPTION_BUY", "ABSORPTION_SELL")):
             opt_type = "SCALE_RATIO"
             fee_tier = "MAKER LADDER (0.02%)"
-            execution_horizon = "SWEEP_REVERSAL"
-            order_rationale = f"🎯 QUÉT THANH KHOẢN SMC: Phát hiện {smc_res.last_sweep.type if (smc_res and smc_res.last_sweep) else absorption}. AI khuyến nghị Rải Thang 3 Tầng DCA Ladder (20%-30%-50%) quanh ${entry_price:,.1f} đón râu nến!"
+            execution_horizon = f"LADDER_{horizon_mode}"
+            order_rationale = f"🎯 QUÉT THANH KHOẢN SMC ({active_timeframe}): Phát hiện {smc_res.last_sweep.type if (smc_res and smc_res.last_sweep) else absorption}. AI khuyến nghị Rải Thang 3 Tầng DCA Ladder (20%-30%-50%, bước {dca_step*100:.2f}%) quanh ${entry_price:,.1f} đón râu nến!"
 
         # 5. TWAP (High Spread / Volatility Panic Slice)
         elif eff_spread > 5.0 or (atr / current_price) > 0.014 or regime == "VOLATILE_PANIC":
             opt_type = "TWAP"
-            opt_twap_slices = 5
             entry_price = current_price
             fee_tier = "TWAP SLICES"
-            execution_horizon = "IMMEDIATE"
-            order_rationale = f"🌊 BIẾN ĐỘNG MẠNH / SPREAD GIÃN: Spread ${eff_spread:.1f}. AI khuyến nghị TWAP chia đều 5 lát cắt chống trượt giá sàn!"
+            execution_horizon = f"TWAP_{horizon_mode}"
+            order_rationale = f"🌊 BIẾN ĐỘNG MẠNH / SPREAD GIÃN ({active_timeframe}): Spread ${eff_spread:.1f}. AI khuyến nghị TWAP chia đều {opt_twap_slices} lát cắt (mỗi {twap_interval}s) chống trượt giá sàn!"
 
         # 6. LIMIT (Order Block / Institutional Level Pullback)
         elif has_ob_entry or (vwap_res and abs(current_price - vwap_res.vwap) >= 0.4 * atr):
             opt_type = "LIMIT"
             fee_tier = "MAKER (0.02%)"
-            execution_horizon = "PULLBACK"
-            order_rationale = f"🏛️ LỆNH CHỜ LIMIT TẠI MỨC TỔ CHỨC: {entry_rationale}. Chờ đón sóng hồi phục tại vùng hỗ trợ/kháng cự then chốt!"
+            execution_horizon = f"PULLBACK_{horizon_mode}"
+            order_rationale = f"🏛️ LỆNH CHỜ LIMIT TẠI MỨC TỔ CHỨC ({active_timeframe}): {entry_rationale}. Chờ đón sóng hồi phục tại vùng hỗ trợ/kháng cự then chốt!"
 
         # 7. POST_ONLY (Best Bid/Ask Passive Maker at Market Equilibrium)
         else:
             opt_type = "POST_ONLY"
             fee_tier = "MAKER (0.02%)"
-            order_rationale = f"🛡️ BẢO VỆ MAKER 0.02%: {entry_rationale}. Hưởng ưu đãi giảm 60% phí sàn, vị thế an toàn cao."
+            execution_horizon = f"MAKER_{horizon_mode}"
+            order_rationale = f"🛡️ BẢO VỆ MAKER 0.02% ({active_timeframe}): {entry_rationale}. Hưởng ưu đãi giảm 60% phí sàn, vị thế an toàn cao."
 
         # 6. Institutional Structural SL & TP Calculation (Calibrated per Timeframe)
         if opt_side == "SIDEWAY":
@@ -555,5 +578,8 @@ class AIOrderResearcher:
             market_resilience_pct=round(resil_pct, 1),
             lob_imbalance_20=round(lob_20_imb, 3),
             kelly_multiplier=round(kelly_mult, 2),
-            octobot_tradable=octo_tradable
+            octobot_tradable=octo_tradable,
+            active_timeframe=active_timeframe,
+            dca_ladder_step=dca_step,
+            twap_interval_seconds=twap_interval
         )

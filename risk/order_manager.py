@@ -175,8 +175,15 @@ class OrderQueueManager:
         kind = "TWAP" if is_twap else ("SCALE" if is_scale else (group_type.upper() or ("OCO" if execution_group.lower().startswith(("oco", "dual")) else "")))
         group = execution_group or (parent_id if is_twap or is_scale else "")
         created = []
+        scale_step = 0.005
+        if isinstance(candidate_payload, dict) and "dca_ladder_step" in candidate_payload:
+            try:
+                scale_step = float(candidate_payload["dca_ladder_step"])
+            except (ValueError, TypeError):
+                scale_step = 0.005
+
         for index, child_units in enumerate(units, 1):
-            child_price = target_price * (1 - direction * (index - 1) * .005) if is_scale else target_price
+            child_price = target_price * (1 - direction * (index - 1) * scale_step) if is_scale else target_price
             price_shift = (child_price - target_price) if is_scale else 0.0
             child_sl = round(stop_loss + price_shift, 2) if (stop_loss and stop_loss > 0) else stop_loss
             child_tp = round(take_profit + price_shift, 2) if (take_profit and take_profit > 0) else take_profit
