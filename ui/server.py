@@ -977,7 +977,7 @@ class LiveTradingState:
             if matrix.recommended_direction and matrix.recommended_direction != order.direction:
                 return StageOutcome.veto("OctoBot direction conflicts with candidate")
             setup = self.octobot_setup
-            if setup and setup.direction != order.direction:
+            if setup and setup.mode_name != "RANGE_TRADING" and setup.direction != order.direction:
                 return StageOutcome.veto("OctoBot trade setup conflicts with candidate")
             if alpha.composite_alpha_score * order.direction <= -15.0:
                 return StageOutcome.veto(f"Alpha Zoo conflicts ({alpha.composite_alpha_score:+.1f})")
@@ -1549,6 +1549,56 @@ class LiveTradingState:
         closed_pnl = self.current_balance - self.initial_balance
         now = time.time()
 
+        # Resolve OctoBot Staged Take Profits for UI
+        octo_staged = None
+        if self.current_position:
+            pos_staged = self.current_position.get("staged_take_profits")
+            if pos_staged and pos_staged.get("tp1"):
+                octo_staged = {
+                    "tp1": float(pos_staged.get("tp1", 0.0)),
+                    "tp2": float(pos_staged.get("tp2", 0.0)),
+                    "tp3": float(pos_staged.get("tp3", 0.0)),
+                    "source": "ACTIVE_POSITION"
+                }
+            else:
+                pos_dir = self.current_position.get("direction", 1)
+                pos_entry = float(self.current_position.get("entry_price", self.live_price))
+                atr_val = float(self.indicators.get("atr", 200.0) or 200.0)
+                vwap_val = float(self.ai_verdict.vwap_fair_price if self.ai_verdict else self.live_price)
+                if pos_dir == 1:
+                    p_tp1 = round(pos_entry + (1.2 * atr_val), 1)
+                    p_tp2 = round(max(p_tp1 + (0.5 * atr_val), vwap_val), 1) if vwap_val > pos_entry else round(pos_entry + (2.2 * atr_val), 1)
+                    p_tp3 = round(self.ai_verdict.supply_zone[0], 1) if (self.ai_verdict and self.ai_verdict.supply_zone and self.ai_verdict.supply_zone[0] > p_tp2) else round(pos_entry + (3.5 * atr_val), 1)
+                else:
+                    p_tp1 = round(pos_entry - (1.2 * atr_val), 1)
+                    p_tp2 = round(min(p_tp1 - (0.5 * atr_val), vwap_val), 1) if vwap_val < pos_entry else round(pos_entry - (2.2 * atr_val), 1)
+                    p_tp3 = round(self.ai_verdict.demand_zone[1], 1) if (self.ai_verdict and self.ai_verdict.demand_zone and self.ai_verdict.demand_zone[1] < p_tp2) else round(pos_entry - (3.5 * atr_val), 1)
+                octo_staged = {
+                    "tp1": p_tp1,
+                    "tp2": p_tp2,
+                    "tp3": p_tp3,
+                    "source": "ACTIVE_POSITION"
+                }
+        elif self.octobot_setup and self.octobot_setup.staged_tp and self.octobot_setup.staged_tp.tp1_price > 0:
+            octo_staged = {
+                "tp1": self.octobot_setup.staged_tp.tp1_price,
+                "tp2": self.octobot_setup.staged_tp.tp2_price,
+                "tp3": self.octobot_setup.staged_tp.tp3_price,
+                "source": self.octobot_setup.mode_name
+            }
+        else:
+            atr_val = float(self.indicators.get("atr", 200.0) or 200.0)
+            vwap_val = float(self.ai_verdict.vwap_fair_price if self.ai_verdict else self.live_price)
+            p_tp1 = round(self.live_price + (1.2 * atr_val), 1)
+            p_tp2 = round(max(p_tp1 + (0.5 * atr_val), vwap_val), 1)
+            p_tp3 = round(self.live_price + (3.0 * atr_val), 1)
+            octo_staged = {
+                "tp1": p_tp1,
+                "tp2": p_tp2,
+                "tp3": p_tp3,
+                "source": "RANGE_TRADING"
+            }
+
         return {
             "symbol": self.symbol,
             "balance": round(self.current_balance, 2),
@@ -1794,12 +1844,8 @@ class LiveTradingState:
                 "is_tradable": self.octobot_consensus.is_tradable if self.octobot_consensus else False,
                 "summary_reason": self.octobot_consensus.summary_reason if self.octobot_consensus else "OctoBot Matrix đang nạp dữ liệu xúc tu...",
                 "tentacles": self.octobot_consensus.tentacles if self.octobot_consensus else {},
-                "active_trading_mode": (self.octobot_setup.mode_name if self.octobot_setup else "STAND_ASIDE"),
-                "staged_tp": {
-                    "tp1": self.octobot_setup.staged_tp.tp1_price if self.octobot_setup else 0.0,
-                    "tp2": self.octobot_setup.staged_tp.tp2_price if self.octobot_setup else 0.0,
-                    "tp3": self.octobot_setup.staged_tp.tp3_price if self.octobot_setup else 0.0
-                } if self.octobot_setup else None
+                "active_trading_mode": (self.octobot_setup.mode_name if self.octobot_setup else (octo_staged.get("source", "RANGE_TRADING") if octo_staged else "STAND_ASIDE")),
+                "staged_tp": octo_staged
             },
             "jesse": {
                 "expectancy_usdt": self.jesse_engine.compute_metrics().expectancy_usdt,

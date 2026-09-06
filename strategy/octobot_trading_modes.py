@@ -231,15 +231,79 @@ class DailyTradingMode:
         return None
 
 
+class RangeTradingMode:
+    """
+    OctoBot Range Trading Mode (Two-Way SMC & Mean Reversion):
+    Active during Ranging, Sideway, or Neutral consolidation regimes.
+    Constructs multi-tier staged profit targets (TP1, TP2, TP3) anchored
+    to local volatility (ATR), VWAP equilibrium, and SMC Order Blocks.
+    """
+    def evaluate(
+        self,
+        current_price: float,
+        matrix: MatrixConsensus,
+        indicators: Dict[str, Any],
+        smc_data: Optional[Dict[str, Any]],
+        vwap_data: Optional[Dict[str, Any]]
+    ) -> Optional[OctoBotTradeSetup]:
+        if current_price <= 0:
+            return None
+
+        atr = float(indicators.get("atr", current_price * 0.005) or (current_price * 0.005))
+        vwap_price = float(vwap_data.get("vwap", current_price) if vwap_data else current_price)
+        demand_zone = smc_data.get("demand_zone") if smc_data else None
+        supply_zone = smc_data.get("supply_zone") if smc_data else None
+
+        dir_val = 1 if matrix.matrix_score >= 0 else -1
+        entry = round(current_price, 2)
+
+        if dir_val == 1:
+            sl = round(entry - (1.5 * atr), 2)
+            risk_dist = max(entry * 0.003, entry - sl)
+            tp1 = round(entry + (1.2 * risk_dist), 2)
+            tp2 = round(max(tp1 + (0.5 * atr), vwap_price), 2) if vwap_price > entry else round(entry + (2.2 * risk_dist), 2)
+            tp3_target = supply_zone[0] if (supply_zone and supply_zone[0] > tp2) else (entry + (3.5 * risk_dist))
+            tp3 = round(tp3_target, 2)
+        else:
+            sl = round(entry + (1.5 * atr), 2)
+            risk_dist = max(entry * 0.003, sl - entry)
+            tp1 = round(entry - (1.2 * risk_dist), 2)
+            tp2 = round(min(tp1 - (0.5 * atr), vwap_price), 2) if vwap_price < entry else round(entry - (2.2 * risk_dist), 2)
+            tp3_target = demand_zone[1] if (demand_zone and demand_zone[1] < tp2) else (entry - (3.5 * risk_dist))
+            tp3 = round(tp3_target, 2)
+
+        weighted_tp = round(tp1 * 0.40 + tp2 * 0.35 + tp3 * 0.25, 2)
+        rr = round(abs(weighted_tp - entry) / max(1e-6, risk_dist), 2)
+        staged = StagedTakeProfit(tp1_price=tp1, tp2_price=tp2, tp3_price=tp3)
+        rationale = (
+            f"⚖️ [OCTOBOT RANGE TP] Kế hoạch chốt lời đa tầng ({'Long' if dir_val == 1 else 'Short'}): "
+            f"TP1=${tp1:,.1f} (40%), TP2=${tp2:,.1f} (35%), TP3=${tp3:,.1f} (25%)."
+        )
+
+        return OctoBotTradeSetup(
+            mode_name="RANGE_TRADING",
+            direction=dir_val,
+            entry_price=entry,
+            stop_loss=sl,
+            take_profit=weighted_tp,
+            staged_tp=staged,
+            risk_reward_ratio=rr,
+            confidence_score=matrix.matrix_score,
+            rationale=rationale
+        )
+
+
 class OctoBotTradingCoordinator:
     """
     Unified OctoBot Mode Coordinator:
     Priority 1: Dip Analyser (Snipers local extremes at key levels)
     Priority 2: Daily Trading (Trend riders on strong consensus)
+    Priority 3: Range Trading (Continuous Staged TPs for sideway & consolidation)
     """
     def __init__(self):
         self.dip_analyser = DipAnalyserMode()
         self.daily_trading = DailyTradingMode()
+        self.range_trading = RangeTradingMode()
 
     def select_best_setup(
         self,
@@ -260,4 +324,10 @@ class OctoBotTradingCoordinator:
         if daily_setup:
             return "DAILY_TRADING", daily_setup
 
+        # 3. Range Trading Mode (Continuous Staged TPs for Sideway / Range)
+        range_setup = self.range_trading.evaluate(current_price, matrix, indicators, smc_data, vwap_data)
+        if range_setup:
+            return "RANGE_TRADING", range_setup
+
         return "STAND_ASIDE", None
+

@@ -635,7 +635,15 @@
               <div class="bg-[#121722] p-1 rounded border border-gray-800">MTF: <b id="octo-mtf-score">0.00</b></div>
             </div>
             <div class="flex justify-between items-center text-[10px] mono text-purple-300 pt-1">
-              <span>Staged TP: TP1: <b id="octo-tp1">$0</b> | TP2: <b id="octo-tp2">$0</b> | TP3: <b id="octo-tp3">$0</b></span>
+              <span class="flex items-center gap-1">
+                <span>Staged TP:</span>
+                <span class="text-emerald-400">TP1: <b id="octo-tp1">$0</b></span>
+                <span class="text-gray-500">|</span>
+                <span class="text-emerald-400">TP2: <b id="octo-tp2">$0</b></span>
+                <span class="text-gray-500">|</span>
+                <span class="text-emerald-400">TP3: <b id="octo-tp3">$0</b></span>
+              </span>
+              <span id="octo-tp-source" class="px-1.5 py-0.2 rounded text-[9px] font-bold bg-purple-950/80 text-purple-300 border border-purple-800/60 hidden"></span>
             </div>
           </div>
 
@@ -5135,14 +5143,33 @@
         const tp1El = document.getElementById('octo-tp1');
         const tp2El = document.getElementById('octo-tp2');
         const tp3El = document.getElementById('octo-tp3');
-        if (octo.staged_tp && octo.staged_tp.tp1 > 0) {
-          if (tp1El) tp1El.innerText = `$${octo.staged_tp.tp1.toLocaleString('en-US', {minimumFractionDigits: 1})}`;
-          if (tp2El) tp2El.innerText = `$${octo.staged_tp.tp2.toLocaleString('en-US', {minimumFractionDigits: 1})}`;
-          if (tp3El) tp3El.innerText = `$${octo.staged_tp.tp3.toLocaleString('en-US', {minimumFractionDigits: 1})}`;
+        const tpSourceEl = document.getElementById('octo-tp-source');
+        if (octo.staged_tp && (octo.staged_tp.tp1 > 0 || octo.staged_tp.tp2 > 0 || octo.staged_tp.tp3 > 0)) {
+          if (tp1El) tp1El.innerText = `$${octo.staged_tp.tp1.toLocaleString('en-US', {minimumFractionDigits: 1, maximumFractionDigits: 2})}`;
+          if (tp2El) tp2El.innerText = `$${octo.staged_tp.tp2.toLocaleString('en-US', {minimumFractionDigits: 1, maximumFractionDigits: 2})}`;
+          if (tp3El) tp3El.innerText = `$${octo.staged_tp.tp3.toLocaleString('en-US', {minimumFractionDigits: 1, maximumFractionDigits: 2})}`;
+          if (tpSourceEl) {
+            const mode = octo.active_trading_mode || octo.trading_mode || (octo.staged_tp && octo.staged_tp.source) || '';
+            if (mode === 'ACTIVE_POSITION' || (data.position && data.position.amount > 0)) {
+              tpSourceEl.innerText = '🎯 VỊ THẾ LIVE';
+              tpSourceEl.className = 'px-1.5 py-0.2 rounded text-[9px] font-bold bg-emerald-950/90 text-emerald-300 border border-emerald-700/80';
+            } else if (mode === 'DIP_ANALYSER') {
+              tpSourceEl.innerText = '⚡ DIP TARGETS';
+              tpSourceEl.className = 'px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-950/90 text-amber-300 border border-amber-700/80';
+            } else if (mode === 'DAILY_TRADING') {
+              tpSourceEl.innerText = '🚀 TREND TARGETS';
+              tpSourceEl.className = 'px-1.5 py-0.2 rounded text-[9px] font-bold bg-cyan-950/90 text-cyan-300 border border-cyan-700/80';
+            } else {
+              tpSourceEl.innerText = '⚖️ RANGE TARGETS';
+              tpSourceEl.className = 'px-1.5 py-0.2 rounded text-[9px] font-bold bg-purple-950/80 text-purple-300 border border-purple-800/60';
+            }
+            tpSourceEl.classList.remove('hidden');
+          }
         } else {
           if (tp1El) tp1El.innerText = '--';
           if (tp2El) tp2El.innerText = '--';
           if (tp3El) tp3El.innerText = '--';
+          if (tpSourceEl) tpSourceEl.classList.add('hidden');
         }
       }
 
