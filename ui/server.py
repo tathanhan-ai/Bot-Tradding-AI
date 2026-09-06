@@ -977,6 +977,19 @@ class LiveTradingState:
                 octobot_metrics=self.octobot_consensus, current_position=self.current_position,
                 candidate=order, snapshot=_snapshot,
             )
+            if not verdict.available and getattr(self.vibe_swarm, "enabled", True):
+                try:
+                    print(f"[Council Gate Emergency Retry] Tai tham dinh khan cap cho lenh {order.order_id} de khong lo diem vao lenh...", flush=True)
+                except Exception:
+                    pass
+                verdict = self.vibe_swarm.evaluate_council(
+                    current_price=_snapshot.price, indicators=self.indicators,
+                    ai_verdict=self.ai_verdict, ensemble_result=self.ensemble_result,
+                    order_research=research, alpha_zoo_metrics=self.vibe_alpha_zoo.get_latest_metrics(),
+                    visual_hft_metrics=_snapshot.context["hft"], jesse_metrics=self.jesse_engine.compute_metrics(),
+                    octobot_metrics=self.octobot_consensus, current_position=self.current_position,
+                    candidate=order, snapshot=_snapshot,
+                )
             details = {"council_votes": [asdict(vote) for vote in verdict.votes], "order_id": order.order_id, "snapshot_id": _snapshot.snapshot_id}
             # A received REJECT remains a veto even if another reviewer is offline.
             if not verdict.available:
@@ -1388,13 +1401,15 @@ class LiveTradingState:
             # Automated Seven-Stage Pipeline execution check
             self.evaluate_ensemble_automated_decision(self.live_price)
 
-            # Periodic non-blocking AI Council deliberation (every 30s) so Tab 6 always displays live agent debates
+            # Periodic non-blocking AI Council deliberation (every 30s, or every 4s if recovering from a timeout/failure)
             now = time.time()
             vibe = getattr(self, "vibe_swarm", None)
+            is_recovering = bool(vibe and vibe.latest_verdict and not vibe.latest_verdict.available)
+            cooldown = 4.0 if is_recovering else 30.0
             if (
                 vibe is not None
                 and getattr(vibe, "enabled", True)
-                and (now - getattr(vibe, "last_completed_at", 0.0)) > 30.0
+                and (now - getattr(vibe, "last_completed_at", 0.0)) > cooldown
                 and not getattr(vibe, "_background_pending", False)
                 and getattr(self, "live_price", 0.0) > 0
             ):

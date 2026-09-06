@@ -178,7 +178,8 @@ class VibeSwarmCouncil:
             verdict.order_id = getattr(candidate, "order_id", "")
             verdict.snapshot_id = getattr(snapshot, "snapshot_id", "")
             self.last_verdict = verdict
-            self.last_completed_at = time.time()
+            # Quick recovery: allow next council run after only 4 seconds if recovering from timeout/failure
+            self.last_completed_at = time.time() - 26.0
             return verdict
 
         approvals = sum(vote.vote == "APPROVE" for vote in votes)
@@ -269,62 +270,80 @@ class VibeSwarmCouncil:
             },
         }
 
-    def _request_agent(self, agent_id: str, context: Dict[str, Any]) -> Tuple[AgentVote, bool]:
-        model = self.agent_models[agent_id]
-        payload = {
-            "model": model,
-            "temperature": 0.0,
-            "stream": False,
-            "messages": [
-                {"role": "system", "content": f"You are the {agent_id} trading reviewer. Use only the supplied role-scoped data. Return JSON only: {{\"vote\": \"APPROVE|REJECT|ABSTAIN\", \"confidence\": 0-100, \"thesis\": \"short reason\"}}."},
-                {"role": "user", "content": json.dumps(context, ensure_ascii=False, separators=(",", ":"))},
-            ],
-        }
-        try:
-            request = urllib.request.Request(
-                f"{self.gateway_url}/chat/completions",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
-            )
-            with urllib.request.urlopen(request, timeout=18.0) as response:
-                body_bytes = response.read()
-            raw = ""
-            try:
-                response_data = json.loads(body_bytes.decode("utf-8"))
-                raw = response_data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-            except Exception:
-                # Fallback for SSE streaming
-                text = body_bytes.decode("utf-8", errors="replace")
-                parts = []
-                for line in text.splitlines():
-                    if line.startswith("data: ") and line.strip() != "data: [DONE]":
-                        try:
-                            chunk = json.loads(line[6:])
-                            c_part = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                            if c_part:
-                                parts.append(c_part)
-                        except Exception:
-                            pass
-                raw = "".join(parts).strip()
+    def _request_agent(self, agent_id: str, context: Dict[str, Any], max_attempts: int = 2) -> Tuple[AgentVote, bool]:
+        configured_model = self.agent_models[agent_id]
+        fallback_model = self.default_model if self.default_model != configured_model else "ag/gemini-3.8-flash"
+        last_exc: Optional[Exception] = None
 
-            raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-            parsed = json.loads(raw)
-            vote = str(parsed.get("vote", "ABSTAIN")).upper()
-            vote = vote if vote in ("APPROVE", "REJECT", "ABSTAIN") else "ABSTAIN"
+        for attempt in range(1, max_attempts + 1):
+            current_model = configured_model if attempt == 1 else fallback_model
+            timeout = 18.0 if attempt == 1 else 10.0
+            payload = {
+                "model": current_model,
+                "temperature": 0.0,
+                "stream": False,
+                "messages": [
+                    {"role": "system", "content": f"You are the {agent_id} trading reviewer. Use only the supplied role-scoped data. Return JSON only: {{\"vote\": \"APPROVE|REJECT|ABSTAIN\", \"confidence\": 0-100, \"thesis\": \"short reason\"}}."},
+                    {"role": "user", "content": json.dumps(context, ensure_ascii=False, separators=(",", ":"))},
+                ],
+            }
             try:
-                confidence = max(0, min(100, int(parsed.get("confidence", 0))))
-            except (TypeError, ValueError):
-                confidence = 0
-            return self._vote(agent_id, vote, confidence, str(parsed.get("thesis", "No thesis returned"))), True
-        except Exception as exc:
-            return self._abstain_vote(agent_id, f"9Router unavailable: {type(exc).__name__}"), False
+                request = urllib.request.Request(
+                    f"{self.gateway_url}/chat/completions",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
+                )
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    body_bytes = response.read()
+                raw = ""
+                try:
+                    response_data = json.loads(body_bytes.decode("utf-8"))
+                    raw = response_data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                except Exception:
+                    # Fallback for SSE streaming
+                    text = body_bytes.decode("utf-8", errors="replace")
+                    parts = []
+                    for line in text.splitlines():
+                        if line.startswith("data: ") and line.strip() != "data: [DONE]":
+                            try:
+                                chunk = json.loads(line[6:])
+                                c_part = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if c_part:
+                                    parts.append(c_part)
+                            except Exception:
+                                pass
+                    raw = "".join(parts).strip()
 
-    def _vote(self, agent_id: str, vote: str, confidence: int, thesis: str) -> AgentVote:
+                raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+                parsed = json.loads(raw)
+                vote = str(parsed.get("vote", "ABSTAIN")).upper()
+                vote = vote if vote in ("APPROVE", "REJECT", "ABSTAIN") else "ABSTAIN"
+                try:
+                    confidence = max(0, min(100, int(parsed.get("confidence", 0))))
+                except (TypeError, ValueError):
+                    confidence = 0
+                thesis = str(parsed.get("thesis", "No thesis returned"))
+                if attempt > 1:
+                    thesis = f"[Retry qua {current_model}] " + thesis
+                return self._vote(agent_id, vote, confidence, thesis, model_used=current_model), True
+            except Exception as exc:
+                last_exc = exc
+                if attempt < max_attempts:
+                    try:
+                        print(f"[9Router Auto-Retry] Agent '{agent_id}' ({current_model}) bi {type(exc).__name__}. Retrying qua '{fallback_model}' ngay va luon...", flush=True)
+                    except Exception:
+                        pass
+                    continue
+
+        return self._abstain_vote(agent_id, f"9Router unavailable: {type(last_exc).__name__}", model_used=configured_model), False
+
+    def _vote(self, agent_id: str, vote: str, confidence: int, thesis: str, model_used: Optional[str] = None) -> AgentVote:
         name, icon = self.AGENT_META[agent_id]
-        return AgentVote(agent_id, name, icon, f"9router/{self.agent_models[agent_id]}", vote, confidence, thesis[:500], datetime.now().strftime("%H:%M:%S"))
+        m = model_used or self.agent_models[agent_id]
+        return AgentVote(agent_id, name, icon, f"9router/{m}", vote, confidence, thesis[:500], datetime.now().strftime("%H:%M:%S"))
 
-    def _abstain_vote(self, agent_id: str, thesis: str) -> AgentVote:
-        return self._vote(agent_id, "ABSTAIN", 0, thesis)
+    def _abstain_vote(self, agent_id: str, thesis: str, model_used: Optional[str] = None) -> AgentVote:
+        return self._vote(agent_id, "ABSTAIN", 0, thesis, model_used=model_used)
 
     def _unavailable_verdict(self, reason: str, votes: Optional[List[AgentVote]] = None) -> SwarmCouncilVerdict:
         votes = votes or [self._abstain_vote(agent_id, reason) for agent_id in self.AGENT_META]

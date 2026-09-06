@@ -4582,7 +4582,7 @@
           const statusBadge = document.getElementById('vibe-council-status');
           if (statusBadge) {
             if (!lc.available || lc.council_verdict === 'LLM_UNAVAILABLE') {
-              statusBadge.innerText = 'LLM_UNAVAILABLE • deterministic core';
+              statusBadge.innerHTML = '⚠️ TIMEOUT / CHỜ RETRY • <button onclick="runVibeDebateNow()" class="underline text-amber-300 hover:text-white font-bold cursor-pointer">🔄 Chạy lại ngay</button>';
               statusBadge.className = 'px-2 py-0.5 text-[10px] font-bold rounded bg-amber-950 text-amber-400 border border-amber-800 mono';
             } else {
               statusBadge.innerText = lc.approved ? `ĐỒNG THUẬN (${lc.approved_votes}/${lc.total_votes}) ✅` : `BÁC BỎ (${lc.approved_votes}/${lc.total_votes}) 🛑`;
