@@ -3451,6 +3451,17 @@
       return map[type] || type;
     }
 
+    function formatShortTime(tStr) {
+      if (!tStr) return '--';
+      if (typeof tStr === 'string' && tStr.includes('T')) {
+        const parts = tStr.split('T');
+        const timePart = parts[1].split('.')[0];
+        const datePart = parts[0].slice(5);
+        return `${datePart} ${timePart}`;
+      }
+      return tStr;
+    }
+
     function fillAiLongPrice() {
       if (!latestStateData) return;
       const res = latestStateData.order_research;
@@ -4919,16 +4930,19 @@
               const roe = ord.roe_pct !== undefined ? ord.roe_pct : 0.0;
               const pnlColor = pnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
               const sliceId = ord.slice_id || ord.order_id || 'ORD-1';
+              const shortId = ord.order_id ? `#${ord.order_id}` : (ord.slice_id ? `#${String(ord.slice_id).slice(-8)}` : '#ORD');
               const tf = (ord.timeframe || pos.timeframe || data.active_timeframe || '15m').toUpperCase();
+              const shortOrdType = formatShortOrderType(ord.order_type || 'MARKET');
+              const timeDisplay = formatShortTime(ord.entry_time);
               return `
                 <tr class="hover:bg-gray-800/40 transition">
                   <td class="p-2.5 font-bold text-gray-300 flex items-center gap-1">
-                    <span class="text-amber-400">#${sliceId}</span>
+                    <span class="text-amber-400 font-bold mono cursor-help" title="${sliceId}">${shortId}</span>
                   </td>
                   <td class="p-2.5">
                     <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-cyan-950 text-cyan-300 border border-cyan-800">${tf}</span>
                   </td>
-                  <td class="p-2.5 font-semibold text-gray-300">${ord.order_type || 'MARKET'}</td>
+                  <td class="p-2.5 font-semibold text-gray-300">${shortOrdType}</td>
                   <td class="p-2.5">
                     <span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${isOrdLong ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-rose-950 text-rose-400 border border-rose-800'}">
                       ${isOrdLong ? 'LONG 🟢' : 'SHORT 🔴'}
@@ -4940,7 +4954,7 @@
                   <td class="p-2.5 font-bold ${pnlColor}">
                     ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${roe >= 0 ? '+' : ''}${roe.toFixed(2)}%)
                   </td>
-                  <td class="p-2.5 text-gray-400 text-[11px]">${ord.entry_time || '--'}</td>
+                  <td class="p-2.5 text-gray-400 text-[11px] mono whitespace-nowrap" title="${ord.entry_time || ''}">${timeDisplay}</td>
                   <td class="p-2.5 text-center">
                     <div class="flex items-center justify-center gap-1.5">
                       <button onclick="openEditSliceModal('${sliceId}')" class="px-2 py-1 bg-amber-950/80 hover:bg-amber-900 border border-amber-800 text-amber-300 rounded font-semibold text-[11px] transition shadow hover:text-white flex items-center gap-1" title="${t('btn_edit_slice_title')}">
@@ -4974,8 +4988,11 @@
         document.getElementById('pos-trailing').innerText = 'Grid protection';
         document.getElementById('pos-ai-status').innerText = 'Hedge Grid: directional entries locked';
         document.getElementById('pos-orders-count').innerText = posOrderCount;
-        const posOrdersBody = document.getElementById('pos-orders-body');
-        if (posOrdersBody) posOrdersBody.innerHTML = posOrders.map(order => `<tr><td colspan="2" class="p-2 text-amber-300">#${order.slice_id || order.order_id}</td><td class="p-2">GRID</td><td class="p-2 ${order.direction === 1 ? 'text-emerald-400' : 'text-rose-400'}">${order.direction === 1 ? 'LONG' : 'SHORT'}</td><td class="p-2">$${Number(order.entry_price).toFixed(2)}</td><td class="p-2">${order.units}</td><td class="p-2">$${Number(order.margin).toFixed(2)}</td><td class="p-2 ${order.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${order.unrealized_pnl >= 0 ? '+' : ''}$${Number(order.unrealized_pnl || 0).toFixed(2)}</td><td colspan="2" class="p-2 text-gray-500">Protected</td></tr>`).join('');
+        if (posOrdersBody) posOrdersBody.innerHTML = posOrders.map(order => {
+          const sId = order.order_id ? `#${order.order_id}` : (order.slice_id ? `#${String(order.slice_id).slice(-8)}` : '#ORD');
+          const fullId = order.slice_id || order.order_id || '';
+          return `<tr><td colspan="2" class="p-2 text-amber-300 mono cursor-help" title="${fullId}">${sId}</td><td class="p-2">GRID</td><td class="p-2 ${order.direction === 1 ? 'text-emerald-400' : 'text-rose-400'}">${order.direction === 1 ? 'LONG' : 'SHORT'}</td><td class="p-2">$${Number(order.entry_price).toFixed(2)}</td><td class="p-2">${order.units}</td><td class="p-2">$${Number(order.margin).toFixed(2)}</td><td class="p-2 ${order.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${order.unrealized_pnl >= 0 ? '+' : ''}$${Number(order.unrealized_pnl || 0).toFixed(2)}</td><td colspan="2" class="p-2 text-gray-500">Protected</td></tr>`;
+        }).join('');
       } else {
         if (dockPosCount) {
           dockPosCount.innerText = currentLanguage === 'vi' ? '0 lệnh' : (currentLanguage === 'zh' ? '0 笔订单' : '0 orders');
