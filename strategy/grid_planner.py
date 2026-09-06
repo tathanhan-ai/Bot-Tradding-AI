@@ -49,16 +49,17 @@ class GridPlanner:
         values = (price, best_bid, best_ask, support, resistance, vwap, atr, adx, hurst)
         if any(not math.isfinite(float(value)) for value in values) or min(price, best_bid, best_ask, support, resistance, vwap, atr) <= 0:
             return GridPlan("NO_TRADE", "Grid inputs are incomplete or invalid")
-        acceptable_regimes = ("RANGING_SIDEWAY", "SIDEWAY_GRID", "CHOPPY", "NEUTRAL", "EQUILIBRIUM_FAIR")
-        acceptable_strategies = ("TWO_WAY_RANGE", "GRID_BOT", "SIDEWAY_GRID", "MEAN_REVERSION_GRID", "SMC_ORDER_BLOCK")
-        if regime not in acceptable_regimes or recommended_strategy not in acceptable_strategies:
+        acceptable_regimes = ("RANGING_SIDEWAY", "SIDEWAY_GRID", "CHOPPY", "NEUTRAL", "EQUILIBRIUM_FAIR", "RANGING", "")
+        acceptable_strategies = ("TWO_WAY_RANGE", "GRID_BOT", "SIDEWAY_GRID", "MEAN_REVERSION_GRID", "SMC_ORDER_BLOCK", "AUTO", "POST_ONLY", "GRID", "")
+        if (regime and regime not in acceptable_regimes) or (recommended_strategy and recommended_strategy not in acceptable_strategies):
             return GridPlan("NO_TRADE", f"Regime {regime} / {recommended_strategy} is not a two-way range")
         if adx >= 28.0:
             return GridPlan("NO_TRADE", f"ADX {adx:.1f} indicates directional expansion")
         if hurst > 0.62:
             return GridPlan("NO_TRADE", f"Hurst {hurst:.2f} indicates persistent trend")
-        if not support < vwap < resistance or not support < price < resistance:
-            return GridPlan("NO_TRADE", "Range geometry does not contain live price and VWAP")
+        if not (support < vwap < resistance and support < price < resistance):
+            support = min(support if support > 0 else price - 2.5 * atr, price - 2.0 * atr, vwap - 1.5 * atr)
+            resistance = max(resistance if resistance > 0 else price + 2.5 * atr, price + 2.0 * atr, vwap + 1.5 * atr)
         if abs(price - vwap) > atr * 0.75:
             return GridPlan("NO_TRADE", "Live price is too far from VWAP for a balanced hedge grid")
 

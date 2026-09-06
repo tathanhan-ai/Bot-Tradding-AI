@@ -163,10 +163,17 @@ class AIOrderResearcher:
         dir_score = max(-100.0, min(100.0, dir_score))
 
         # Decide Direction
+        is_sideway_market = (
+            (ensemble_result and getattr(ensemble_result, "consensus_verdict", "") in ("SIDEWAY_GRID", "NEUTRAL"))
+            or regime in ("RANGING_SIDEWAY", "SIDEWAY_GRID", "CHOPPY", "NEUTRAL", "EQUILIBRIUM_FAIR")
+            or adx < 22.0
+        )
         if dir_score >= 12.0:
             opt_side = "BUY"
         elif dir_score <= -12.0:
             opt_side = "SELL"
+        elif is_sideway_market:
+            opt_side = "SIDEWAY"
         else:
             if vwap_res and current_price < vwap_res.vwap:
                 opt_side = "BUY"
@@ -178,7 +185,11 @@ class AIOrderResearcher:
         entry_price = current_price
         entry_rationale = ""
 
-        if opt_side == "BUY":
+        if opt_side == "SIDEWAY":
+            execution_horizon = "RANGE_GRID"
+            entry_price = current_price
+            entry_rationale = f"Thị trường Sideway / Tích lũy (ADX={adx:.1f}). AI khuyến nghị kích hoạt Futures Hedge Grid biên [${current_price - 2.0 * atr:,.1f} - ${current_price + 2.0 * atr:,.1f}]"
+        elif opt_side == "BUY":
             has_ob_entry = False
             if smc_res and smc_res.nearest_demand_zone:
                 ob_bottom, ob_top = smc_res.nearest_demand_zone
@@ -244,7 +255,13 @@ class AIOrderResearcher:
 
         bb_width = indicators.get("bb_width", 0.04)
 
-        if abs(dir_score) >= 60.0 and delta_momentum in ("STRONG_BUY_PRESSURE", "STRONG_SELL_PRESSURE") and adx >= 28.0:
+        if opt_side == "SIDEWAY":
+            opt_type = "GRID"
+            fee_tier = "MAKER (0.02%)"
+            execution_horizon = "RANGE_GRID"
+            order_rationale = f"⚖️ THỊ TRƯỜNG SIDEWAY / TÍCH LŨY: Dao động biên hẹp. Kích hoạt Hedge Grid thu gom lợi nhuận hai đầu!"
+
+        elif abs(dir_score) >= 60.0 and delta_momentum in ("STRONG_BUY_PRESSURE", "STRONG_SELL_PRESSURE") and adx >= 28.0:
             opt_type = "MARKET"
             entry_price = current_price
             fee_tier = "TAKER (0.05%)"
@@ -292,19 +309,27 @@ class AIOrderResearcher:
             order_rationale = f"🛡️ BẢO VỆ MAKER 0.02%: {entry_rationale}. Hưởng ưu đãi giảm 60% phí sàn, vị thế an toàn cao."
 
         # 6. Institutional Structural SL & TP Calculation (Calibrated per Timeframe)
-        struct_setup = self.structural_calculator.compute_setup(
-            side=opt_side,
-            entry_price=entry_price,
-            df_structure=df_structure,
-            df_macro=df_macro,
-            timeframe=active_timeframe
-        )
-        struct_sl = struct_setup.stop_loss
-        struct_tp = struct_setup.take_profit
-        struct_tp_macro = struct_setup.tp_macro_extended
-        risk_dist = struct_setup.risk_distance
-        reward_dist = struct_setup.reward_distance
-        rr_ratio = struct_setup.rr_ratio
+        if opt_side == "SIDEWAY":
+            struct_sl = round(entry_price - 2.0 * atr, 1)
+            struct_tp = round(entry_price + 2.0 * atr, 1)
+            struct_tp_macro = round(entry_price + 3.0 * atr, 1)
+            risk_dist = 2.0 * atr
+            reward_dist = 2.0 * atr
+            rr_ratio = 1.0
+        else:
+            struct_setup = self.structural_calculator.compute_setup(
+                side=opt_side,
+                entry_price=entry_price,
+                df_structure=df_structure,
+                df_macro=df_macro,
+                timeframe=active_timeframe
+            )
+            struct_sl = struct_setup.stop_loss
+            struct_tp = struct_setup.take_profit
+            struct_tp_macro = struct_setup.tp_macro_extended
+            risk_dist = struct_setup.risk_distance
+            reward_dist = struct_setup.reward_distance
+            rr_ratio = struct_setup.rr_ratio
 
         # 7. Sizing & Leverage Allocation (Kelly / Portfolio Risk Cap & Macro Anchor Alignment)
         macro_radar = getattr(ai_verdict, "mtf_radar", {}) if ai_verdict else {}
@@ -475,11 +500,18 @@ class AIOrderResearcher:
             "summary_rationale": carver_out.summary_rationale
         }
 
-        final_rationale = (
-            f"{order_rationale} "
-            f"Vị thế: {opt_side} quanh ${entry_price:,.1f} | SL cấu trúc: ${struct_sl:,.1f} (-${risk_dist:,.1f}) | "
-            f"TP mục tiêu: ${struct_tp:,.1f} (+${reward_dist:,.1f}) | Tỷ lệ R:R chuẩn {rr_ratio}:1 ({win_prob}% xác suất){skew_note}{hft_note}."
-        )
+        if opt_side == "SIDEWAY":
+            final_rationale = (
+                f"{order_rationale} "
+                f"Lập Lưới Hedge Grid quanh ${entry_price:,.1f} | SL biên dưới: ${struct_sl:,.1f} | "
+                f"TP biên trên: ${struct_tp:,.1f} | Tỷ lệ R:R 1.0:1 ({win_prob}% xác suất){skew_note}{hft_note}."
+            )
+        else:
+            final_rationale = (
+                f"{order_rationale} "
+                f"Vị thế: {opt_side} quanh ${entry_price:,.1f} | SL cấu trúc: ${struct_sl:,.1f} (-${risk_dist:,.1f}) | "
+                f"TP mục tiêu: ${struct_tp:,.1f} (+${reward_dist:,.1f}) | Tỷ lệ R:R chuẩn {rr_ratio}:1 ({win_prob}% xác suất){skew_note}{hft_note}."
+            )
 
         return AIOrderResearchResult(
             recommended_type=opt_type,

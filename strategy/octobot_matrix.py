@@ -262,7 +262,7 @@ class OctoBotMatrixEngine:
     Gathers all 5 Tentacles, computes weighted consensus, applies confidence threshold,
     and returns a structured decision matrix for algorithmic execution.
     """
-    def __init__(self, confidence_threshold: float = 0.55):
+    def __init__(self, confidence_threshold: float = 0.30):
         self.confidence_threshold = confidence_threshold
         self.tentacle_ta = TATentacleEvaluator(weight=1.0)
         self.tentacle_of = OrderFlowTentacleEvaluator(weight=1.4)
@@ -299,7 +299,7 @@ class OctoBotMatrixEngine:
             state = "STRONG_BULLISH"
             direction = 1
             is_tradable = True
-        elif matrix_score >= 0.25:
+        elif matrix_score >= 0.20:
             state = "WEAK_BULLISH"
             direction = 1
             is_tradable = False
@@ -307,7 +307,7 @@ class OctoBotMatrixEngine:
             state = "STRONG_BEARISH"
             direction = -1
             is_tradable = True
-        elif matrix_score <= -0.25:
+        elif matrix_score <= -0.20:
             state = "WEAK_BEARISH"
             direction = -1
             is_tradable = False

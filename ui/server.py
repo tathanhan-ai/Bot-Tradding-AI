@@ -860,8 +860,14 @@ class LiveTradingState:
             metrics = _snapshot.context["hft"]
             if not metrics.vpin_ready or not metrics.depth_ready:
                 return StageOutcome.veto(f"Microstructure warmup: {metrics.completed_bucket_count}/5 measured VPIN buckets; depth_ready={metrics.depth_ready}")
+            if metrics.vpin >= 0.88 or metrics.market_resilience_pct < 30.0:
+                return StageOutcome.veto(f"Critical toxic flow: VPIN={metrics.vpin:.2f}, resilience={metrics.market_resilience_pct:.1f}%")
             if metrics.is_toxic_flow:
-                return StageOutcome.veto(f"toxic flow VPIN={metrics.vpin:.2f}")
+                # Elevated VPIN [0.70, 0.88): adaptively enforce Maker execution & defensive margin cap
+                if order.order_type == "MARKET":
+                    order.order_type = "POST_ONLY"
+                order.metadata["hft_toxic_margin_cap"] = True
+                return StageOutcome.pass_(f"Elevated VPIN={metrics.vpin:.2f}; adaptive Maker risk scaling applied")
             if metrics.liquidity_drought_warning:
                 return StageOutcome.veto(f"liquidity drought resilience={metrics.market_resilience_pct:.1f}%")
             return StageOutcome.pass_(f"L2 healthy; VPIN={metrics.vpin:.2f}")
@@ -881,36 +887,40 @@ class LiveTradingState:
             self.analyze_snapshot(_snapshot)
             research = self.order_research
             if order.source in ("auto", "auto-grid") and order.order_type != "GRID" and not order.metadata.get("copilot_revalidated"):
-                if research.recommended_side not in ("BUY", "SELL"):
-                    verdict = self.ai_verdict
-                    regime = getattr(verdict, "regime", "")
-                    strategy = getattr(verdict, "recommended_strategy", "")
-                    ensemble_verdict = getattr(self.ensemble_result, "consensus_verdict", "") if self.ensemble_result else ""
-                    if (
-                        not getattr(self, "is_grid_active", False)
-                        and not getattr(self, "current_position", None)
-                        and not getattr(self, "hedge_positions", {})
-                        and (
-                            ensemble_verdict == "SIDEWAY_GRID"
-                            or regime in ("RANGING_SIDEWAY", "SIDEWAY_GRID", "CHOPPY", "NEUTRAL", "EQUILIBRIUM_FAIR")
-                            or strategy in ("TWO_WAY_RANGE", "GRID_BOT", "SIDEWAY_GRID", "MEAN_REVERSION_GRID")
-                        )
-                    ):
-                        atr = float(self.indicators.get("atr") or _snapshot.price * .008)
-                        order.order_type = "GRID"
-                        order.source = "auto-grid"
-                        order.direction = 0
-                        order.entry_price = _snapshot.price
-                        order.stop_loss = _snapshot.price - 2 * atr
-                        order.take_profit = _snapshot.price + 2 * atr
-                    else:
-                        return StageOutcome.veto("No directional research setup")
-                else:
+                verdict = self.ai_verdict
+                regime = getattr(verdict, "regime", "")
+                strategy = getattr(verdict, "recommended_strategy", "")
+                ensemble_verdict = getattr(self.ensemble_result, "consensus_verdict", "") if self.ensemble_result else ""
+                matrix = self.octobot_consensus
+
+                is_range_regime = (
+                    research.recommended_side in ("SIDEWAY", "NEUTRAL")
+                    or ensemble_verdict == "SIDEWAY_GRID"
+                    or regime in ("RANGING_SIDEWAY", "SIDEWAY_GRID", "CHOPPY", "NEUTRAL", "EQUILIBRIUM_FAIR")
+                    or strategy in ("TWO_WAY_RANGE", "GRID_BOT", "SIDEWAY_GRID", "MEAN_REVERSION_GRID")
+                    or (matrix and matrix.consensus_state == "NEUTRAL")
+                )
+                if (
+                    is_range_regime
+                    and not getattr(self, "is_grid_active", False)
+                    and not getattr(self, "current_position", None)
+                    and not getattr(self, "hedge_positions", {})
+                ):
+                    atr = float(self.indicators.get("atr") or _snapshot.price * .008)
+                    order.order_type = "GRID"
+                    order.source = "auto-grid"
+                    order.direction = 0
+                    order.entry_price = _snapshot.price
+                    order.stop_loss = _snapshot.price - 2 * atr
+                    order.take_profit = _snapshot.price + 2 * atr
+                elif research.recommended_side in ("BUY", "SELL"):
                     order.direction = 1 if research.recommended_side == "BUY" else -1
                     order.order_type = research.recommended_type
                     order.entry_price = research.optimal_price
                     order.stop_loss = research.structural_sl
                     order.take_profit = research.structural_tp
+                else:
+                    return StageOutcome.veto("No directional research setup")
             validation = self.deterministic_validation
             return StageOutcome.pass_(validation.validation_notes, regime=self.ai_verdict.regime, confidence=self.ai_verdict.confidence)
 
@@ -919,26 +929,44 @@ class LiveTradingState:
             if order.order_type == "GRID" and order.source in ("manual-grid", "auto-grid", "auto"):
                 verdict = self.ai_verdict
                 atr = float(self.indicators.get("atr") or _snapshot.price * .008)
+                supp = float(getattr(verdict, "support_price", 0.0) or 0.0)
+                resis = float(getattr(verdict, "resistance_price", 0.0) or 0.0)
+                vwap_val = float(getattr(verdict, "vwap_fair_price", 0.0) or 0.0)
+                if supp <= 0 or supp >= _snapshot.price:
+                    supp = round(_snapshot.price - 2.5 * atr, 1)
+                if resis <= 0 or resis <= _snapshot.price:
+                    resis = round(_snapshot.price + 2.5 * atr, 1)
+                if vwap_val <= 0 or not (supp < vwap_val < resis):
+                    vwap_val = round((supp + resis) / 2.0, 1)
+
                 plan = GridPlanner.plan_hedge_grid(
                     price=_snapshot.price, best_bid=_snapshot.bids[0][0], best_ask=_snapshot.asks[0][0],
-                    support=float(getattr(verdict, "support_price", 0.0)), resistance=float(getattr(verdict, "resistance_price", 0.0)),
-                    vwap=float(getattr(verdict, "vwap_fair_price", 0.0)), atr=atr,
+                    support=supp, resistance=resis,
+                    vwap=vwap_val, atr=atr,
                     regime=getattr(verdict, "regime", ""), recommended_strategy=getattr(verdict, "recommended_strategy", ""),
                     adx=float(self.indicators.get("adx") or 0.0), hurst=float(getattr(verdict, "hurst_exponent", 1.0)),
                 )
                 if not plan.is_tradeable:
                     return StageOutcome.veto(plan.reason)
                 alpha = self.vibe_alpha_zoo.get_latest_metrics()
-                if matrix and matrix.recommended_direction:
-                    return StageOutcome.veto("OctoBot has a directional setup; hedge grid is not tradable")
-                if abs(alpha.composite_alpha_score) > 15.0:
-                    return StageOutcome.veto(f"Alpha Zoo is directional ({alpha.composite_alpha_score:+.1f})")
+                # Only veto Grid if OctoBot has a confirmed STRONG trend
+                if matrix and matrix.is_tradable and matrix.consensus_state in ("STRONG_BULLISH", "STRONG_BEARISH"):
+                    return StageOutcome.veto(f"OctoBot has a strong trend ({matrix.consensus_state}); hedge grid is paused")
+                if abs(alpha.composite_alpha_score) > 20.0:
+                    return StageOutcome.veto(f"Alpha Zoo is strongly directional ({alpha.composite_alpha_score:+.1f})")
                 order.entry_price = plan.center
                 order.stop_loss = plan.lower - .5 * atr
                 order.take_profit = plan.upper + .5 * atr
                 return StageOutcome.pass_("Range regime validated for hedge grid", alpha_score=alpha.composite_alpha_score,
                     grid_plan=plan.as_dict(), grid_model=plan.model, inventory_skew_applied=False)
-            if not matrix or not matrix.is_tradable:
+
+            alpha = self.vibe_alpha_zoo.get_latest_metrics()
+            is_tradable = bool(matrix and matrix.is_tradable)
+            # Confluence override: allow directional trades when matrix has moderate alignment (>= 0.18) and Alpha Zoo confirms
+            if not is_tradable and matrix and (matrix.recommended_direction == order.direction) and abs(matrix.matrix_score) >= 0.18:
+                if alpha and (alpha.composite_alpha_score * order.direction >= 5.0):
+                    is_tradable = True
+            if not is_tradable:
                 reason = matrix.summary_reason if matrix else "OctoBot matrix unavailable"
                 return StageOutcome.veto(reason)
             if matrix.recommended_direction and matrix.recommended_direction != order.direction:
@@ -946,7 +974,6 @@ class LiveTradingState:
             setup = self.octobot_setup
             if setup and setup.direction != order.direction:
                 return StageOutcome.veto("OctoBot trade setup conflicts with candidate")
-            alpha = self.vibe_alpha_zoo.get_latest_metrics()
             if alpha.composite_alpha_score * order.direction <= -15.0:
                 return StageOutcome.veto(f"Alpha Zoo conflicts ({alpha.composite_alpha_score:+.1f})")
             fee_check = freqtrade_gate(order, _snapshot)
@@ -1064,7 +1091,10 @@ class LiveTradingState:
                 effective_leverage=leverage,
             )
             contracts = carver.contracts_to_execute
-            if carver.rebalance_action == "HOLD" or abs(contracts) <= 0:
+            # When opening a fresh position with 0 inventory, target optimal_contracts is the initial order
+            if held == 0.0 and abs(contracts) <= 0 and abs(carver.optimal_contracts) >= 0.001 and (carver.optimal_contracts * order.direction > 0):
+                contracts = carver.optimal_contracts
+            if (carver.rebalance_action == "HOLD" and held != 0.0) or abs(contracts) <= 0:
                 return StageOutcome.veto("Carver inertia buffer says HOLD", carver=asdict(carver))
             if position and order.source == "auto" and contracts * position["direction"] < 0:
                 quantity = min(position["units"], math.floor(abs(contracts) / .001) * .001)
@@ -1117,7 +1147,8 @@ class LiveTradingState:
             if order.metadata.get("probation"):
                 stop_distance = abs(order.entry_price - order.stop_loss)
                 probation_quantity = (self.current_balance * order.metadata["risk_cap_pct"]) / risk_per_unit if stop_distance > 0 else 0.0
-                quantity = min(quantity, probation_quantity)
+            if order.metadata.get("hft_toxic_margin_cap"):
+                quantity = max(0.001, quantity * 0.50)
             quantity = math.floor((quantity + 1e-12) / 0.001) * 0.001
             if quantity <= 0:
                 return StageOutcome.veto("final risk clamp below BTCUSDT minimum step")
