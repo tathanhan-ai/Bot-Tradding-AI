@@ -177,6 +177,9 @@ class OrderQueueManager:
         created = []
         for index, child_units in enumerate(units, 1):
             child_price = target_price * (1 - direction * (index - 1) * .005) if is_scale else target_price
+            price_shift = (child_price - target_price) if is_scale else 0.0
+            child_sl = round(stop_loss + price_shift, 2) if (stop_loss and stop_loss > 0) else stop_loss
+            child_tp = round(take_profit + price_shift, 2) if (take_profit and take_profit > 0) else take_profit
             child_client_id = f"{parent_id}-{index}" if count > 1 else parent_id
             if len(child_client_id) > 36:
                 return None, "Client order ID exceeds Binance 36-character limit"
@@ -187,7 +190,7 @@ class OrderQueueManager:
                 created_at=datetime.now().isoformat(), timeframe=timeframe, trigger_price=trigger_price,
                 trigger_condition=trigger_condition.upper(), callback_pct=callback_pct, peak_price=target_price,
                 twap_total_slices=count if is_twap else 1, twap_interval_ticks=twap_interval_ticks,
-                scale_level=index, scale_ratio_pct=ratios[index - 1] * 100, stop_loss=stop_loss, take_profit=take_profit,
+                scale_level=index, scale_ratio_pct=ratios[index - 1] * 100, stop_loss=child_sl, take_profit=child_tp,
                 note=note or (f"{order_type_clean} child {index}/{count}" if count > 1 else ""),
                 execution_group=group, client_order_id=child_client_id, group_type=kind,
                 position_side=position_side,

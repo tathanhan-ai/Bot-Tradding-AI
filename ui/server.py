@@ -886,19 +886,17 @@ class LiveTradingState:
             nonlocal research
             self.analyze_snapshot(_snapshot)
             research = self.order_research
-            if order.source in ("auto", "auto-grid") and order.order_type != "GRID" and not order.metadata.get("copilot_revalidated"):
+            if order.source in ("auto", "auto-grid") and not order.metadata.get("copilot_revalidated"):
                 verdict = self.ai_verdict
-                regime = getattr(verdict, "regime", "")
                 strategy = getattr(verdict, "recommended_strategy", "")
                 ensemble_verdict = getattr(self.ensemble_result, "consensus_verdict", "") if self.ensemble_result else ""
-                matrix = self.octobot_consensus
 
-                is_range_regime = (
-                    research.recommended_side in ("SIDEWAY", "NEUTRAL")
-                    or ensemble_verdict == "SIDEWAY_GRID"
-                    or regime in ("RANGING_SIDEWAY", "SIDEWAY_GRID", "CHOPPY", "NEUTRAL", "EQUILIBRIUM_FAIR")
-                    or strategy in ("TWO_WAY_RANGE", "GRID_BOT", "SIDEWAY_GRID", "MEAN_REVERSION_GRID")
-                    or (matrix and matrix.consensus_state == "NEUTRAL")
+                # Only engage GRID if specifically in a GRID strategy or order explicitly requested GRID
+                is_grid_specific = (
+                    order.order_type == "GRID"
+                    or order.source == "auto-grid"
+                    or (research and getattr(research, "recommended_type", "") == "GRID")
+                    or (strategy in ("GRID_BOT", "SIDEWAY_GRID") and ensemble_verdict == "SIDEWAY_GRID")
                 )
                 atr = float(self.indicators.get("atr") or _snapshot.price * .008)
                 vwap_val = float(getattr(verdict, "vwap_fair_price", 0.0) or 0.0)
@@ -906,7 +904,7 @@ class LiveTradingState:
                 can_balance_grid = (vwap_val <= 0) or (vwap_dist <= atr * 0.75)
 
                 if (
-                    is_range_regime
+                    is_grid_specific
                     and can_balance_grid
                     and not getattr(self, "is_grid_active", False)
                     and not getattr(self, "current_position", None)
@@ -918,12 +916,20 @@ class LiveTradingState:
                     order.entry_price = _snapshot.price
                     order.stop_loss = _snapshot.price - 2 * atr
                     order.take_profit = _snapshot.price + 2 * atr
-                elif research.recommended_side in ("BUY", "SELL"):
-                    order.direction = 1 if research.recommended_side == "BUY" else -1
-                    order.order_type = research.recommended_type
-                    order.entry_price = research.optimal_price
-                    order.stop_loss = research.structural_sl
-                    order.take_profit = research.structural_tp
+                elif research and research.recommended_side in ("BUY", "SELL", "SIDEWAY"):
+                    cand_side = research.recommended_side
+                    if cand_side == "SIDEWAY":
+                        cand_side = "BUY" if _snapshot.price <= vwap_val else "SELL"
+                    if order.direction == 0:
+                        order.direction = 1 if cand_side == "BUY" else -1
+                    if order.order_type in ("AUTO", "GRID", "") or not order.order_type:
+                        order.order_type = research.recommended_type
+                    if order.entry_price <= 0:
+                        order.entry_price = research.optimal_price
+                    if order.stop_loss <= 0:
+                        order.stop_loss = research.structural_sl
+                    if order.take_profit <= 0:
+                        order.take_profit = research.structural_tp
                 else:
                     return StageOutcome.veto("No directional research setup")
             validation = self.deterministic_validation
@@ -966,24 +972,58 @@ class LiveTradingState:
                     grid_plan=plan.as_dict(), grid_model=plan.model, inventory_skew_applied=False)
 
             alpha = self.vibe_alpha_zoo.get_latest_metrics()
-            is_tradable = bool(matrix and matrix.is_tradable)
-            # Confluence override: allow directional trades when matrix has moderate alignment (>= 0.18) and Alpha Zoo confirms
-            if not is_tradable and matrix and (matrix.recommended_direction == order.direction) and abs(matrix.matrix_score) >= 0.18:
-                if alpha and (alpha.composite_alpha_score * order.direction >= 5.0):
+            order_kind = (order.order_type or "POST_ONLY").upper()
+
+            # Distinct Multi-Order Type Tradability Assessment across regimes
+            is_tradable = False
+
+            # Group A: Resting Maker / Range / Bracket Orders (POST_ONLY, LIMIT, SCALE_RATIO, CONDITIONAL, TWAP)
+            # These are designed for Sideway / Range / Pullback / Liquidity Sweeps
+            if order_kind in ("POST_ONLY", "LIMIT", "SCALE_RATIO", "CONDITIONAL", "TWAP"):
+                # Permit resting orders unless fighting an explicitly strong opposite trend
+                is_opposing_strong_trend = bool(
+                    matrix and (
+                        (matrix.consensus_state == "STRONG_BEARISH" and order.direction == 1) or
+                        (matrix.consensus_state == "STRONG_BULLISH" and order.direction == -1)
+                    )
+                )
+                if not is_opposing_strong_trend:
                     is_tradable = True
+
+            # Group B: Aggressive Taker / Momentum Orders (MARKET, TRAILING_STOP)
+            # These require momentum confirmation or breakout alignment
+            else:
+                if matrix and matrix.is_tradable:
+                    is_tradable = True
+                elif alpha and (alpha.composite_alpha_score * order.direction >= 8.0):
+                    is_tradable = True
+                elif matrix and (matrix.recommended_direction == order.direction) and abs(matrix.matrix_score) >= 0.15:
+                    is_tradable = True
+                else:
+                    # Adaptive safety: degrade aggressive MARKET to defensive POST_ONLY maker
+                    order.order_type = "POST_ONLY"
+                    order.entry_price = _snapshot.bids[0][0] if order.direction == 1 else _snapshot.asks[0][0]
+                    is_tradable = True
+
             if not is_tradable:
                 reason = matrix.summary_reason if matrix else "OctoBot matrix unavailable"
                 return StageOutcome.veto(reason)
-            if matrix.recommended_direction and matrix.recommended_direction != order.direction:
+
+            # Strict veto only if there is an active strong opposing trend
+            if matrix and matrix.is_tradable and matrix.recommended_direction and matrix.recommended_direction != order.direction:
                 return StageOutcome.veto("OctoBot direction conflicts with candidate")
+
             setup = self.octobot_setup
-            if setup and setup.mode_name != "RANGE_TRADING" and setup.direction != order.direction:
+            if setup and setup.mode_name not in ("RANGE_TRADING", "DIP_ANALYSER") and setup.direction != order.direction:
                 return StageOutcome.veto("OctoBot trade setup conflicts with candidate")
-            if alpha.composite_alpha_score * order.direction <= -15.0:
+
+            if alpha.composite_alpha_score * order.direction <= -18.0:
                 return StageOutcome.veto(f"Alpha Zoo conflicts ({alpha.composite_alpha_score:+.1f})")
+
             fee_check = freqtrade_gate(order, _snapshot)
             if fee_check.verdict == "VETO":
                 return fee_check
+
             staged_tp = {}
             if setup:
                 staged_tp = {
@@ -994,14 +1034,15 @@ class LiveTradingState:
                     "tp3": setup.staged_tp.tp3_price,
                     "tp3_ratio": setup.staged_tp.tp3_ratio,
                 }
-                if order.source == "auto":
+                if order.source == "auto" and setup.direction == order.direction and (setup.staged_tp.tp3_price - order.entry_price) * order.direction > 0:
                     order.take_profit = setup.staged_tp.tp3_price
                 # Manual TP remains a hard final exit; do not advertise later stages.
                 for stage in ("tp1", "tp2"):
                     if not 0 < (staged_tp[stage] - order.entry_price) * order.direction < (order.take_profit - order.entry_price) * order.direction:
                         staged_tp[f"{stage}_ratio"] = 0.0
+
             return StageOutcome.pass_(
-                f"OctoBot {matrix.consensus_state}; Alpha Zoo {alpha.composite_alpha_score:+.1f}",
+                f"Approved {order.order_type} via OctoBot {matrix.consensus_state if matrix else 'OK'}; Alpha Zoo {alpha.composite_alpha_score:+.1f}",
                 alpha_score=alpha.composite_alpha_score,
                 staged_take_profits=staged_tp,
                 inventory_skew_applied=bool(self.current_position),
@@ -1154,6 +1195,12 @@ class LiveTradingState:
                 probation_quantity = (self.current_balance * order.metadata["risk_cap_pct"]) / risk_per_unit if stop_distance > 0 else 0.0
             if order.metadata.get("hft_toxic_margin_cap"):
                 quantity = max(0.001, quantity * 0.50)
+            # DCA Ladder minimum size guard: 3 tiers (20% - 30% - 50%) require total units >= 0.003
+            if order.order_type == "SCALE_RATIO" and quantity < 0.003:
+                if remaining_margin * proposal.leverage / max(1.0, order.entry_price) >= 0.003:
+                    quantity = 0.003
+                else:
+                    order.order_type = "LIMIT"
             quantity = math.floor((quantity + 1e-12) / 0.001) * 0.001
             if quantity <= 0:
                 return StageOutcome.veto("final risk clamp below BTCUSDT minimum step")
@@ -1485,14 +1532,65 @@ class LiveTradingState:
                     pass
 
     def evaluate_ensemble_automated_decision(self, current_price: float):
-        if not self.is_running or self.order_manager.pending_orders:
+        if not self.is_running:
             return
+
         now = time.time()
-        if now - self.last_auto_order_time < 15.0:
+        # Stale Pending Orders Cleanup:
+        # If a resting limit/maker/DCA order has drifted > 0.8% away from current price, cancel it to refresh
+        pending = list(self.order_manager.pending_orders)
+        if pending:
+            stale_orders = []
+            for o in pending:
+                price_drift = abs(current_price - o.price) / max(1.0, current_price)
+                if o.order_type in ("POST_ONLY", "LIMIT", "SCALE_RATIO") and price_drift > 0.008:
+                    stale_orders.append(o)
+            for stale in stale_orders:
+                self.order_manager.cancel_order(stale.order_id)
+            if len(self.order_manager.pending_orders) > 0:
+                return
+
+        if now - self.last_auto_order_time < 10.0:
             return
         self.last_auto_order_time = now
 
-        candidate = self.build_candidate_order(0, "AUTO", current_price, 0.0, 0.0, "auto")
+        res = getattr(self, "order_research", None)
+        if res and getattr(res, "ready", True):
+            cand_side = getattr(res, "recommended_side", "BUY")
+            vwap_val = getattr(self.ai_verdict, "vwap_fair_price", current_price) if self.ai_verdict else current_price
+            if cand_side == "SIDEWAY":
+                cand_side = "BUY" if current_price <= vwap_val else "SELL"
+
+            cand_dir = 1 if cand_side == "BUY" else (-1 if cand_side == "SELL" else 0)
+            cand_type = getattr(res, "recommended_type", "POST_ONLY")
+            if cand_type not in ("MARKET", "LIMIT", "POST_ONLY", "CONDITIONAL", "TRAILING_STOP", "TWAP", "SCALE_RATIO"):
+                cand_type = "POST_ONLY"
+
+            cand_entry = res.optimal_price if (res.optimal_price and res.optimal_price > 0) else current_price
+            cand_sl = res.structural_sl if (res.structural_sl and res.structural_sl > 0) else (cand_entry * 0.99 if cand_dir == 1 else cand_entry * 1.01)
+            cand_tp = res.structural_tp if (res.structural_tp and res.structural_tp > 0) else (cand_entry * 1.02 if cand_dir == 1 else cand_entry * 0.98)
+
+            candidate = self.build_candidate_order(cand_dir, cand_type, cand_entry, cand_sl, cand_tp, "auto", confidence=res.win_probability)
+            candidate.metadata.update({
+                "trigger_price": getattr(res, "optimal_trigger_price", 0.0),
+                "trigger_condition": getattr(res, "optimal_trigger_cond", "ABOVE"),
+                "callback_pct": getattr(res, "optimal_callback_pct", 0.8),
+                "twap_slices": getattr(res, "optimal_twap_slices", 5),
+                "group_type": "SCALE" if cand_type == "SCALE_RATIO" else "",
+                "fee_tier": getattr(res, "fee_tier", "MAKER (0.02%)"),
+                "execution_horizon": getattr(res, "execution_horizon", "IMMEDIATE"),
+                "win_probability": getattr(res, "win_probability", 75),
+                "carver_contracts": getattr(res, "carver_contracts", 0.0),
+            })
+            if res.optimal_margin > 0:
+                candidate.margin = res.optimal_margin
+                candidate.quantity = round(res.optimal_margin * res.optimal_leverage / max(1.0, cand_entry), 4)
+                candidate.leverage = res.optimal_leverage
+                candidate.metadata["requested_margin"] = res.optimal_margin
+                candidate.metadata["requested_quantity"] = candidate.quantity
+        else:
+            candidate = self.build_candidate_order(0, "AUTO", current_price, 0.0, 0.0, "auto")
+
         decision = self.evaluate_candidate_pipeline(candidate)
         if decision.approved:
             self.queue_approved_candidate(decision.candidate, self.order_research)

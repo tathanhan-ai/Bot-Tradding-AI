@@ -53,6 +53,7 @@ class AIOrderResearchResult:
     lob_imbalance_20: float = 0.0
     kelly_multiplier: float = 1.0
     octobot_tradable: bool = True
+    ready: bool = True
 
 
 class AIOrderResearcher:
@@ -259,24 +260,20 @@ class AIOrderResearcher:
 
         bb_width = indicators.get("bb_width", 0.04)
 
-        if opt_side == "SIDEWAY":
-            opt_type = "GRID"
-            fee_tier = "MAKER (0.02%)"
-            execution_horizon = "RANGE_GRID"
-            order_rationale = f"⚖️ THỊ TRƯỜNG SIDEWAY / TÍCH LŨY: Dao động biên hẹp. Kích hoạt Hedge Grid thu gom lợi nhuận hai đầu!"
-
-        elif abs(dir_score) >= 60.0 and delta_momentum in ("STRONG_BUY_PRESSURE", "STRONG_SELL_PRESSURE") and adx >= 28.0:
+        # 1. MARKET (Momentum Surge: CVD pressure + high ADX + directional score)
+        if abs(dir_score) >= 55.0 and delta_momentum in ("STRONG_BUY_PRESSURE", "STRONG_SELL_PRESSURE") and adx >= 25.0:
             opt_type = "MARKET"
             entry_price = current_price
             fee_tier = "TAKER (0.05%)"
             execution_horizon = "IMMEDIATE"
             order_rationale = f"⚡ BÙNG NỔ ĐỘNG LƯỢNG: CVD {delta_momentum} áp đảo, ADX {adx:.1f}. AI khuyến nghị vào lệnh MARKET ngay lập tức để không lỡ sóng!"
 
-        elif (bb_width < 0.015 or adx < 16.0) and regime == "RANGING_SIDEWAY":
+        # 2. CONDITIONAL / STOP-LIMIT (Volatility Squeeze Breakout)
+        elif (bb_width < 0.018 or adx < 18.0) and regime in ("RANGING_SIDEWAY", "CHOPPY", "NEUTRAL"):
             opt_type = "CONDITIONAL"
             fee_tier = "STOP-LIMIT (MAKER/TAKER)"
             execution_horizon = "BREAKOUT"
-            if opt_side == "BUY":
+            if opt_side == "BUY" or (opt_side == "SIDEWAY" and dir_score >= 0):
                 opt_trigger_price = round(current_price + (0.25 * atr), 1)
                 opt_trigger_cond = "ABOVE"
                 entry_price = round(opt_trigger_price + 0.5, 1)
@@ -286,19 +283,22 @@ class AIOrderResearcher:
                 entry_price = round(opt_trigger_price - 0.5, 1)
             order_rationale = f"📦 THỊ TRƯỜNG NÉN BIÊN (Squeeze): Bollinger co thắt. AI khuyến nghị Stop-Limit đón Breakout tại ngưỡng ${opt_trigger_price:,.1f}!"
 
-        elif regime in ("TRENDING_BULL", "TRENDING_BEAR") and abs(dir_score) >= 35.0:
+        # 3. TRAILING_STOP (Trend Wave Following)
+        elif regime in ("TRENDING_BULL", "TRENDING_BEAR") and abs(dir_score) >= 30.0:
             opt_type = "TRAILING_STOP"
             entry_price = current_price
             fee_tier = "TRAILING TAKER"
             execution_horizon = "IMMEDIATE"
             order_rationale = f"🏄 BÁM SÓNG XU HƯỚNG: Xu hướng {regime} mạnh ({dir_score:+.1f}đ). AI khuyến nghị Trailing Stop tự động bám đỉnh/đáy rút râu {opt_callback}%!"
 
-        elif smc_res and smc_res.last_sweep is not None:
+        # 4. SCALE_RATIO / DCA LADDER (SMC Liquidity Sweep / Absorption Reversal)
+        elif (smc_res and smc_res.last_sweep is not None) or (absorption in ("ABSORPTION_BUY", "ABSORPTION_SELL")):
             opt_type = "SCALE_RATIO"
             fee_tier = "MAKER LADDER (0.02%)"
             execution_horizon = "SWEEP_REVERSAL"
-            order_rationale = f"🎯 QUÉT THANH KHOẢN SMC: Phát hiện {smc_res.last_sweep.type}. AI khuyến nghị Rải Thang 3 Tầng (20%-30%-50%) quanh ${entry_price:,.1f} đón râu nến!"
+            order_rationale = f"🎯 QUÉT THANH KHOẢN SMC: Phát hiện {smc_res.last_sweep.type if (smc_res and smc_res.last_sweep) else absorption}. AI khuyến nghị Rải Thang 3 Tầng DCA Ladder (20%-30%-50%) quanh ${entry_price:,.1f} đón râu nến!"
 
+        # 5. TWAP (High Spread / Volatility Panic Slice)
         elif eff_spread > 5.0 or (atr / current_price) > 0.014 or regime == "VOLATILE_PANIC":
             opt_type = "TWAP"
             opt_twap_slices = 5
@@ -307,6 +307,14 @@ class AIOrderResearcher:
             execution_horizon = "IMMEDIATE"
             order_rationale = f"🌊 BIẾN ĐỘNG MẠNH / SPREAD GIÃN: Spread ${eff_spread:.1f}. AI khuyến nghị TWAP chia đều 5 lát cắt chống trượt giá sàn!"
 
+        # 6. LIMIT (Order Block / Institutional Level Pullback)
+        elif has_ob_entry or (vwap_res and abs(current_price - vwap_res.vwap) >= 0.4 * atr):
+            opt_type = "LIMIT"
+            fee_tier = "MAKER (0.02%)"
+            execution_horizon = "PULLBACK"
+            order_rationale = f"🏛️ LỆNH CHỜ LIMIT TẠI MỨC TỔ CHỨC: {entry_rationale}. Chờ đón sóng hồi phục tại vùng hỗ trợ/kháng cự then chốt!"
+
+        # 7. POST_ONLY (Best Bid/Ask Passive Maker at Market Equilibrium)
         else:
             opt_type = "POST_ONLY"
             fee_tier = "MAKER (0.02%)"
