@@ -1628,10 +1628,10 @@
           <button onclick="selectOrderTab('MARKET')" id="tab-market" class="order-tab-btn px-2.5 py-1.5 rounded bg-amber-500 text-black font-extrabold text-[11px] whitespace-nowrap shadow-md shadow-amber-500/20 transition" data-i18n="order_tab_market">Market</button>
           <button onclick="selectOrderTab('LIMIT')" id="tab-limit" class="order-tab-btn px-2.5 py-1.5 rounded text-gray-400 hover:text-white hover:bg-gray-800/60 font-bold text-[11px] whitespace-nowrap transition" data-i18n="order_tab_limit">Limit</button>
           <button onclick="selectOrderTab('POST_ONLY')" id="tab-post_only" class="order-tab-btn px-2.5 py-1.5 rounded text-gray-400 hover:text-white hover:bg-gray-800/60 font-bold text-[11px] whitespace-nowrap transition" data-i18n="order_tab_post_only">Post-Only</button>
-          <button onclick="selectOrderTab('CONDITIONAL')" id="tab-conditional" class="order-tab-btn px-2.5 py-1.5 rounded text-gray-400 hover:text-white hover:bg-gray-800/60 font-bold text-[11px] whitespace-nowrap transition" data-i18n="order_tab_conditional">Stop-Limit</button>
+          <button onclick="selectOrderTab('CONDITIONAL')" id="tab-conditional" class="order-tab-btn px-2.5 py-1.5 rounded text-gray-400 hover:text-white hover:bg-gray-800/60 font-bold text-[11px] whitespace-nowrap transition" data-i18n="order_tab_conditional">Stop-Lmt</button>
           <button onclick="selectOrderTab('TRAILING_STOP')" id="tab-trailing_stop" class="order-tab-btn px-2.5 py-1.5 rounded text-gray-400 hover:text-white hover:bg-gray-800/60 font-bold text-[11px] whitespace-nowrap transition" data-i18n="order_tab_trailing">Trailing</button>
           <button onclick="selectOrderTab('TWAP')" id="tab-twap" class="order-tab-btn px-2.5 py-1.5 rounded text-gray-400 hover:text-white hover:bg-gray-800/60 font-bold text-[11px] whitespace-nowrap transition" data-i18n="order_tab_twap">TWAP</button>
-          <button onclick="selectOrderTab('SCALE_RATIO')" id="tab-scale_ratio" class="order-tab-btn px-2.5 py-1.5 rounded text-gray-400 hover:text-white hover:bg-gray-800/60 font-bold text-[11px] whitespace-nowrap transition" data-i18n="order_tab_scale">DCA Ladder</button>
+          <button onclick="selectOrderTab('SCALE_RATIO')" id="tab-scale_ratio" class="order-tab-btn px-2.5 py-1.5 rounded text-gray-400 hover:text-white hover:bg-gray-800/60 font-bold text-[11px] whitespace-nowrap transition" data-i18n="order_tab_scale">DCA</button>
         </div>
 
         <div class="pt-3 space-y-3 text-xs">
@@ -3435,6 +3435,22 @@
     function setTimeframe(tf) { syncTimeframe(tf); }
     function switchActiveTimeframe(tf) { syncTimeframe(tf); }
 
+    function formatShortOrderType(type) {
+      if (!type) return '';
+      const map = {
+        'SCALE_RATIO': 'DCA',
+        'TRAILING_STOP': 'Trailing',
+        'CONDITIONAL': 'Stop-Lmt',
+        'POST_ONLY': 'Maker',
+        'MARKET': 'Market',
+        'LIMIT': 'Limit',
+        'TWAP': 'TWAP',
+        'TWAP_SLICE': 'TWAP',
+        'DUAL_BRACKET': 'Dual'
+      };
+      return map[type] || type;
+    }
+
     function fillAiLongPrice() {
       if (!latestStateData) return;
       const res = latestStateData.order_research;
@@ -4351,7 +4367,9 @@
         const horEl = document.getElementById('ai-res-horizon');
         const distEl = document.getElementById('ai-res-dist');
 
-        if (typeEl) typeEl.innerText = `${res.recommended_type} (${res.recommended_side})`;
+        const shortT = formatShortOrderType(res.recommended_type);
+        const shortS = res.recommended_side === 'SIDEWAY' ? 'Range' : res.recommended_side;
+        if (typeEl) typeEl.innerText = `${shortT} ${shortS}`;
         if (priceEl) priceEl.innerText = `$${res.optimal_price.toLocaleString('en-US', {minimumFractionDigits: 1})}`;
         if (marginEl) {
           const vpinBadge = res.is_vpin_throttled ? ' <span class="text-amber-300 font-bold text-[9px] bg-amber-950/80 px-1.5 py-0.5 rounded border border-amber-700/80">🛡️ VPIN ÉP VỐN NHỎ</span>' : '';
@@ -4359,7 +4377,7 @@
         }
         if (feeEl) feeEl.innerText = `${res.fee_tier} (${t('fee_saved_prefix')} ~$${res.estimated_fee_saved_usdt.toFixed(2)})`;
         if (ratEl) ratEl.innerText = res.research_rationale;
-        if (badgeEl) badgeEl.innerText = res.ready === false || !res.structural_sl || !res.structural_tp ? 'WAIT — CHƯA QUA DEFENSE GATES' : `${t('ai_recommend_prefix')} ${res.recommended_type} ${res.recommended_side} • score ${res.win_probability}/100 (chưa hiệu chuẩn OOS)`;
+        if (badgeEl) badgeEl.innerText = res.ready === false || !res.structural_sl || !res.structural_tp ? 'CHỜ TÍN HIỆU' : `⚡ ${shortT} ${shortS} • ${res.win_probability}%`;
         if (slEl && res.structural_sl) slEl.innerText = `$${res.structural_sl.toLocaleString('en-US', {minimumFractionDigits: 1})}`;
         if (tpEl && res.structural_tp) tpEl.innerText = `$${res.structural_tp.toLocaleString('en-US', {minimumFractionDigits: 1})} (${res.rr_ratio || 1.8}R)`;
 
@@ -4381,7 +4399,7 @@
           applyAiOrderResearch(false);
           const statusEl = document.getElementById('order-submit-status');
           if (statusEl) {
-            statusEl.innerText = `● ${t('ai_auto_tracking')} (${res.recommended_type} ${res.recommended_side} @ $${res.optimal_price} | SL:$${res.structural_sl})...`;
+            statusEl.innerText = `● ${t('ai_auto_tracking')} (${shortT} ${shortS} @ $${res.optimal_price} | SL:$${res.structural_sl})...`;
             statusEl.className = 'text-center text-[10px] text-emerald-400 mono font-bold';
           }
         }
@@ -4423,23 +4441,23 @@
             
             let typeBadge = '';
             if (isCanceled) {
-              typeBadge = `<span class="px-1.5 py-0.5 rounded bg-rose-950 text-rose-300 border border-rose-800 text-[10px] font-bold">🧹 AI CANCELED</span>`;
+              typeBadge = `<span class="px-1.5 py-0.5 rounded bg-rose-950 text-rose-300 border border-rose-800 text-[10px] font-bold">HỦY</span>`;
             } else if (o.type === 'MARKET') {
               typeBadge = `<span class="px-1.5 py-0.5 rounded bg-amber-950 text-amber-300 border border-amber-800 text-[10px] font-bold">MARKET</span>`;
             } else if (o.type === 'LIMIT') {
               typeBadge = `<span class="px-1.5 py-0.5 rounded bg-blue-950 text-blue-300 border border-blue-800 text-[10px] font-bold">LIMIT</span>`;
             } else if (o.type === 'POST_ONLY') {
-              typeBadge = `<span class="px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 text-[10px] font-bold">POST-ONLY</span>`;
+              typeBadge = `<span class="px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 text-[10px] font-bold">MAKER</span>`;
             } else if (o.type === 'CONDITIONAL') {
-              typeBadge = `<span class="px-1.5 py-0.5 rounded bg-purple-950 text-purple-300 border border-purple-800 text-[10px] font-bold">STOP-LIMIT</span>`;
+              typeBadge = `<span class="px-1.5 py-0.5 rounded bg-purple-950 text-purple-300 border border-purple-800 text-[10px] font-bold">STOP-LMT</span>`;
             } else if (o.type === 'TRAILING_STOP') {
-              typeBadge = `<span class="px-1.5 py-0.5 rounded bg-yellow-950 text-yellow-300 border border-yellow-800 text-[10px] font-bold">TRAILING (${o.callback_pct}%)</span>`;
+              typeBadge = `<span class="px-1.5 py-0.5 rounded bg-yellow-950 text-yellow-300 border border-yellow-800 text-[10px] font-bold">TRAIL (${o.callback_pct}%)</span>`;
             } else if (o.type === 'TWAP' || o.type === 'TWAP_SLICE') {
-              typeBadge = `<span class="px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 text-[10px] font-bold">TWAP (${o.twap_progress || 'SLICE'})</span>`;
+              typeBadge = `<span class="px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 text-[10px] font-bold">TWAP</span>`;
             } else if (o.type === 'SCALE_RATIO') {
-              typeBadge = `<span class="px-1.5 py-0.5 rounded bg-orange-950 text-orange-300 border border-orange-800 text-[10px] font-bold">DCA #${o.scale_level || '1'} (${o.scale_ratio || '20%'})</span>`;
+              typeBadge = `<span class="px-1.5 py-0.5 rounded bg-orange-950 text-orange-300 border border-orange-800 text-[10px] font-bold">DCA #${o.scale_level || '1'}</span>`;
             } else {
-              typeBadge = `<span class="px-1.5 py-0.5 rounded bg-gray-800 text-gray-300 text-[10px] font-bold">${o.type}</span>`;
+              typeBadge = `<span class="px-1.5 py-0.5 rounded bg-gray-800 text-gray-300 text-[10px] font-bold">${formatShortOrderType(o.type)}</span>`;
             }
 
             return `
@@ -5643,7 +5661,9 @@
       if (showToast) {
         const statusEl = document.getElementById('order-submit-status');
         if (statusEl) {
-          const aiLoadedPrefix = currentLanguage === 'vi' ? '⚡ Đã nạp thông số AI:' : (currentLanguage === 'zh' ? '⚡ 已载入 AI 策略参数:' : '⚡ Loaded AI Parameters:'); statusEl.innerText = `${aiLoadedPrefix} ${res.recommended_type} ${res.recommended_side} ($${res.optimal_price}) | SL: $${res.structural_sl} | TP: $${res.structural_tp} (${res.rr_ratio || 1.5}R)!`;
+          const shortT = formatShortOrderType(res.recommended_type);
+          const aiLoadedPrefix = currentLanguage === 'vi' ? '⚡ Đã nạp:' : (currentLanguage === 'zh' ? '⚡ 已载入:' : '⚡ Loaded:');
+          statusEl.innerText = `${aiLoadedPrefix} ${shortT} ${res.recommended_side} ($${res.optimal_price}) | SL: $${res.structural_sl} | TP: $${res.structural_tp}`;
           statusEl.className = 'text-center text-[10px] text-amber-400 mono font-bold';
         }
       }
@@ -6761,10 +6781,10 @@
         order_tab_market: "Market",
         order_tab_limit: "Limit",
         order_tab_post_only: "Post-Only",
-        order_tab_conditional: "Stop-Limit",
+        order_tab_conditional: "Stop-Lmt",
         order_tab_trailing: "Trailing",
         order_tab_twap: "TWAP",
-        order_tab_scale: "DCA Ladder",
+        order_tab_scale: "DCA",
         lbl_order_price: "GIÁ ĐẶT (USDT):",
         btn_fill_live: "Giá Live",
         btn_fill_support: "Cản Hỗ Trợ",
@@ -7420,10 +7440,10 @@
         order_tab_market: "Market",
         order_tab_limit: "Limit",
         order_tab_post_only: "Post-Only",
-        order_tab_conditional: "Stop-Limit",
+        order_tab_conditional: "Stop-Lmt",
         order_tab_trailing: "Trailing",
         order_tab_twap: "TWAP",
-        order_tab_scale: "DCA Ladder",
+        order_tab_scale: "DCA",
         lbl_order_price: "ORDER PRICE (USDT):",
         btn_fill_live: "Live Price",
         btn_fill_support: "Support",
