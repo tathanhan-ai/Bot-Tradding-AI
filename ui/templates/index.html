@@ -170,7 +170,7 @@
                     <div id="grid-menu-description" class="text-[10px] text-gray-400">Tối đa 10 tầng, chỉ khi range đủ an toàn</div>
                   </div>
                 </div>
-                <span id="grid-menu-badge" class="px-2 py-0.5 text-[10px] font-bold rounded bg-gray-800 text-gray-400 border border-gray-700 mono">TẮT</span>
+                <span id="grid-menu-badge" class="px-2.5 py-1 text-[10px] font-bold rounded bg-gray-800 text-gray-400 border border-gray-700 mono whitespace-nowrap shrink-0">TẮT</span>
               </button>
             </div>
 
@@ -4495,8 +4495,8 @@
       if (gridMenuBadge && data.grid_status) {
         const gridActive = data.grid_status === 'ACTIVE';
         const gridBlocked = data.grid_status === 'BLOCKED';
-        gridMenuBadge.innerText = gridActive ? 'BẬT ⚡' : (gridBlocked ? 'BỊ CHẶN' : (data.grid_status === 'CANCELLING' ? 'HỦY LỆNH' : 'TẮT'));
-        gridMenuBadge.className = `px-2 py-0.5 text-[10px] font-bold rounded mono ${gridActive ? 'bg-cyan-950 text-cyan-300 border border-cyan-700' : (gridBlocked ? 'bg-rose-950 text-rose-300 border border-rose-700' : 'bg-gray-800 text-gray-400 border border-gray-700')}`;
+        gridMenuBadge.innerText = gridActive ? 'BẬT' : (gridBlocked ? 'BỊ CHẶN' : (data.grid_status === 'CANCELLING' ? 'HỦY LỆNH' : 'TẮT'));
+        gridMenuBadge.className = `px-2.5 py-1 text-[10px] font-bold rounded mono whitespace-nowrap shrink-0 ${gridActive ? 'bg-cyan-950 text-cyan-300 border border-cyan-700' : (gridBlocked ? 'bg-rose-950 text-rose-300 border border-rose-700' : 'bg-gray-800 text-gray-400 border border-gray-700')}`;
       }
 
       const menuDbInfo = document.getElementById('menu-db-info');
