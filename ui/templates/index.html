@@ -317,7 +317,7 @@
             <div class="flex justify-between items-center mb-1">
               <div class="flex items-center gap-1.5">
                 <span class="w-2 h-2 rounded-full bg-cyan-400"></span>
-                <span class="font-bold text-gray-200 text-[11px]">1M SCALP</span>
+                <span class="font-bold text-gray-200 text-[11px]">1m SCALP ⚡</span>
               </div>
               <span id="candle-bias-1m" class="text-[9px] font-bold px-1 py-0.2 rounded bg-gray-800 text-gray-300 mono">BULLISH</span>
             </div>
@@ -3402,7 +3402,7 @@
       ['1m', '5m', '15m', '1h', '1w', '1M'].forEach(t => {
         const box = document.getElementById(`radar-box-${t}`);
         if (box) {
-          if (t.toLowerCase() === tf.toLowerCase()) {
+          if (t === tf) {
             box.className = 'cursor-pointer bg-[#131924] border-amber-500 p-2.5 rounded-xl border-2 transition shadow-md shadow-amber-500/10 ring-1 ring-amber-500/40';
           } else {
             box.className = 'cursor-pointer bg-[#080b11] hover:border-amber-500/50 p-2.5 rounded-xl border border-gray-800 transition';
@@ -3460,6 +3460,22 @@
         return `${datePart} ${timePart}`;
       }
       return tStr;
+    }
+
+    function formatTf(tf) {
+      if (!tf) return '15m';
+      const s = String(tf).trim();
+      if (s === '1M') return '1M (Tháng)';
+      if (s === '1w' || s === '1W') return '1W (Tuần)';
+      if (s.toLowerCase() === '1m') return '1m';
+      if (s.toLowerCase() === '3m') return '3m';
+      if (s.toLowerCase() === '5m') return '5m';
+      if (s.toLowerCase() === '15m') return '15m';
+      if (s.toLowerCase() === '30m') return '30m';
+      if (s.toLowerCase() === '1h') return '1h';
+      if (s.toLowerCase() === '4h') return '4h';
+      if (s.toLowerCase() === '1d') return '1D';
+      return s;
     }
 
     function fillAiLongPrice() {
@@ -3645,7 +3661,7 @@
       if (chartLayers.position && pos) {
         const isLong = pos.direction === 1;
         const entryColor = isLong ? '#10b981' : '#f43f5e';
-        const tf = (pos.timeframe || data.active_timeframe || '15m').toUpperCase();
+        const tf = formatTf(pos.timeframe || data.active_timeframe || '15m');
 
         // 1. Entry Price Line
         entryLine = candlestickSeries.createPriceLine({
@@ -4886,7 +4902,7 @@
 
       if (pos) {
         const isLong = pos.direction === 1;
-        const tf = (pos.timeframe || data.active_timeframe || '15m').toUpperCase();
+        const tf = formatTf(pos.timeframe || data.active_timeframe || '15m');
         posBadge.innerText = `${isLong ? 'LONG 🟢' : 'SHORT 🔴'} [${tf}]`;
         posBadge.className = `px-2 py-0.5 text-xs font-semibold rounded ${isLong ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-rose-950 text-rose-400 border border-rose-800'}`;
         
@@ -4931,7 +4947,7 @@
               const pnlColor = pnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
               const sliceId = ord.slice_id || ord.order_id || 'ORD-1';
               const shortId = ord.order_id ? `#${ord.order_id}` : (ord.slice_id ? `#${String(ord.slice_id).slice(-8)}` : '#ORD');
-              const tf = (ord.timeframe || pos.timeframe || data.active_timeframe || '15m').toUpperCase();
+              const tf = formatTf(ord.timeframe || pos.timeframe || data.active_timeframe || '15m');
               const shortOrdType = formatShortOrderType(ord.order_type || 'MARKET');
               const timeDisplay = formatShortTime(ord.entry_time);
               return `
@@ -5006,10 +5022,10 @@
         statUnrealized.innerText = `${t('pos_unrealized_prefix')}$0.00 (ROE: 0.00%)`;
 
         const posTfEl = document.getElementById('pos-timeframe');
-        if (posTfEl) { const scanTxt = currentLanguage === 'vi' ? '(Đang quét)' : (currentLanguage === 'zh' ? '(扫描中)' : '(Scanning)'); posTfEl.innerText = `${(data.active_timeframe || '15m').toUpperCase()} ${scanTxt}`; }
+        if (posTfEl) { const scanTxt = currentLanguage === 'vi' ? '(Đang quét)' : (currentLanguage === 'zh' ? '(扫描中)' : '(Scanning)'); posTfEl.innerText = `${formatTf(data.active_timeframe || '15m')} ${scanTxt}`; }
         const posTfBadge = document.getElementById('pos-tf-badge');
         if (posTfBadge) {
-          { const tfPrefix = currentLanguage === 'vi' ? 'KHUNG' : (currentLanguage === 'zh' ? '周期' : 'TF'); posTfBadge.innerText = `${tfPrefix} ${(data.active_timeframe || '15m').toUpperCase()}`; }
+          { const tfPrefix = currentLanguage === 'vi' ? 'KHUNG' : (currentLanguage === 'zh' ? '周期' : 'TF'); posTfBadge.innerText = `${tfPrefix} ${formatTf(data.active_timeframe || '15m')}`; }
           posTfBadge.className = 'px-2 py-0.5 text-[10px] font-semibold rounded bg-gray-800 text-gray-400 mono';
         }
 
@@ -5688,11 +5704,12 @@
 
     async function switchActiveTimeframe(tf) {
       try {
-        await fetch(`/api/action/set_timeframe?timeframe=${tf}`, { method: 'POST' });
-        if (typeof changeTimeframe === 'function') {
-          changeTimeframe(tf);
+        if (typeof syncTimeframe === 'function') {
+          syncTimeframe(tf);
+        } else {
+          await fetch(`/api/action/set_timeframe?timeframe=${tf}`, { method: 'POST' });
+          fetchStateRest();
         }
-        fetchStateRest();
       } catch (e) {
         console.error('Error switching timeframe:', e);
       }

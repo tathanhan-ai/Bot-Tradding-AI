@@ -52,6 +52,8 @@ class MTFCandleConfluenceResult:
     recommended_action: str     # 'BUY_SCALP', 'BUY_SWING', 'SELL_SCALP', 'SELL_SWING', 'STAND_ASIDE'
     macro_alignment: bool       # True if lower timeframes agree with 1h HTF
     summary_rationale: str
+    tactical_timeframe: str = "15m"
+    radar_score: float = 0.0
 
 
 class CandlePatternDetector:
@@ -362,22 +364,34 @@ class MultiTimeframeCandleStrategyEngine:
         elif macro_bias == "BEARISH" and ((p_15m and p_15m.bias == "BULLISH") or (p_5m and p_5m.bias == "BULLISH")):
             macro_alignment = False
 
-        # Verdict
+        # Determine tactical timeframe from the clearest/strongest pattern
+        target_bias = "BULLISH" if weighted_score > 0 else ("BEARISH" if weighted_score < 0 else None)
+        tactical_tf = active_timeframe or "15m"
+        best_str = 0.0
+        candidate_tfs = ["15m", "1h", "5m", "1m"]
+        if target_bias:
+            for tf_cand in candidate_tfs:
+                p_cand = patterns.get(tf_cand)
+                if p_cand and p_cand.bias == target_bias and p_cand.strength > best_str and p_cand.strength >= 65.0:
+                    best_str = p_cand.strength
+                    tactical_tf = tf_cand
+
+        # Verdict and Multi-Timeframe Tactical Action
         if weighted_score >= 45.0 and macro_bias == "BULLISH":
             verdict = "STRONG_BULLISH_CASCADE"
-            action = "BUY_SWING"
+            action = "BUY_SWING" if tactical_tf in ("15m", "1h", "4h") else "BUY_SCALP"
             aligned_count = bullish_count
-        elif weighted_score >= 20.0:
+        elif weighted_score >= 18.0:
             verdict = "BULLISH_BIAS"
-            action = "BUY_SCALP" if (p_1m and p_1m.bias == "BULLISH") else "STAND_ASIDE"
+            action = "BUY_SWING" if tactical_tf in ("15m", "1h", "4h") else "BUY_SCALP"
             aligned_count = bullish_count
         elif weighted_score <= -45.0 and macro_bias == "BEARISH":
             verdict = "STRONG_BEARISH_CASCADE"
-            action = "SELL_SWING"
+            action = "SELL_SWING" if tactical_tf in ("15m", "1h", "4h") else "SELL_SCALP"
             aligned_count = bearish_count
-        elif weighted_score <= -20.0:
+        elif weighted_score <= -18.0:
             verdict = "BEARISH_BIAS"
-            action = "SELL_SCALP" if (p_1m and p_1m.bias == "BEARISH") else "STAND_ASIDE"
+            action = "SELL_SWING" if tactical_tf in ("15m", "1h", "4h") else "SELL_SCALP"
             aligned_count = bearish_count
         else:
             verdict = "NEUTRAL_MIXED"
@@ -394,7 +408,7 @@ class MultiTimeframeCandleStrategyEngine:
 
         rationale = (
             f"[1m]: {p1m_name} | [5m]: {p5m_name} | [15m]: {p15m_name} | [1h]: {p1h_name} | [1W]: {p1w_name} | [1M]: {p1M_name} "
-            f"-> Đồng thuận {aligned_count}/6 khung ({'+' if weighted_score >= 0 else ''}{weighted_score:.1f} điểm)."
+            f"-> Đồng thuận {aligned_count}/6 khung ({'+' if weighted_score >= 0 else ''}{weighted_score:.1f} điểm, Khung tác chiến: {tactical_tf})."
         )
 
         return MTFCandleConfluenceResult(
@@ -405,5 +419,7 @@ class MultiTimeframeCandleStrategyEngine:
             timeframe_patterns=patterns,
             recommended_action=action,
             macro_alignment=macro_alignment,
-            summary_rationale=rationale
+            summary_rationale=rationale,
+            tactical_timeframe=tactical_tf,
+            radar_score=round(weighted_score, 1)
         )

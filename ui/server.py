@@ -337,6 +337,8 @@ class LiveTradingState:
             self.total_fees = saved_state.get("total_fees", 0.0)
             self.is_running = saved_state.get("is_running", True)
             self.active_timeframe = saved_state.get("active_timeframe", "15m")
+            if self.active_timeframe == "1m":
+                self.active_timeframe = "15m"
             self.leverage_mode = saved_state.get("leverage_mode", "AI_AUTO")
             self.manual_leverage = saved_state.get("manual_leverage", 3)
             self.current_position = saved_state.get("current_position")
@@ -884,7 +886,8 @@ class LiveTradingState:
             ) if self.current_position else None,
             visual_hft_metrics=snapshot.context["hft"],
             jesse_metrics=self.jesse_engine.compute_metrics(),
-            octobot_consensus=self.octobot_consensus
+            octobot_consensus=self.octobot_consensus,
+            pending_orders=self.order_manager.pending_orders
         )
 
 
@@ -1724,8 +1727,10 @@ class LiveTradingState:
             cand_tp = res.structural_tp if (res.structural_tp and res.structural_tp > 0) else (cand_entry * 1.02 if cand_dir == 1 else cand_entry * 0.98)
 
             candidate = self.build_candidate_order(cand_dir, cand_type, cand_entry, cand_sl, cand_tp, "auto", confidence=res.win_probability)
+            cand_tf = getattr(res, "active_timeframe", self.active_timeframe)
+            candidate.timeframe = cand_tf
             candidate.metadata.update({
-                "timeframe": getattr(res, "active_timeframe", self.active_timeframe),
+                "timeframe": cand_tf,
                 "dca_ladder_step": getattr(res, "dca_ladder_step", 0.005),
                 "twap_interval_seconds": getattr(res, "twap_interval_seconds", 6),
                 "trigger_price": getattr(res, "optimal_trigger_price", 0.0),

@@ -98,7 +98,8 @@ class AIOrderResearcher:
         inventory_skew: Optional[Any] = None,
         visual_hft_metrics: Optional[Any] = None,
         jesse_metrics: Optional[Any] = None,
-        octobot_consensus: Optional[Any] = None
+        octobot_consensus: Optional[Any] = None,
+        pending_orders: Optional[List[Any]] = None
     ) -> AIOrderResearchResult:
         """
         Synthesizes all quantitative signals on every tick to recommend the exact optimal order.
@@ -133,11 +134,22 @@ class AIOrderResearcher:
         delta_momentum = getattr(order_flow_verdict, "delta_momentum", "BALANCED") if order_flow_verdict else "BALANCED"
         absorption = delta_momentum if delta_momentum in ("ABSORPTION_BUY", "ABSORPTION_SELL") else "NONE"
 
+        # Multi-Candle Pattern Radar Confluence Score Extraction
         radar_score = 0.0
         if isinstance(candle_confluence, dict):
-            radar_score = candle_confluence.get("radar_score", 0.0)
+            radar_score = float(candle_confluence.get("confluence_score", candle_confluence.get("radar_score", 0.0)) or 0.0)
+        elif hasattr(candle_confluence, "confluence_score"):
+            radar_score = float(candle_confluence.confluence_score or 0.0)
         elif hasattr(candle_confluence, "radar_score"):
-            radar_score = candle_confluence.radar_score
+            radar_score = float(candle_confluence.radar_score or 0.0)
+
+        # Multi-Timeframe Strategy Engine Calibration:
+        # Dynamically infer the optimal tactical execution timeframe from Candlestick Confluence Radar
+        tactical_tf = getattr(candle_confluence, "tactical_timeframe", None)
+        if tactical_tf and abs(radar_score) >= 15.0:
+            trade_tf = tactical_tf
+        else:
+            trade_tf = active_timeframe or "15m"
 
         # 3. Directional Synthesis (Multi-Factor Scoring)
         dir_score = (consensus_score * 0.40) + (radar_score * 0.25)
@@ -260,7 +272,7 @@ class AIOrderResearcher:
                 entry_price = round(current_price + (0.15 * atr), 1)
 
         # 5. Dynamic Order Type Selection Engine & Timeframe Calibration
-        tf_lower = str(active_timeframe).lower()
+        tf_lower = str(trade_tf).lower()
         if tf_lower in ("1m", "3m"):
             opt_callback = round(max(0.25, min(0.65, (atr / current_price) * 100.0 * 0.5)), 2)
             opt_twap_slices = 3
@@ -362,7 +374,7 @@ class AIOrderResearcher:
                 entry_price=entry_price,
                 df_structure=df_structure,
                 df_macro=df_macro,
-                timeframe=active_timeframe
+                timeframe=trade_tf
             )
             struct_sl = struct_setup.stop_loss
             struct_tp = struct_setup.take_profit
@@ -494,7 +506,7 @@ class AIOrderResearcher:
         resil_pct = getattr(visual_hft_metrics, "market_resilience_pct", 85.0) if visual_hft_metrics else 85.0
         lob_20_imb = getattr(visual_hft_metrics, "lob_imbalance_20", 0.0) if visual_hft_metrics else 0.0
 
-        strategy_horizon = self.capital_allocator.get_horizon(active_timeframe)
+        strategy_horizon = self.capital_allocator.get_horizon(trade_tf)
         is_vpin_throttled = False
         hft_note = ""
 
@@ -550,6 +562,8 @@ class AIOrderResearcher:
             horizon=strategy_horizon,
             requested_margin=optimal_margin,
             total_equity=current_balance,
+            active_positions=[current_position] if current_position else [],
+            pending_orders=pending_orders or [],
             min_trade_margin=30.0
         )
         optimal_margin = alloc_res.allocated_margin
@@ -627,7 +641,7 @@ class AIOrderResearcher:
             lob_imbalance_20=round(lob_20_imb, 3),
             kelly_multiplier=round(kelly_mult, 2),
             octobot_tradable=octo_tradable,
-            active_timeframe=active_timeframe,
+            active_timeframe=trade_tf,
             dca_ladder_step=dca_step,
             twap_interval_seconds=twap_interval,
             strategy_horizon=strategy_horizon,
