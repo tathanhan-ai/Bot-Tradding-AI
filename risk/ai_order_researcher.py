@@ -163,10 +163,14 @@ class AIOrderResearcher:
         dir_score = max(-100.0, min(100.0, dir_score))
 
         # Decide Direction
+        is_centered = (vwap_res is None) or (abs(current_price - vwap_res.vwap) <= atr * 0.75)
         is_sideway_market = (
-            (ensemble_result and getattr(ensemble_result, "consensus_verdict", "") in ("SIDEWAY_GRID", "NEUTRAL"))
-            or regime in ("RANGING_SIDEWAY", "SIDEWAY_GRID", "CHOPPY", "NEUTRAL", "EQUILIBRIUM_FAIR")
-            or adx < 22.0
+            is_centered
+            and (
+                (ensemble_result and getattr(ensemble_result, "consensus_verdict", "") in ("SIDEWAY_GRID", "NEUTRAL"))
+                or regime in ("RANGING_SIDEWAY", "SIDEWAY_GRID", "CHOPPY", "NEUTRAL", "EQUILIBRIUM_FAIR")
+                or adx < 22.0
+            )
         )
         if dir_score >= 12.0:
             opt_side = "BUY"

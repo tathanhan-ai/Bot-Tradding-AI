@@ -900,13 +900,18 @@ class LiveTradingState:
                     or strategy in ("TWO_WAY_RANGE", "GRID_BOT", "SIDEWAY_GRID", "MEAN_REVERSION_GRID")
                     or (matrix and matrix.consensus_state == "NEUTRAL")
                 )
+                atr = float(self.indicators.get("atr") or _snapshot.price * .008)
+                vwap_val = float(getattr(verdict, "vwap_fair_price", 0.0) or 0.0)
+                vwap_dist = abs(_snapshot.price - vwap_val) if vwap_val > 0 else 0.0
+                can_balance_grid = (vwap_val <= 0) or (vwap_dist <= atr * 0.75)
+
                 if (
                     is_range_regime
+                    and can_balance_grid
                     and not getattr(self, "is_grid_active", False)
                     and not getattr(self, "current_position", None)
                     and not getattr(self, "hedge_positions", {})
                 ):
-                    atr = float(self.indicators.get("atr") or _snapshot.price * .008)
                     order.order_type = "GRID"
                     order.source = "auto-grid"
                     order.direction = 0
