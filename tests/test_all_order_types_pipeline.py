@@ -95,7 +95,26 @@ class TestAllOrderTypesPipeline(unittest.TestCase):
         self.assertEqual(len(scale_orders), 3)
         self.assertEqual([o.scale_level for o in scale_orders], [1, 2, 3])
 
+    def _prime_momentum(self):
+        # CONDITIONAL/TWAP thuoc nhom Taker: can momentum (OctoBot thuan + Alpha duong) de khong bi ha ve POST_ONLY.
+        # Luu y: pipeline goi analyze_snapshot() lai ben trong va ghi de consensus, nen prime xong
+        # phai khoa analyze_snapshot (no-op) khi submit de giu dung gia tri momentum mong muon.
+        s = self.state
+        for _ in range(30):
+            s.jesse_engine.record_trade(10)
+        s.market_source_times = dict(depth=time.time(), agg_trade=time.time(), kline_1m=time.time())
+        s.freqtrade_protections.max_drawdown_guard.peak_balance = s.current_balance
+        s.freqtrade_protections.max_drawdown_guard.pause_until = 0.0
+        s.analyze_snapshot(s.build_market_snapshot())
+        s.octobot_consensus.is_tradable = True
+        s.octobot_consensus.recommended_direction = -1
+        s.octobot_setup = None
+        s.vibe_alpha_zoo.latest_metrics.composite_alpha_score = -60.0
+        s.order_research.carver_output.update(raw_forecast=-3.0, daily_price_vol_pct=0.03)
+        s.market_source_times = dict(depth=time.time(), agg_trade=time.time(), kline_1m=time.time())
+
     def test_conditional_stop_limit_order_passes_and_queues(self):
+        self._prime_momentum()
         p = self.state.live_price
         cand = self.state.build_candidate_order(
             direction=-1,
@@ -112,7 +131,10 @@ class TestAllOrderTypesPipeline(unittest.TestCase):
             "trigger_price": p - 190.0,
             "trigger_condition": "BELOW"
         })
-        res = self.state.submit_candidate(cand)
+        from unittest.mock import patch as _patch
+        # Khoa analyze_snapshot de giu momentum da prime (pipeline goi lai ben trong se ghi de)
+        with _patch.object(self.state, "analyze_snapshot"):
+            res = self.state.submit_candidate(cand)
         self.assertIn(res["status"], ("pending", "open", "active"))
         cond_orders = [o for o in self.state.order_manager.pending_orders if o.order_type == "CONDITIONAL"]
         self.assertTrue(len(cond_orders) > 0)
@@ -136,6 +158,7 @@ class TestAllOrderTypesPipeline(unittest.TestCase):
         self.assertIn(res["status"], ("pending", "open", "active", "filled"))
 
     def test_twap_order_passes_and_slices(self):
+        self._prime_momentum()
         p = self.state.live_price
         cand = self.state.build_candidate_order(
             direction=-1,
@@ -149,7 +172,10 @@ class TestAllOrderTypesPipeline(unittest.TestCase):
         cand.quantity = 0.010
         cand.leverage = 4
         cand.metadata["twap_slices"] = 5
-        res = self.state.submit_candidate(cand)
+        from unittest.mock import patch as _patch
+        # Khoa analyze_snapshot de giu momentum da prime (pipeline goi lai ben trong se ghi de)
+        with _patch.object(self.state, "analyze_snapshot"):
+            res = self.state.submit_candidate(cand)
         self.assertIn(res["status"], ("pending", "open", "active", "filled"))
         twap_orders = [o for o in self.state.order_manager.orders if o.order_type == "TWAP_SLICE"]
         self.assertEqual(len(twap_orders), 5)
@@ -169,6 +195,27 @@ class TestAllOrderTypesPipeline(unittest.TestCase):
         cand.leverage = 4
         res = self.state.submit_candidate(cand)
         self.assertIn(res["status"], ("filled", "open", "active", "pending"))
+
+    def test_taker_types_degrade_to_post_only_without_momentum(self):
+        # Khong prime momentum: CONDITIONAL/TWAP thieu dong luc phai duoc ha ve POST_ONLY an toan
+        p = self.state.live_price
+        for otype in ("CONDITIONAL", "TWAP"):
+            cand = self.state.build_candidate_order(
+                direction=-1, order_type=otype, entry_price=p,
+                stop_loss=p + 500.0, take_profit=p - 1000.0, source="auto"
+            )
+            cand.margin = 100.0
+            cand.quantity = 0.005
+            cand.leverage = 4
+            if otype == "CONDITIONAL":
+                cand.metadata.update({"trigger_price": p - 190.0, "trigger_condition": "BELOW"})
+            else:
+                cand.metadata["twap_slices"] = 5
+            self.state.order_manager.orders = []
+            res = self.state.submit_candidate(cand)
+            self.assertIn(res["status"], ("pending", "open", "active", "filled", "rejected"))
+            if res["status"] != "rejected":
+                self.assertEqual(self.state.order_manager.orders[0].order_type, "POST_ONLY")
 
     def test_automated_decision_cycle_dispatches_recommended_order(self):
         s = self.state

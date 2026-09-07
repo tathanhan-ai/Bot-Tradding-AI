@@ -74,6 +74,10 @@ class StoplossGuard:
     def is_locked(self, now: Optional[float] = None) -> Tuple[bool, str, float]:
         ts = now or time.time()
         self._prune_old_events(ts)
+        if len(self.stoploss_timestamps) < self.trade_limit:
+            self.locked_until = 0.0
+            self.lock_reason = ""
+            return False, "", 0.0
         if ts < self.locked_until:
             return True, self.lock_reason, self.locked_until
         return False, "", 0.0
@@ -82,6 +86,11 @@ class StoplossGuard:
         ts = now or time.time()
         self._prune_old_events(ts)
         return len(self.stoploss_timestamps)
+
+    def reset(self):
+        self.stoploss_timestamps = []
+        self.locked_until = 0.0
+        self.lock_reason = ""
 
 
 class MaxDrawdownGuard:
@@ -107,7 +116,7 @@ class MaxDrawdownGuard:
             self.peak_balance = effective
 
         if self.peak_balance > 0:
-            dd = (self.peak_balance - min(current_balance, current_equity)) / self.peak_balance
+            dd = max(0.0, (self.peak_balance - current_equity) / self.peak_balance)
             if dd >= self.max_allowed_drawdown and ts >= self.locked_until:
                 self.locked_until = ts + self.stop_duration_seconds
                 self.lock_reason = (
@@ -176,6 +185,9 @@ class FreqtradeProtectionEngine:
                 if key in saved.get(name, {}):
                     setattr(guard, key, saved[name][key])
 
+    def reset_stoploss_lock(self):
+        self.stoploss_guard.reset()
+
     def on_trade_closed(self, trade: dict):
         pnl = trade.get("pnl", 0.0)
         reason = trade.get("reason", "")
@@ -183,8 +195,8 @@ class FreqtradeProtectionEngine:
 
         self.cooldown_guard.on_trade_closed(now)
 
-        # If loss
-        if pnl <= 0:
+        # If loss (Exclude intentional portfolio rebalancing reduce-only actions from being counted as stoploss hits)
+        if pnl < 0 and "REBALANCE" not in str(reason).upper():
             self.stoploss_guard.record_loss(abs(pnl), reason, now)
 
     def update_balance(self, balance: float, equity: float):
@@ -196,7 +208,8 @@ class FreqtradeProtectionEngine:
         target_price: float,
         direction: int,
         balance: float,
-        equity: float
+        equity: float,
+        skip_fee_drag: bool = False,
     ) -> Tuple[bool, str, ProtectionStatus]:
         """
         Validates all Freqtrade protections before allowing a new order.
@@ -250,8 +263,10 @@ class FreqtradeProtectionEngine:
             )
             return False, cd_reason, status
 
-        # 4. Fee Drag Filter: Target profit must be >= 0.35% (> 3.5x Binance round-trip fee)
-        if entry_price > 0 and target_price > 0:
+        # 4. Fee Drag Filter: Target profit must be >= 0.35% (> 3.5x Binance round-trip fee).
+        # Gop mot cua voi sizing hurdle 4x roundtrip: caller truyen skip_fee_drag=True khi sizing
+        # da kiem tra ky (tranh chan kep day TP xa). Freqtrade giu cua cho lenh manual/thieu sizing.
+        if not skip_fee_drag and entry_price > 0 and target_price > 0:
             target_pct = abs(target_price - entry_price) / entry_price
             if target_pct < 0.0035:
                 fee_reason = (

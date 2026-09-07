@@ -150,12 +150,24 @@ class OrderQueueManager:
         if not isinstance(due_at, (int, float)) or not math.isfinite(due_at) or due_at < 0:
             return None, "Invalid due_at"
 
-        # 1. Validate POST_ONLY (Guaranteed Maker protection)
-        if order_type_clean == "POST_ONLY":
-            if direction == 1 and best_ask > 0 and price >= best_ask:
-                return None, f"❌ BỊ TỪ CHỐI BỞI POST-ONLY: Giá mua ${price:,.2f} >= Best Ask ${best_ask:,.2f} (Lệnh sẽ bị khớp Taker 0.05%). Đã bảo vệ phí Maker cho bạn!"
-            elif direction == -1 and best_bid > 0 and price <= best_bid:
-                return None, f"❌ BỊ TỪ CHỐI BỞI POST-ONLY: Giá bán ${price:,.2f} <= Best Bid ${best_bid:,.2f} (Lệnh sẽ bị khớp Taker 0.05%). Đã bảo vệ phí Maker cho bạn!"
+        # 1. Validate POST_ONLY (Guaranteed Maker protection).
+        # Chan DCA (SCALE_RATIO) cung huong bao ve Maker: moi chan thang deu phai nam ngoai spread,
+        # vi chan ladder khop dang LIMIT van co the bi khop Taker neu dat cham spread.
+        if order_type_clean in ("POST_ONLY", "SCALE_RATIO"):
+            guard_price = target_price if order_type_clean == "SCALE_RATIO" else price
+            if order_type_clean == "SCALE_RATIO":
+                # Chan thang DCA: BUY giam dan (chan 1 cao nhat), SELL tang dan (chan 3 cao nhat).
+                # Kiem tra chan xau nhat (gan spread nhat) de ca thang duoc bao ve Maker.
+                try:
+                    ladder_step = float((candidate_payload or {}).get("dca_ladder_step", 0.005))
+                except (ValueError, TypeError):
+                    ladder_step = 0.005
+                if direction == -1:
+                    guard_price = target_price * (1 + 2 * max(0.0, ladder_step))
+            if direction == 1 and best_ask > 0 and guard_price >= best_ask:
+                return None, f"❌ BỊ TỪ CHỐI BỞI {order_type_clean}: Giá mua ${guard_price:,.2f} >= Best Ask ${best_ask:,.2f} (Lệnh sẽ bị khớp Taker 0.05%). Đã bảo vệ phí Maker cho bạn!"
+            elif direction == -1 and best_bid > 0 and guard_price <= best_bid:
+                return None, f"❌ BỊ TỪ CHỐI BỞI {order_type_clean}: Giá bán ${guard_price:,.2f} <= Best Bid ${best_bid:,.2f} (Lệnh sẽ bị khớp Taker 0.05%). Đã bảo vệ phí Maker cho bạn!"
 
         is_twap = order_type_clean == "TWAP"
         is_scale = order_type_clean == "SCALE_RATIO"

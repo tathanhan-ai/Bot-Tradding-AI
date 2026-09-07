@@ -65,6 +65,7 @@ class BinanceFuturesWebSocketEngine:
         on_kline: Optional[Callable[[Dict[str, Any]], None]] = None,
         on_latency_update: Optional[Callable[[float], None]] = None,
         on_spot_ticker: Optional[Callable[[float], None]] = None,
+        on_mark_price: Optional[Callable[[float, float], None]] = None,
         kline_intervals: Optional[List[str]] = None,
         is_testnet: bool = False,
     ):
@@ -77,6 +78,7 @@ class BinanceFuturesWebSocketEngine:
         self.on_kline = on_kline
         self.on_latency_update = on_latency_update
         self.on_spot_ticker = on_spot_ticker
+        self.on_mark_price = on_mark_price
         self.kline_intervals = kline_intervals or ["1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"]
         self.last_message_at: Dict[str, float] = {}
         self.last_error: Dict[str, str] = {}
@@ -101,6 +103,8 @@ class BinanceFuturesWebSocketEngine:
         self._tasks.append(asyncio.create_task(self._run_kline_loop()))
         if self.on_spot_ticker:
             self._tasks.append(asyncio.create_task(self._run_spot_ticker_loop()))
+        # Mark price (gia thanh ly/PnL chuan san): stream rieng 1s/lan, khong dung mid bookTicker
+        self._tasks.append(asyncio.create_task(self._run_mark_price_loop()))
 
     async def stop(self):
         self.is_running = False
@@ -187,6 +191,52 @@ class BinanceFuturesWebSocketEngine:
                 break
             except Exception as e:
                 self.last_error["spot_ticker"] = f"{type(e).__name__}: {e}"
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 1.5, 10.0)
+
+    async def _run_mark_price_loop(self):
+        # Binance markPrice: gia tinh UPNL/thanh ly chuan san (khac mid bookTicker).
+        # Thu WS stream truoc, fallback REST premiumIndex (mang chan WS thi van co so).
+        ws_url = f"{self.base_url}{'' if self.is_testnet else '/public'}/ws/{self.symbol}@markPrice@1s"
+        rest_host = "https://demo-fapi.binance.com" if self.is_testnet else "https://fapi.binance.com"
+        backoff = 1.0
+        while self.is_running:
+            try:
+                async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10, max_size=2**20) as ws:
+                    backoff = 1.0
+                    while self.is_running:
+                        raw = await asyncio.wait_for(ws.recv(), 15)
+                        data = json.loads(raw)
+                        if data.get("s") != self.symbol.upper():
+                            continue
+                        if not self.fresh_event(data.get("E")):
+                            continue
+                        mark = float(data.get("p", 0.0))
+                        funding = float(data.get("r", 0.0))
+                        if mark > 0:
+                            self.last_message_at["mark_price"] = time.time()
+                            if self.on_mark_price:
+                                self.on_mark_price(mark, funding)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.last_error["mark_price"] = f"{type(e).__name__}: {e}"
+                # Fallback REST: lay mark + funding khi WS khong thong
+                try:
+                    def fetch_mark():
+                        url = f"{rest_host}/fapi/v1/premiumIndex?symbol={self.symbol.upper()}"
+                        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                        with urllib.request.urlopen(req, timeout=5) as resp:
+                            return json.loads(resp.read().decode())
+                    data = await asyncio.to_thread(fetch_mark)
+                    mark = float(data.get("markPrice", 0.0))
+                    funding = float(data.get("lastFundingRate", 0.0))
+                    if mark > 0:
+                        self.last_message_at["mark_price"] = time.time()
+                        if self.on_mark_price:
+                            self.on_mark_price(mark, funding)
+                except Exception as rexc:
+                    self.last_error["mark_price"] = f"REST fallback: {type(rexc).__name__}"
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 1.5, 10.0)
 

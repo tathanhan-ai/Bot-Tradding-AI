@@ -154,7 +154,10 @@ class EpisodicTradeMemoryBank:
         candidate_direction: int,
         candidate_rsi: float,
         candidate_vwap_status: str,
-        candidate_absorption: str
+        candidate_absorption: str,
+        candidate_entry_price: float = 0.0,
+        candidate_smc_structure: str = "",
+        candidate_atr: float = 0.0,
     ) -> MemoryCheckResult:
         """
         Calculates cosine-like similarity with previous loss records.
@@ -172,17 +175,26 @@ class EpisodicTradeMemoryBank:
                 continue
 
             sim = 0.0
-            # 1. RSI similarity (max 0.30)
+            # 1. RSI similarity (max 0.25)
             rsi_diff = abs(candidate_rsi - rec.rsi)
-            sim += max(0.0, 0.30 - (rsi_diff / 50.0) * 0.30)
+            sim += max(0.0, 0.25 - (rsi_diff / 50.0) * 0.25)
 
-            # 2. VWAP status match (max 0.35)
+            # 2. VWAP status match (max 0.25)
             if candidate_vwap_status == rec.vwap_status:
-                sim += 0.35
+                sim += 0.25
 
-            # 3. Absorption trap match (max 0.35)
+            # 3. Absorption trap match (max 0.25)
             if candidate_absorption != "NONE" and candidate_absorption == rec.absorption_signal:
-                sim += 0.35
+                sim += 0.25
+
+            # 4. Proximity giá vào lệnh cũ (max 0.15): cùng vùng giá theo ATR thì cộng điểm
+            if candidate_entry_price > 0 and rec.entry_price > 0 and candidate_atr > 0:
+                price_gap_atr = abs(candidate_entry_price - rec.entry_price) / candidate_atr
+                sim += max(0.0, 0.15 - min(1.0, price_gap_atr) * 0.15)
+
+            # 5. Cấu trúc SMC trùng lặp (max 0.10)
+            if candidate_smc_structure and candidate_smc_structure == rec.smc_structure:
+                sim += 0.10
 
             if sim > highest_sim:
                 highest_sim = sim

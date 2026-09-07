@@ -30,44 +30,44 @@ class StructuralTradeSetup:
 
 TIMEFRAME_RISK_PROFILES: Dict[str, Dict[str, Any]] = {
     "1m": {
-        "sl_atr_mult": 2.5,
-        "min_sl_dist_pct": 0.0045,  # 0.45% minimum floor to eliminate micro tick noise (~$380+ on BTC)
-        "buffer_atr_mult": 0.40,
+        "sl_atr_mult": 1.2,
+        "min_sl_dist_pct": 0.0015,  # 0.15% (~$120 on BTC)
+        "buffer_atr_mult": 0.20,
         "min_rr": 1.8,
         "lookback_swings": 15
     },
     "3m": {
-        "sl_atr_mult": 2.2,
-        "min_sl_dist_pct": 0.0055,  # 0.55%
-        "buffer_atr_mult": 0.35,
+        "sl_atr_mult": 1.2,
+        "min_sl_dist_pct": 0.0018,  # 0.18%
+        "buffer_atr_mult": 0.20,
         "min_rr": 1.8,
         "lookback_swings": 18
     },
     "5m": {
-        "sl_atr_mult": 2.0,
-        "min_sl_dist_pct": 0.0060,  # 0.60% (~$510+ on BTC)
-        "buffer_atr_mult": 0.35,
+        "sl_atr_mult": 1.2,
+        "min_sl_dist_pct": 0.0020,  # 0.20% (~$160 on BTC)
+        "buffer_atr_mult": 0.20,
         "min_rr": 2.0,
         "lookback_swings": 20
     },
     "15m": {
-        "sl_atr_mult": 1.8,
-        "min_sl_dist_pct": 0.0085,  # 0.85% (~$720+ on BTC)
-        "buffer_atr_mult": 0.30,
+        "sl_atr_mult": 1.3,
+        "min_sl_dist_pct": 0.0025,  # 0.25% (~$200 on BTC)
+        "buffer_atr_mult": 0.20,
         "min_rr": 2.2,
         "lookback_swings": 25
     },
     "1h": {
-        "sl_atr_mult": 1.4,
-        "min_sl_dist_pct": 0.0130,  # 1.30% (~$1,100+ on BTC)
-        "buffer_atr_mult": 0.25,
+        "sl_atr_mult": 1.2,
+        "min_sl_dist_pct": 0.0040,  # 0.40% (~$320 on BTC)
+        "buffer_atr_mult": 0.20,
         "min_rr": 2.2,
         "lookback_swings": 30
     },
     "4h": {
-        "sl_atr_mult": 1.2,
-        "min_sl_dist_pct": 0.0200,  # 2.00% (~$1,700+ on BTC)
-        "buffer_atr_mult": 0.20,
+        "sl_atr_mult": 1.0,
+        "min_sl_dist_pct": 0.0060,  # 0.60% (~$480 on BTC)
+        "buffer_atr_mult": 0.15,
         "min_rr": 2.5,
         "lookback_swings": 40
     },

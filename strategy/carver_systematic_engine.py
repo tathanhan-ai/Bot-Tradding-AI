@@ -249,19 +249,23 @@ class PositionBufferManager:
     Pillar 7: Turnover & Trading-Cost Control (Carver Buffer Bands).
     Buffer Width = buffer_pct * |Target Position|
     """
-    def __init__(self, buffer_pct: float = 0.12, min_contract_step: float = 0.001):
+    def __init__(self, buffer_pct: float = 0.25, min_contract_step: float = 0.001, min_rebalance_notional: float = 350.0):
         self.buffer_pct = buffer_pct
         self.min_contract_step = min_contract_step
+        self.min_rebalance_notional = min_rebalance_notional
 
     def evaluate_buffer(
         self,
         target_contracts: float,
         current_contracts: float,
-        contract_step: float = 0.001
+        contract_step: float = 0.001,
+        current_price: float = 0.0,
+        min_notional: float = 350.0
     ) -> Tuple[str, float, float, float, float]:
         step = max(contract_step, self.min_contract_step)
         abs_target = abs(target_contracts)
         buffer_width = max(abs_target * self.buffer_pct, step * 2.0)
+        eff_min_notional = max(min_notional, self.min_rebalance_notional)
         
         if abs_target < step:
             buffer_lower = -step
@@ -269,6 +273,8 @@ class PositionBufferManager:
             if abs(current_contracts) >= step:
                 action = 'SELL' if current_contracts > 0 else 'BUY'
                 contracts_to_exec = -current_contracts
+                if current_price > 0.0 and abs(contracts_to_exec) * current_price < eff_min_notional:
+                    return 'HOLD', 0.0, buffer_lower, buffer_upper, buffer_width
                 return action, contracts_to_exec, buffer_lower, buffer_upper, buffer_width
             else:
                 return 'HOLD', 0.0, buffer_lower, buffer_upper, buffer_width
@@ -286,6 +292,11 @@ class PositionBufferManager:
             action = 'HOLD'
             contracts_to_exec = 0.0
 
+        # Enforce minimum rebalance notional floor ($350 USDT) to prevent fee churn
+        if action != 'HOLD' and current_price > 0.0 and (abs(contracts_to_exec) * current_price) < eff_min_notional:
+            action = 'HOLD'
+            contracts_to_exec = 0.0
+
         return action, contracts_to_exec, buffer_lower, buffer_upper, buffer_width
 
 
@@ -298,7 +309,7 @@ class CarverSystematicEngine:
         annual_vol_target_pct: float = 0.25,
         max_forecast: float = 20.0,
         default_rdm: float = 1.35,
-        buffer_pct: float = 0.12,
+        buffer_pct: float = 0.25,
         drawdown_threshold: float = 0.05,
         max_drawdown_limit: float = 0.20
     ):
@@ -385,7 +396,9 @@ class CarverSystematicEngine:
         action, exec_contracts, b_lower, b_upper, b_width = self.buffer_manager.evaluate_buffer(
             target_contracts=final_contracts,
             current_contracts=current_position_contracts,
-            contract_step=contract_step
+            contract_step=contract_step,
+            current_price=current_price,
+            min_notional=350.0
         )
 
         fee_saved = 0.0

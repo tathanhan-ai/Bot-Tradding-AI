@@ -194,8 +194,8 @@ class LiveTradingState:
         # Order Queue Manager (Market & Limit Orders)
         self.order_manager = OrderQueueManager()
 
-        # Dynamic Leverage Strategy
-        self.leverage_engine = DynamicLeverageEngine()
+        # Dynamic Leverage Strategy (tran cung = risk_config.max_leverage, khong tu dat 10x)
+        self.leverage_engine = DynamicLeverageEngine(max_leverage=self.risk_config.max_leverage)
         self.capital_allocator = PortfolioCapitalAllocator()
         self.leverage_mode = "AI_AUTO"  # 'AI_AUTO' or 'MANUAL'
         self.manual_leverage = 3
@@ -332,6 +332,9 @@ class LiveTradingState:
         self.last_auto_order_tick = 0
         self.last_auto_order_time = 0.0
         self.last_trade_closed_time = 0.0
+        # Nen dispatcher khi cung loai lenh bi veto lien tiep (VD 3x SCALE_RATIO bi memory veto):
+        # key = (order_type, direction) -> {count, last_veto_ts}
+        self.veto_streak: Dict[str, Dict[str, float]] = {}
 
         # Load persisted account state if available
         saved_state = self.storage.load_account_state()
@@ -380,6 +383,9 @@ class LiveTradingState:
         self.funding_rate = 0.0001
         self.next_funding_time = 0
         self.last_funding_fetch_time = 0.0
+        # Mark price chuan san (tinh UPNL/thanh ly). Khac mid bookTicker (khop lenh).
+        self.mark_price = 0.0
+        self.mark_funding_rate = 0.0
 
         self.indicators = {
             "ema": None,
@@ -440,6 +446,7 @@ class LiveTradingState:
             self.fee_engine.update_book(bid, ask)
             self.market_source_times["book_ticker"] = time.time()
             self.on_tick(mid)
+            self.fast_pnl_tick()
 
         @atomic_event
         def on_depth(bids: List[List[float]], asks: List[List[float]], event_time: int):
@@ -486,8 +493,18 @@ class LiveTradingState:
             self.basis = round(self.live_price - spot_mid, 2)
             self.basis_pct = round((self.live_price - spot_mid) / max(1.0, spot_mid) * 100.0, 3)
 
+        @atomic_event
+        def on_mark_price(mark: float, funding: float):
+            if mark > 0:
+                self.mark_price = mark
+                self.mark_funding_rate = funding
+                self.funding_rate = funding
+                self.market_source_times["mark_price"] = time.time()
+                self.fast_pnl_tick()
+
         callbacks = dict(symbol=self.symbol, on_depth=on_depth, on_agg_trade=on_agg_trade,
-                         on_kline=on_kline, on_latency_update=on_latency, on_spot_ticker=on_spot_ticker)
+                         on_kline=on_kline, on_latency_update=on_latency, on_spot_ticker=on_spot_ticker,
+                         on_mark_price=on_mark_price)
         if self.active_exchange == "mexc":
             stream_url = self.mexc_api.base_url.replace("https://", "wss://").replace("http://", "ws://") + "/edge"
             self.ws_engine = MEXCFuturesWebSocketEngine(
@@ -540,6 +557,39 @@ class LiveTradingState:
                 data = json.loads(resp.read().decode())
                 self.funding_rate = float(data.get("lastFundingRate", 0.0001))
                 self.next_funding_time = int(data.get("nextFundingTime", 0))
+                # Dong bo mark price tu cung nguon (phong WS mark chet ma fallback chua kip)
+                mark = float(data.get("markPrice", 0.0) or 0.0)
+                if mark > 0:
+                    self.mark_price = mark
+                    self.mark_funding_rate = self.funding_rate
+                    self.market_source_times["mark_price"] = now
+        except Exception:
+            pass
+
+    def refresh_mark_price(self):
+        # Goi moi ~10s tu vong decision cycle: giu mark tuoi ke ca khi WS mark stream chet.
+        # REST nhe (1 call premiumIndex), co throttle trong fetch_binance_funding? Khong -
+        # dung timer rieng de khong phu thuoc chu ky funding 30s.
+        now = time.time()
+        if now - getattr(self, "_last_mark_refresh", 0.0) < 10.0:
+            return
+        self._last_mark_refresh = now
+        try:
+            import urllib.request
+            import json
+            host = "https://demo-fapi.binance.com" if (self.binance_api.is_live_enabled and self.binance_api.is_testnet) else "https://fapi.binance.com"
+            url = f"{host}/fapi/v1/premiumIndex?symbol={self.symbol}"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read().decode())
+                mark = float(data.get("markPrice", 0.0) or 0.0)
+                funding = float(data.get("lastFundingRate", 0.0) or 0.0)
+                if mark > 0:
+                    self.mark_price = mark
+                    self.mark_funding_rate = funding
+                    self.funding_rate = funding
+                    self.market_source_times["mark_price"] = now
+                    self.fast_pnl_tick()
         except Exception:
             pass
 
@@ -700,6 +750,9 @@ class LiveTradingState:
         )
 
     def get_effective_leverage(self) -> int:
+        # Tran cung duy nhat: risk_config.max_leverage (config/settings.py). Moi nguon (AI advice,
+        # manual, governor cap) deu phai <= tran nay. Hien thi tran trong UI de khong danh lua.
+        hard_cap = int(getattr(self.risk_config, "max_leverage", 5) or 5)
         if self.leverage_mode == "AI_AUTO" and self.leverage_advice:
             lev = self.leverage_advice.leverage
         else:
@@ -710,7 +763,7 @@ class LiveTradingState:
             if gov.enabled and lev > gov.max_leverage_cap:
                 lev = gov.max_leverage_cap
 
-        return max(1, lev)
+        return max(1, min(int(lev), hard_cap))
 
     def build_market_snapshot(self) -> MarketSnapshot:
         with self.market_lock:
@@ -901,7 +954,7 @@ class LiveTradingState:
         snapshot = snapshot or self.build_market_snapshot()
         research = research or self.order_research
 
-        def freqtrade_gate(order: CandidateOrder, _snapshot: MarketSnapshot) -> StageOutcome:
+        def freqtrade_gate(order: CandidateOrder, _snapshot: MarketSnapshot, skip_fee_drag: bool = False) -> StageOutcome:
             if _snapshot.exchange != self.active_exchange:
                 return StageOutcome.veto("snapshot exchange does not match selected execution venue")
             if self.active_exchange == "mexc" and self.mexc_api.is_live_enabled:
@@ -910,7 +963,7 @@ class LiveTradingState:
                 return StageOutcome.veto("execution/data environment mismatch or mainnet disabled")
             if getattr(self, "execution_blocker", ""):
                 return StageOutcome.veto(self.execution_blocker)
-            equity = self.current_balance + (self.current_position["unrealized_pnl"] if self.current_position else 0.0) + sum(pos.get("unrealized_pnl", 0.0) for pos in self.hedge_positions.values())
+            equity = self.current_balance + (self.current_position.get("unrealized_pnl", 0.0) if self.current_position else 0.0) + sum(pos.get("unrealized_pnl", 0.0) for pos in self.hedge_positions.values())
             gate_direction = 1 if order.direction == 0 else order.direction
             # For Grid, profit comes from grid leg oscillations rather than a single directional TP
             target_price = 0.0 if (order.order_type == "GRID" or order.source in ("manual-grid", "auto-grid")) else order.take_profit
@@ -920,6 +973,7 @@ class LiveTradingState:
                 direction=gate_direction,
                 balance=self.current_balance,
                 equity=equity,
+                skip_fee_drag=skip_fee_drag,
             )
             return StageOutcome.pass_(reason) if allowed else StageOutcome.veto(reason)
 
@@ -941,24 +995,17 @@ class LiveTradingState:
 
             # Defensive Small-Capital Throttling when VPIN is elevated / toxic:
             # User requirement: "Đối với VPIN (Toxic Flow): nếu dòng tiền bất ổn quá cao mà vị thế ổn thì có thể điều tiết lệnh với vốn nhỏ an toàn"
+            # Gop mot lan cat duy nhat o sizing (researcher da throttle margin 20-30% + lev2-3):
+            # HFT gate chi gan co + ep Maker, KHONG cat quantity o day (tranh cat 3 lan chong).
             is_high_vpin = (metrics.vpin >= 0.70) or metrics.is_toxic_flow
             if is_high_vpin:
-                is_throttled_defensive = order.metadata.get("is_vpin_throttled", False) or (order.order_type in ("POST_ONLY", "LIMIT", "SCALE_RATIO"))
-                # If order is already throttled with defensive small capital and passive maker execution, pass it safely
-                if is_throttled_defensive and metrics.market_resilience_pct >= 25.0:
-                    if order.order_type == "MARKET":
-                        order.order_type = "POST_ONLY"
-                    order.metadata["hft_toxic_margin_cap"] = True
-                    order.metadata["throttled_toxic_entry"] = True
-                    return StageOutcome.pass_(f"Điều tiết vốn nhỏ an toàn (VPIN={metrics.vpin:.2f}, Resilience={metrics.market_resilience_pct:.1f}%, Maker thụ động)")
-                elif metrics.vpin >= 0.90 and metrics.market_resilience_pct < 30.0:
+                if metrics.vpin >= 0.90 and metrics.market_resilience_pct < 30.0:
                     return StageOutcome.veto(f"Critical toxic flow without resilience: VPIN={metrics.vpin:.2f}, resilience={metrics.market_resilience_pct:.1f}%")
-                else:
-                    # Enforce Maker execution & defensive margin cap
-                    if order.order_type == "MARKET":
-                        order.order_type = "POST_ONLY"
-                    order.metadata["hft_toxic_margin_cap"] = True
-                    return StageOutcome.pass_(f"Elevated VPIN={metrics.vpin:.2f}; adaptive Maker risk scaling applied")
+                if order.order_type == "MARKET":
+                    order.order_type = "POST_ONLY"
+                order.metadata["hft_toxic_margin_cap"] = True
+                order.metadata["throttled_toxic_entry"] = True
+                return StageOutcome.pass_(f"Dieu tiet von nho VPIN={metrics.vpin:.2f} (cat 1 lan duy nhat o sizing, Maker thu dong)")
 
             if metrics.liquidity_drought_warning:
                 return StageOutcome.veto(f"liquidity drought resilience={metrics.market_resilience_pct:.1f}%")
@@ -968,15 +1015,28 @@ class LiveTradingState:
             metrics = self.jesse_engine.compute_metrics()
             now = time.time()
             last_trade_closed = self.trades[-1].get("closed_at_ts", 0.0) if self.trades else 0.0
-            cooldown_seconds = 300.0  # 5-minute recovery cooldown
-            is_cooldown_expired = (now - last_trade_closed) > cooldown_seconds
-
-            if metrics.current_consecutive_losses >= 3:
-                if is_cooldown_expired:
-                    # Allow probation trading with safe defensive sizing rather than permanent deadlock
-                    return StageOutcome.pass_("Probation entry after loss streak cooldown: defensive sizing active", probation=True, risk_cap_pct=0.0025)
-                remaining = max(1, int(cooldown_seconds - (now - last_trade_closed)))
-                return StageOutcome.veto(f"Jesse loss-streak cooldown active: {remaining}s remaining")
+            # Loss-streak ladder theo skill risk-management: 3 thua -> giam 50% (0.25%),
+            # 5 thua -> size toi thieu (0.10%), 7 thua -> nghi 24h. Journal ghi nhan
+            # bot tung co chuoi 9 thua (-$7.09) va 8 thua (-$11.01) lien tiep.
+            streak = int(metrics.current_consecutive_losses or 0)
+            if streak >= 7:
+                halt_seconds = 24 * 3600.0
+                if (now - last_trade_closed) < halt_seconds:
+                    remaining_h = max(1, int((halt_seconds - (now - last_trade_closed)) / 3600.0))
+                    return StageOutcome.veto(f"Jesse 7-loss halt active: ~{remaining_h}h remaining (full review required)")
+            elif streak >= 5:
+                cooldown_seconds = 1800.0  # 30-phut ha nhiet sau 5 thua lien tiep
+                if (now - last_trade_closed) < cooldown_seconds:
+                    remaining = max(1, int(cooldown_seconds - (now - last_trade_closed)))
+                    return StageOutcome.veto(f"Jesse 5-loss cooldown active: {remaining}s remaining (minimum size only)")
+                return StageOutcome.pass_("Minimum-size entry after 5-loss cooldown", probation=True, risk_cap_pct=0.0010)
+            elif streak >= 3:
+                cooldown_seconds = 1800.0  # 30-phut ha nhiet sau 3 thua lien tiep (skill trade-journal)
+                if (now - last_trade_closed) < cooldown_seconds:
+                    remaining = max(1, int(cooldown_seconds - (now - last_trade_closed)))
+                    return StageOutcome.veto(f"Jesse loss-streak cooldown active: {remaining}s remaining")
+                # Het 30 phut: cho trade tham do voi size giam 50% thay vi chet cung
+                return StageOutcome.pass_("Probation entry after loss streak cooldown: defensive sizing active", probation=True, risk_cap_pct=0.0025)
             if self.risk_manager.circuit_breaker_active:
                 return StageOutcome.veto("Jesse daily circuit breaker active")
             if metrics.total_trades < 30:
@@ -1082,12 +1142,35 @@ class LiveTradingState:
             alpha = self.vibe_alpha_zoo.get_latest_metrics()
             order_kind = (order.order_type or "POST_ONLY").upper()
 
+            # Strategy attribution filter (skill trade-journal, 53 lenh that):
+            # 15m-LONG PF=0.95, 1h-LONG PF=0.10, 1m-SHORT PF=0.43, 5m-LONG PF=0.
+            # Khong chan hoan toan (tra sanh test prime alpha=0 van hop le), chi veto khi co
+            # bang chung NGUOC CHIEU ro rang: OctoBot nguoc huong hoac Alpha am manh (<=-20).
+            order_tf = str(order.metadata.get("timeframe", self.active_timeframe or "15m")).lower()
+            weak_combo = (
+                (order_tf == "15m" and order.direction == 1)
+                or (order_tf == "1h" and order.direction == 1)
+                or (order_tf == "1m" and order.direction == -1)
+                or (order_tf == "5m" and order.direction == 1)
+            )
+            if weak_combo:
+                octo_against = bool(matrix and matrix.is_tradable
+                                    and matrix.recommended_direction == -order.direction)
+                alpha_against = float(alpha.composite_alpha_score or 0.0) * order.direction <= -20.0
+                if octo_against or alpha_against:
+                    return StageOutcome.veto(
+                        f"Weak attributed combo {order_tf.upper()}-{'LONG' if order.direction == 1 else 'SHORT'} "
+                        f"(PF<1 tren du lieu that) + tin hieu nguoc chieu (OctoBot nguoc: {octo_against}, "
+                        f"Alpha {float(alpha.composite_alpha_score or 0.0):+.1f})"
+                    )
+
             # Distinct Multi-Order Type Tradability Assessment across regimes
             is_tradable = False
 
-            # Group A: Resting Maker / Range / Bracket Orders (POST_ONLY, LIMIT, SCALE_RATIO, CONDITIONAL, TWAP)
-            # These are designed for Sideway / Range / Pullback / Liquidity Sweeps
-            if order_kind in ("POST_ONLY", "LIMIT", "SCALE_RATIO", "CONDITIONAL", "TWAP"):
+            # Group A: Resting Maker / Range / Bracket Orders (POST_ONLY, LIMIT, SCALE_RATIO)
+            # These are designed for Sideway / Range / Pullback / Liquidity Sweeps.
+            # CONDITIONAL va TWAP that su khop nhu Taker (market fill) nen thuoc Group B.
+            if order_kind in ("POST_ONLY", "LIMIT", "SCALE_RATIO"):
                 # Permit resting orders unless fighting an explicitly strong opposite trend
                 is_opposing_strong_trend = bool(
                     matrix and (
@@ -1098,7 +1181,8 @@ class LiveTradingState:
                 if not is_opposing_strong_trend:
                     is_tradable = True
 
-            # Group B: Aggressive Taker / Momentum Orders (MARKET, TRAILING_STOP)
+            # Group B: Aggressive Taker / Momentum Orders (MARKET, TRAILING_STOP, CONDITIONAL, TWAP)
+            # CONDITIONAL kich hoat thanh market fill, TWAP_SLICE khop ngay nhu market (phi Taker).
             # These require momentum confirmation or breakout alignment
             else:
                 if matrix and matrix.is_tradable:
@@ -1125,10 +1209,15 @@ class LiveTradingState:
             if setup and setup.mode_name not in ("RANGE_TRADING", "DIP_ANALYSER") and setup.direction != order.direction:
                 return StageOutcome.veto("OctoBot trade setup conflicts with candidate")
 
-            if alpha.composite_alpha_score * order.direction <= -18.0:
+            # Allow mean-reversion accumulation at structural bounds unless there is an extreme directional cascade.
+            # CONDITIONAL/TWAP khop nhu Taker nen dung nguong chat -18 nhu MARKET/TRAILING (khong duoc huong -32 cua Maker).
+            alpha_thresh = -32.0 if order_kind in ("POST_ONLY", "LIMIT", "SCALE_RATIO") or (order_kind not in ("MARKET", "TRAILING_STOP", "CONDITIONAL", "TWAP") and getattr(self.ai_verdict, "regime", "") in ("RANGING_SIDEWAY", "SIDEWAY_GRID", "CHOPPY")) else -18.0
+            if alpha.composite_alpha_score * order.direction <= alpha_thresh:
                 return StageOutcome.veto(f"Alpha Zoo conflicts ({alpha.composite_alpha_score:+.1f})")
 
-            fee_check = freqtrade_gate(order, _snapshot)
+            # Alpha gate goi lai sau khi huong da ro; sizing Stage 4 se kiem hurdle 4x roundtrip ky hon
+            # nen skip cua 0.35% cung o day de tranh chan kep day TP xa.
+            fee_check = freqtrade_gate(order, _snapshot, skip_fee_drag=True)
             if fee_check.verdict == "VETO":
                 return fee_check
 
@@ -1152,13 +1241,19 @@ class LiveTradingState:
 
                 final_tp = order.take_profit
                 dist = final_tp - order.entry_price
-                if (dist * order.direction) > 0:
+                # Staged TP Anti-Cannibalization Rule:
+                # Positions < 0.020 BTC (~$1,600 notional) MUST NOT be chopped into micro-slices.
+                # Staged TP1 is only created if quantity >= 0.020 BTC AND expected gross gain on TP1 >= $2.5 USDT
+                min_tp1_dist = max(1.5 * float(self.indicators.get("atr") or 100.0), 200.0)
+                if (dist * order.direction) > 0 and getattr(order, "quantity", 0.0) >= 0.020 and abs(dist * 0.33) >= min_tp1_dist:
                     staged_tp["tp1"] = round(order.entry_price + dist * 0.33, 2)
                     staged_tp["tp2"] = round(order.entry_price + dist * 0.66, 2)
                     staged_tp["tp3"] = round(final_tp, 2)
                     staged_tp["tp1_ratio"] = 0.30
                     staged_tp["tp2_ratio"] = 0.30
                     staged_tp["tp3_ratio"] = 0.40
+                else:
+                    staged_tp = {}
 
             return StageOutcome.pass_(
                 f"Approved {order.order_type} via OctoBot {matrix.consensus_state if matrix else 'OK'}; Alpha Zoo {alpha.composite_alpha_score:+.1f}",
@@ -1198,7 +1293,13 @@ class LiveTradingState:
                     return StageOutcome.veto("Available reviewer rejected during partial 9Router outage", **details)
                 return StageOutcome.unavailable(verdict.availability_reason, **details)
             if not verdict.approved:
-                return StageOutcome.veto(verdict.council_rationale, **details)
+                # Institutional consensus relaxation: In Defensive / Maker mode or Counter-Proposal revision, 2/4 approvals is sufficient
+                is_defensive = order.order_type in ("POST_ONLY", "LIMIT", "SCALE_RATIO", "GRID")
+                is_counter_prop = order.metadata.get("is_counter_proposal", False)
+                if (is_defensive or is_counter_prop) and getattr(verdict, "approved_votes", 0) >= 2:
+                    pass
+                else:
+                    return StageOutcome.veto(verdict.council_rationale, **details)
             governor = self.monthly_governor.evaluate(self.current_balance, self.trades)
             if governor.enabled and hasattr(verdict, "confidence") and verdict.confidence < governor.min_ai_confidence:
                 return StageOutcome.veto(
@@ -1279,8 +1380,36 @@ class LiveTradingState:
                 quantity = min(position["units"], math.floor(abs(contracts) / .001) * .001)
                 if quantity <= 0:
                     return StageOutcome.veto("Reduction below contract step")
-                return StageOutcome.pass_("Carver target reduces existing inventory; never reverses in one step",
-                    direction=-position["direction"], order_type="MARKET", quantity=quantity, margin=0.0,
+                notional_reduction = quantity * order.entry_price
+                if notional_reduction < 350.0:
+                    return StageOutcome.veto(f"Carver rebalance below notional threshold (${notional_reduction:.1f} < $350 USDT)")
+
+                # Carver Minimum Hold Time Guard:
+                # Positions on 15m/1h timeframes must be given at least 1 candle (15m = 900s) to breathe.
+                # Never allow premature position churning after 30-60 seconds.
+                pos_open_ts = float(position.get("open_timestamp") or 0.0)
+                pos_age = time.time() - pos_open_ts if pos_open_ts > 0 else 9999.0
+                if pos_age < 900.0:
+                    return StageOutcome.veto(f"Carver rebalance blocked: position hold duration ({pos_age:.0f}s < 900s minimum hold time)", carver=asdict(carver))
+
+                # Carver Loss & Fee Cannibalization Guard:
+                # 1. Never let Carver dump a non-profitable or losing position.
+                #    Losing positions are governed exclusively by Structural Stop Loss and Breakeven Lock.
+                unrealized_diff = (order.entry_price - position["entry_price"]) * position["direction"]
+                if unrealized_diff <= 0.0:
+                    return StageOutcome.veto(f"Carver rebalance blocked on non-profitable / losing position (${unrealized_diff:+.2f}); governed by Structural Stop Loss", carver=asdict(carver))
+
+                # 2. Profit must decisively cover roundtrip exchange fees (>= 0.75 * ATR or >= 0.20% price move).
+                atr_val = float(self.indicators.get("atr") or 100.0)
+                min_profit_diff = max(0.75 * atr_val, position["entry_price"] * 0.0020)
+                if unrealized_diff < min_profit_diff:
+                    return StageOutcome.veto(f"Carver rebalance blocked: unrealized profit (+${unrealized_diff:.1f}) below fee-safe threshold (+${min_profit_diff:.1f})", carver=asdict(carver))
+
+                reduce_side = "SELL" if position["direction"] == 1 else "BUY"
+                best_passive_price = _snapshot.asks[0][0] if reduce_side == "SELL" else _snapshot.bids[0][0]
+                return StageOutcome.pass_("Carver target reduces existing inventory via Maker post-only",
+                    direction=-position["direction"], order_type="POST_ONLY", quantity=quantity, margin=0.0,
+                    entry_price=best_passive_price,
                     reduce_only=True, carver=asdict(carver), raw_carver_contracts=contracts)
             if contracts * order.direction <= 0:
                 return StageOutcome.veto("Carver target conflicts with candidate", carver=asdict(carver))
@@ -1294,9 +1423,13 @@ class LiveTradingState:
             )
             if not proposal.approved:
                 return StageOutcome.veto(proposal.rejection_reason or "risk manager rejected order")
-            quantity = min(abs(contracts) * governor.size_multiplier, proposal.units)
+            tactical_qty = float(order.metadata.get("requested_quantity", 0.0))
+            if tactical_qty > 0:
+                quantity = tactical_qty * min(1.0, governor.size_multiplier)
+            else:
+                quantity = min(abs(contracts) * governor.size_multiplier, proposal.units)
             stop_distance = abs(order.entry_price - order.stop_loss)
-            risk_per_unit = stop_distance + order.entry_price * (2 * self.fee_engine.taker_fee_rate + 0.0004)
+            risk_per_unit = self.fee_engine.unit_risk_with_fees(order.entry_price, stop_distance)
             quantity = min(quantity, proposal.units * stop_distance / risk_per_unit)
             used_risk = sum(max(0, item.units - item.exchange_executed_quantity) * abs(item.price - item.stop_loss) for item in pending)
             used_risk += position.get("units", 0.0) * max(0.0, (position.get("entry_price", 0) - position.get("stop_loss", 0)) * position.get("direction", 0))
@@ -1316,8 +1449,24 @@ class LiveTradingState:
 
             rr_val = abs(order.take_profit - order.entry_price) / max(0.1, stop_distance)
             min_required_rr = governor.min_risk_reward_ratio if governor.enabled else 1.0
-            if rr_val < min_required_rr:
-                return StageOutcome.veto(f"Tỷ lệ R:R ({rr_val:.2f}:1) chưa đạt yêu cầu tối thiểu ({min_required_rr:.1f}:1) cho chế độ {governor.protection_mode}")
+            if rr_val < (min_required_rr - 1e-3):
+                # Auto-expand Take Profit if R:R is close or auto-generated to meet Governor requirements
+                if rr_val >= max(1.5, min_required_rr - 0.4) or order.source == "auto":
+                    needed_dist = stop_distance * min_required_rr
+                    order.take_profit = round(order.entry_price + needed_dist if order.direction == 1 else order.entry_price - needed_dist, 2)
+                    rr_val = min_required_rr
+                else:
+                    return StageOutcome.veto(f"Tỷ lệ R:R ({rr_val:.2f}:1) chưa đạt yêu cầu tối thiểu ({min_required_rr:.1f}:1) cho chế độ {governor.protection_mode}")
+
+            # Fee Drag Hurdle: Require expected reward to clear at least 4x estimated roundtrip costs
+            roundtrip_cost = order.entry_price * (self.fee_engine.maker_fee_rate + self.fee_engine.taker_fee_rate) + max(0.5, _snapshot.asks[0][0] - _snapshot.bids[0][0])
+            expected_reward = abs(order.take_profit - order.entry_price)
+            if expected_reward < 4.0 * roundtrip_cost:
+                if order.source == "auto":
+                    min_tp_dist = round(5.0 * roundtrip_cost, 1)
+                    order.take_profit = round(order.entry_price + min_tp_dist if order.direction == 1 else order.entry_price - min_tp_dist, 2)
+                else:
+                    return StageOutcome.veto(f"Expected reward (${expected_reward:.1f}) below 4x fee hurdle (${4.0 * roundtrip_cost:.1f} USDT)")
 
             adjusted_margin_cap = order.metadata.get("copilot_max_margin")
             if adjusted_margin_cap is not None:
@@ -1352,13 +1501,16 @@ class LiveTradingState:
             order.metadata["timeframe"] = order_tf
 
             req_margin = quantity * order.entry_price / max(1, proposal.leverage)
+            # Probation da bi cap risk 0.25%/0.10% (~5-12 USDT) nen ha sleeve toi thieu xuong 10
+            # thay vi veto o 30 (tranh da nhau giua probation cap va sleeve floor).
+            sleeve_floor = 10.0 if order.metadata.get("probation") else 30.0
             alloc_res = self.capital_allocator.evaluate_allocation(
                 horizon=order_hz,
                 requested_margin=req_margin,
                 total_equity=self.current_balance,
                 active_positions=[position] if position else [],
                 pending_orders=pending,
-                min_trade_margin=30.0,
+                min_trade_margin=sleeve_floor,
                 reserve_ratio_override=governor.reserve_ratio_recommended if governor.enabled else None
             )
             if not alloc_res.allowed:
@@ -1386,17 +1538,35 @@ class LiveTradingState:
         def memory_gate(order: CandidateOrder, _snapshot: MarketSnapshot) -> StageOutcome:
             if order.metadata.get("reduce_only"):
                 return StageOutcome.pass_("Risk-reducing inventory exit; no new entry memory exposure")
+            # Tranh khoa kep Memory + Jesse: neu Jesse dang cooldown/halt sau chuoi thua thi Memory BLOCK
+            # ha thanh giam size (probation) thay vi veto han, de OctoBot/Alpha da duyet van con cua.
+            jesse_streak = 0
+            try:
+                jesse_streak = int(self.jesse_engine.compute_metrics().current_consecutive_losses or 0)
+            except Exception:
+                jesse_streak = 0
+            jesse_locking = jesse_streak >= 3
+            mem_atr = float(self.indicators.get("atr") or 0.0)
+            mem_smc = getattr(self.ai_verdict, "smc_structure", "") or ""
             if order.order_type == "GRID" and order.source in ("manual-grid", "auto-grid", "auto"):
                 for direction in (1, -1):
                     check = self.trade_memory.query_similarity_against_losses(direction, self.indicators.get("rsi", 50.0),
-                        getattr(self.ai_verdict, "vwap_status", "EQUILIBRIUM_FAIR"), self.order_flow_verdict.absorption_signal if self.order_flow_verdict else "NONE")
+                        getattr(self.ai_verdict, "vwap_status", "EQUILIBRIUM_FAIR"), self.order_flow_verdict.absorption_signal if self.order_flow_verdict else "NONE",
+                        candidate_entry_price=order.entry_price, candidate_smc_structure=mem_smc, candidate_atr=mem_atr)
                     if not check.is_safe:
+                        if jesse_locking:
+                            return StageOutcome.pass_("Memory BLOCK ha thanh giam size vi Jesse dang khoa kep (GRID probation)",
+                                                      probation=True, risk_cap_pct=0.0010)
                         return StageOutcome.veto(check.lesson_learned)
                 return StageOutcome.pass_("Memory clear for both hedge sides")
             absorption = self.order_flow_verdict.absorption_signal if self.order_flow_verdict else "NONE"
             vwap = getattr(self.ai_verdict, "vwap_status", "EQUILIBRIUM_FAIR")
-            check = self.trade_memory.query_similarity_against_losses(order.direction, self.indicators.get("rsi", 50.0), vwap, absorption)
+            check = self.trade_memory.query_similarity_against_losses(order.direction, self.indicators.get("rsi", 50.0), vwap, absorption,
+                candidate_entry_price=order.entry_price, candidate_smc_structure=mem_smc, candidate_atr=mem_atr)
             if not check.is_safe:
+                if jesse_locking:
+                    return StageOutcome.pass_("Memory BLOCK ha thanh giam size vi Jesse dang khoa kep (directional probation)",
+                                              probation=True, risk_cap_pct=0.0010)
                 return StageOutcome.veto(check.lesson_learned)
             return StageOutcome.pass_(check.lesson_learned, entry_context={
                 "indicators": deepcopy(self.indicators), "of_data": {"absorption_signal": absorption, "delta_momentum": self.order_flow_verdict.delta_momentum},
@@ -1404,9 +1574,38 @@ class LiveTradingState:
                 "snapshot_id": _snapshot.snapshot_id, "captured_at": _snapshot.captured_at,
             })
 
+        def tactical_lessons_gate(order: CandidateOrder, _snapshot: MarketSnapshot) -> StageOutcome:
+            # 3 bai hoc duc ket tu 60 lenh that (strategy/tactical_lessons.py):
+            # HURST_FILTER (cam duoi trend khi mean-reverting), SMC_ALIGN (cam nguoc cau truc),
+            # FEE_AWARE (cam lenh phi an het lai). Reduce-only/GRID mien vi khong phai entry moi.
+            if order.metadata.get("reduce_only"):
+                return StageOutcome.pass_("Risk-reducing exit; lessons gate skipped")
+            if order.order_type == "GRID" and order.source in ("manual-grid", "auto-grid", "auto"):
+                return StageOutcome.pass_("Hedge grid; lessons gate skipped")
+            try:
+                from strategy.tactical_lessons import TacticalLessonsEngine
+                engine = TacticalLessonsEngine()
+                hurst = float(self.indicators.get("hurst", 0.50) or 0.50)
+                smc_struct = getattr(self.ai_verdict, "smc_structure", "RANGING") or "RANGING"
+                exp_reward = abs(order.take_profit - order.entry_price) if order.take_profit > 0 else 0.0
+                notional = abs(order.entry_price) * float(getattr(order, "quantity", 0.0) or 0.0)
+                if notional <= 0:
+                    notional = abs(order.entry_price) * 0.01
+                res = engine.evaluate(hurst, smc_struct, order.direction, order.order_type,
+                                      exp_reward, notional)
+                if not res["allowed"]:
+                    return StageOutcome.veto("Tac chien bai hoc: " + res["rationale"])
+                if res["penalty"] >= 0.5:
+                    return StageOutcome.pass_("Tac chien bai hoc: giam size (penalty %.1f)" % res["penalty"],
+                                              probation=True, risk_cap_pct=0.0010)
+                return StageOutcome.pass_("Tac chien bai hoc: %s" % res["rationale"][:200])
+            except Exception as exc:
+                return StageOutcome.pass_("Lessons gate bo qua (loi ky thuat): %s" % type(exc).__name__)
+
         decision = SevenStagePipeline(
             defense_gates=[("Freqtrade", freqtrade_gate), ("VisualHFT", visual_hft_gate), ("Jesse", jesse_gate)],
-            stage2_gates=[("Deterministic Guard", deterministic_gate), ("OctoBot + Alpha Zoo", alpha_regime_gate)],
+            stage2_gates=[("Deterministic Guard", deterministic_gate), ("OctoBot + Alpha Zoo", alpha_regime_gate),
+                          ("Tactical Lessons", tactical_lessons_gate)],
             council=council_gate,
             sizing=sizing_gate,
             memory=memory_gate,
@@ -1572,15 +1771,56 @@ class LiveTradingState:
             if len(self.price_history) > 60:
                 self.price_history.pop(0)
 
+    def fast_pnl_tick(self) -> None:
+        """Tick PnL sieu nhe chay moi tick gia (khong khoa decision, khong phan tich nang).
+        Giu UPNL/ROE bam sat mark hien tai thay vi cho decision cycle 1s+ nang."""
+        try:
+            ref = self.mark_or_live()
+            if ref <= 0:
+                return
+            pos = self.current_position
+            if pos and pos.get("units", 0) > 0:
+                direction = pos.get("direction", 0)
+                units = pos.get("units", 0.0)
+                gross = (ref - pos.get("entry_price", ref)) * units * direction
+                fee = self.fee_engine.calculate_fee(ref * units, is_maker=False)
+                pos["unrealized_pnl"] = round(gross, 2)
+                pos["net_upnl"] = round(gross - fee, 2)
+                initm = pos.get("initial_margin", pos.get("margin", 0.0)) or pos.get("margin", 0.0)
+                pos["roe_pct"] = round((gross / initm * 100.0), 2) if initm > 0 else 0.0
+            for _, hp in list(getattr(self, "hedge_positions", {}).items()):
+                if hp.get("units", 0) > 0:
+                    hdir, hunits = hp.get("direction", 0), hp.get("units", 0.0)
+                    hgross = (ref - hp.get("entry_price", ref)) * hunits * hdir
+                    hfee = self.fee_engine.calculate_fee(ref * hunits, is_maker=False)
+                    hp["unrealized_pnl"] = round(hgross, 2)
+                    hp["net_upnl"] = round(hgross - hfee, 2)
+                    hm = hp.get("margin", 0.0)
+                    hp["roe_pct"] = round((hgross / hm * 100.0), 2) if hm > 0 else 0.0
+        except Exception:
+            pass
+
+    def mark_or_live(self) -> float:
+        # Gia PnL chuan san = mark price; fallback live_price khi chua co mark (MEXC/khoi dong).
+        mark = float(getattr(self, "mark_price", 0.0) or 0.0)
+        return mark if mark > 0 else float(self.live_price or 0.0)
+
     def process_execution_tick(self, price: float):
-        # Update position, floating PnL, and AI Continuous Coordination
+        # Update position, floating PnL, and AI Continuous Coordination.
+        # Chuan Binance: UPNL = (mark - entry) * units * huong theo MARK PRICE (khong phai mid),
+        # KHONG tru phi (phi tru vao wallet khi khop lenh that). net_upnl = gross - phi thoat
+        # uoc tinh (taker) de biet so thuc nhan. ROE chuan = UPNL / initial margin.
+        ref_price = self.mark_or_live()
         if self.current_position:
             pos = self.current_position
             direction = pos["direction"]
             units = pos["units"]
-            unrealized = (price - pos["entry_price"]) * units * direction
-            pos["unrealized_pnl"] = round(unrealized, 2)
-            pos["roe_pct"] = round((unrealized / pos["margin"] * 100.0), 2) if pos["margin"] > 0 else 0.0
+            gross_float = (ref_price - pos["entry_price"]) * units * direction
+            est_exit_fee = self.fee_engine.calculate_fee(ref_price * units, is_maker=False)
+            pos["unrealized_pnl"] = round(gross_float, 2)
+            pos["net_upnl"] = round(gross_float - est_exit_fee, 2)
+            init_margin = pos.get("initial_margin", pos.get("margin", 0.0)) or pos.get("margin", 0.0)
+            pos["roe_pct"] = round((gross_float / init_margin * 100.0), 2) if init_margin > 0 else 0.0
 
             # Backwards compatibility: Wrap existing position into orders if missing
             if "orders" not in pos or not pos["orders"]:
@@ -1602,21 +1842,39 @@ class LiveTradingState:
                     "roe_pct": pos["roe_pct"],
                 }]
 
-            # Update live PnL and ROE% for each constituent order slice
+            # Update live PnL and ROE% for each constituent order slice (chuan Binance: gross theo mark, khong tru phi)
             for ord_item in pos.get("orders", []):
                 ord_dir = ord_item.get("direction", direction)
                 ord_units = ord_item.get("units", 0.0)
                 ord_entry = ord_item.get("entry_price", pos["entry_price"])
                 ord_margin = ord_item.get("margin", 0.0)
-                slice_pnl = (price - ord_entry) * ord_units * ord_dir
-                ord_item["unrealized_pnl"] = round(slice_pnl, 2)
-                ord_item["roe_pct"] = round((slice_pnl / ord_margin * 100.0), 2) if ord_margin > 0 else 0.0
+                slice_gross = (ref_price - ord_entry) * ord_units * ord_dir
+                slice_fee = self.fee_engine.calculate_fee(ref_price * ord_units, is_maker=False)
+                ord_item["unrealized_pnl"] = round(slice_gross, 2)
+                ord_item["net_upnl"] = round(slice_gross - slice_fee, 2)
+                ord_item["roe_pct"] = round((slice_gross / ord_margin * 100.0), 2) if ord_margin > 0 else 0.0
 
             # Update peak price
             if direction == 1 and price > pos.get("peak_price", pos["entry_price"]):
                 pos["peak_price"] = price
             elif direction == -1 and price < pos.get("peak_price", pos["entry_price"]):
                 pos["peak_price"] = price
+
+            # Institutional Breakeven Lock Safeguard:
+            # When unrealized gain >= +0.5% (or price moves >= 1.0 * ATR in profit),
+            # automatically lock stop loss to entry_price + fee buffer.
+            # Once locked, the trade can NEVER turn into a loss!
+            gain_pct = (price - pos["entry_price"]) * direction / max(1.0, pos["entry_price"])
+            atr_val = float(self.indicators.get("atr") or 100.0)
+            favorable_move = (price - pos["entry_price"]) * direction
+            if (gain_pct >= 0.005 or favorable_move >= 1.0 * atr_val) and not pos.get("breakeven_locked"):
+                fee_buffer = pos["entry_price"] * 0.0008  # buffer covers roundtrip fees + small edge
+                be_sl = round(pos["entry_price"] + fee_buffer if direction == 1 else pos["entry_price"] - fee_buffer, 2)
+                if (be_sl - pos["stop_loss"]) * direction > 0:
+                    pos["stop_loss"] = be_sl
+                    pos["breakeven_locked"] = True
+                    self.execution.replace_protection(sl=be_sl)
+                    print(f"[BREAKEVEN LOCK] 🛡️ Vị thế đạt lãi +{gain_pct*100:.2f}% (+${favorable_move:.1f}). Tự động dời Stop Loss về hòa vốn có phí: {be_sl}", flush=True)
 
             # Protective exits run even when entry gates veto or the bot is paused.
             if not self.execution.live:
@@ -1645,13 +1903,17 @@ class LiveTradingState:
         # Grid keeps long and short ledgers independent; it must never net one side into the other.
         for position_side, pos in list(self.hedge_positions.items()):
             direction, units = pos["direction"], pos["units"]
-            unrealized = (price - pos["entry_price"]) * units * direction
-            pos["unrealized_pnl"] = round(unrealized, 2)
-            pos["roe_pct"] = round(unrealized / pos["margin"] * 100.0, 2) if pos["margin"] > 0 else 0.0
+            hedge_gross = (ref_price - pos["entry_price"]) * units * direction
+            hedge_fee = self.fee_engine.calculate_fee(ref_price * units, is_maker=False)
+            pos["unrealized_pnl"] = round(hedge_gross, 2)
+            pos["net_upnl"] = round(hedge_gross - hedge_fee, 2)
+            pos["roe_pct"] = round(hedge_gross / pos["margin"] * 100.0, 2) if pos["margin"] > 0 else 0.0
             for order in pos.get("orders", []):
-                item_pnl = (price - order.get("entry_price", price)) * order.get("units", 0.0) * direction
-                order["unrealized_pnl"] = round(item_pnl, 2)
-                order["roe_pct"] = round(item_pnl / order["margin"] * 100.0, 2) if order.get("margin", 0) > 0 else 0.0
+                item_gross = (ref_price - order.get("entry_price", ref_price)) * order.get("units", 0.0) * direction
+                item_fee = self.fee_engine.calculate_fee(ref_price * order.get("units", 0.0), is_maker=False)
+                order["unrealized_pnl"] = round(item_gross, 2)
+                order["net_upnl"] = round(item_gross - item_fee, 2)
+                order["roe_pct"] = round(item_gross / order["margin"] * 100.0, 2) if order.get("margin", 0) > 0 else 0.0
             if direction == 1:
                 pos["peak_price"] = max(pos.get("peak_price", pos["entry_price"]), price)
             else:
@@ -1665,6 +1927,11 @@ class LiveTradingState:
         # AI Continuous Multi-Strategy Ensemble Execution & Coordination on every tick (4 spaces)
 
     def run_decision_cycle(self):
+        # Giu mark price tuoi (10s/lan) NGOAI decision_lock de khong bi analyze_snapshot nang giu lock
+        try:
+            self.refresh_mark_price()
+        except Exception:
+            pass
         with self.decision_lock:
             self.risk_manager.sync_day()
             if self.live_price <= 0:
@@ -1732,6 +1999,28 @@ class LiveTradingState:
             return
 
         now = time.time()
+        # Dong bo don bay pending: chi huy lenh cho VUOT TRAN CUNG (qua don bay cho phep),
+        # khong ep bang dung cap (pending cu hop le van giu de tranh xoay vong huy/dat lai).
+        try:
+            hard_cap_now = int(getattr(self.risk_config, "max_leverage", 5) or 5)
+            gov_cap_now = hard_cap_now
+            try:
+                gov_now = self.monthly_governor.evaluate(self.current_balance, self.trades)
+                if gov_now.enabled:
+                    gov_cap_now = min(hard_cap_now, int(gov_now.max_leverage_cap))
+            except Exception:
+                pass
+            for o in list(self.order_manager.pending_orders):
+                try:
+                    if o.group_type == "GRID":
+                        continue
+                    if int(o.leverage) > int(gov_cap_now) and o.status in ("PENDING", "ACTIVE"):
+                        self.order_manager.cancel_order(o.order_id)
+                        print(f"[LEV SYNC] 🔄 Huy pending #{o.order_id} lev {o.leverage}x (vuot tran {gov_cap_now}x) de dat lai", flush=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # Stale Pending Orders Cleanup:
         # If a resting limit/maker/DCA order has drifted > 0.8% away from current price, cancel it to refresh
         pending = list(self.order_manager.pending_orders)
@@ -1765,6 +2054,20 @@ class LiveTradingState:
             if cand_type not in ("MARKET", "LIMIT", "POST_ONLY", "CONDITIONAL", "TRAILING_STOP", "TWAP", "SCALE_RATIO"):
                 cand_type = "POST_ONLY"
 
+            # Nen dispatcher khi cung (type, direction) bi veto lien tiep (mo rong cho moi loai lenh,
+            # ke ca CONDITIONAL vua bi veto 6 lan lien tiep tren live):
+            # 3 lan/10 phut -> ep ve POST_ONLY don (re hon thang DCA/lenh phuc tap); 5 lan -> nghi 5 phut.
+            veto_key = f"{cand_type}:{cand_dir}"
+            streak = self.veto_streak.get(veto_key, {"count": 0, "last_veto_ts": 0.0})
+            if now - float(streak.get("last_veto_ts", 0.0)) > 600.0:
+                streak = {"count": 0, "last_veto_ts": 0.0}
+            if int(streak.get("count", 0)) >= 5 and now - float(streak.get("last_veto_ts", 0.0)) < 300.0:
+                print(f"[VETO COOLDOWN] 🛑 {veto_key} bi veto {int(streak['count'])} lan lien tiep -> nghi 5 phut", flush=True)
+                return
+            if int(streak.get("count", 0)) >= 3 and cand_type in ("SCALE_RATIO", "CONDITIONAL", "TWAP", "TRAILING_STOP", "MARKET"):
+                print(f"[VETO DOWNGRADE] 🔄 {veto_key} bi veto {int(streak['count'])} lan lien tiep -> ep ve POST_ONLY don", flush=True)
+                cand_type = "POST_ONLY"
+
             cand_entry = res.optimal_price if (res.optimal_price and res.optimal_price > 0) else current_price
             cand_sl = res.structural_sl if (res.structural_sl and res.structural_sl > 0) else (cand_entry * 0.99 if cand_dir == 1 else cand_entry * 1.01)
             cand_tp = res.structural_tp if (res.structural_tp and res.structural_tp > 0) else (cand_entry * 1.02 if cand_dir == 1 else cand_entry * 0.98)
@@ -1787,7 +2090,9 @@ class LiveTradingState:
                 "carver_contracts": getattr(res, "carver_contracts", 0.0),
                 "strategy_horizon": getattr(res, "strategy_horizon", "SHORT_TERM"),
                 "is_vpin_throttled": getattr(res, "is_vpin_throttled", False),
-                "sleeve_allocation": getattr(res, "sleeve_allocation", {})
+                "sleeve_allocation": getattr(res, "sleeve_allocation", {}),
+                "tactical_formation": getattr(res, "tactical_formation", "DEFENSIVE_SNIPER"),
+                "staged_exits": getattr(res, "staged_exits", [])
             })
             if res.optimal_margin > 0:
                 candidate.margin = res.optimal_margin
@@ -1801,9 +2106,52 @@ class LiveTradingState:
         decision = self.evaluate_candidate_pipeline(candidate)
         last_entry = decision.trace.entries[-1] if decision.trace.entries else None
         print(f"[AUTO CYCLE] Type={candidate.order_type} Dir={candidate.direction} Price={candidate.entry_price:.2f} | Approved={decision.approved} | Stage={last_entry.stage if last_entry else 'None'} Verdict={last_entry.verdict if last_entry else 'None'} Reason={last_entry.reason if last_entry else 'None'}", flush=True)
+        # Cap nhat veto streak: duyet -> xoa lich su key nay; veto -> tang dem.
+        cycle_key = f"{candidate.order_type}:{candidate.direction}"
+        if decision.approved:
+            self.veto_streak.pop(cycle_key, None)
+        elif last_entry and last_entry.verdict == "VETO":
+            prev = self.veto_streak.get(cycle_key, {"count": 0, "last_veto_ts": 0.0})
+            if now - float(prev.get("last_veto_ts", 0.0)) > 600.0:
+                prev = {"count": 0, "last_veto_ts": 0.0}
+            self.veto_streak[cycle_key] = {"count": int(prev.get("count", 0)) + 1, "last_veto_ts": now}
         if decision.approved:
             res = self.queue_approved_candidate(decision.candidate, self.order_research)
             print(f"[AUTO CYCLE QUEUE RESULT] {res}", flush=True)
+        elif last_entry and last_entry.verdict == "VETO":
+            # Adaptive Proposal Revision Loop (Vòng lặp tái thiết lập phương án khi bỏ phiếu/gate từ chối)
+            is_replay = getattr(getattr(self, "storage", None), "__class__", None).__name__ == "ReplayStorage"
+            if not is_replay and getattr(self.vibe_swarm, "enabled", True):
+                renegotiable_stages = (
+                    "Stage 3 / AI Council",
+                    "Stage 2 / OctoBot Matrix & Alpha Zoo",
+                    "Stage 4 / Carver + Risk",
+                )
+                if any(stage in last_entry.stage for stage in renegotiable_stages):
+                    snapshot = self.build_market_snapshot() if hasattr(self, "build_market_snapshot") else None
+                    alt_candidate = self.ai_order_researcher.build_adaptive_counter_proposal(
+                        original_candidate=candidate,
+                        veto_stage=last_entry.stage,
+                        veto_reason=last_entry.reason,
+                        current_price=current_price,
+                        best_bid=snapshot.bids[0][0] if (snapshot and snapshot.bids) else current_price - 0.5,
+                        best_ask=snapshot.asks[0][0] if (snapshot and snapshot.asks) else current_price + 0.5,
+                        indicators=self.indicators,
+                        df_structure=self.get_structure_df(),
+                        df_macro=self.data_map.get("1h"),
+                        active_timeframe=self.active_timeframe,
+                        current_balance=self.current_balance,
+                        council_verdict=getattr(self.vibe_swarm, "last_verdict", None)
+                    )
+                    if alt_candidate is not None:
+                        sol = alt_candidate.metadata.get("negotiation_solution", "Điều chỉnh phương án")
+                        print(f"[COUNCIL RE-VOTE] 🔄 Phương án 1 bị từ chối ({last_entry.stage}: {last_entry.reason}). Tự động xây dựng Phương án 2: {sol}", flush=True)
+                        decision2 = self.evaluate_candidate_pipeline(alt_candidate)
+                        last_entry2 = decision2.trace.entries[-1] if decision2.trace.entries else None
+                        print(f"[COUNCIL RE-VOTE RESULT] Type={alt_candidate.order_type} Dir={alt_candidate.direction} Price={alt_candidate.entry_price:.2f} | Approved={decision2.approved} | Stage={last_entry2.stage if last_entry2 else 'None'} Verdict={last_entry2.verdict if last_entry2 else 'None'} Reason={last_entry2.reason if last_entry2 else 'None'}", flush=True)
+                        if decision2.approved:
+                            res = self.queue_approved_candidate(decision2.candidate, self.order_research)
+                            print(f"[COUNCIL RE-VOTE QUEUE RESULT] {res}", flush=True)
 
     def persist_current_state(self):
         # Runtime is authoritative after restart; legacy account row is a UI/export view.
@@ -1850,8 +2198,23 @@ class LiveTradingState:
         win_rate = (len(wins) / total * 100.0) if total > 0 else 0.0
 
         # Floating Equity & Real-time Net PnL (Closed PnL + Open Position Floating PnL)
-        unrealized = (self.current_position["unrealized_pnl"] if self.current_position else 0.0) + sum(pos.get("unrealized_pnl", 0.0) for pos in self.hedge_positions.values())
-        equity = self.current_balance + unrealized
+        # Chuan san: equity = balance + UPNL(gross theo mark) + funding tich luy uoc tinh
+        # (funding tru Cong/tru vao vi that moi 8h; LONG tra khi funding duong, SHORT nhan).
+        unrealized = (self.current_position.get("unrealized_pnl", 0.0) if self.current_position else 0.0) + sum(pos.get("unrealized_pnl", 0.0) for pos in self.hedge_positions.values())
+        funding_acc = 0.0
+        try:
+            f_rate = float(getattr(self, "funding_rate", 0.0) or 0.0)
+            ref_px = float(getattr(self, "mark_price", 0.0) or self.live_price or 0.0)
+            all_pos = ([self.current_position] if self.current_position else []) + list(getattr(self, "hedge_positions", {}).values())
+            for fp in all_pos:
+                funits = float(fp.get("units", 0.0) or 0.0)
+                fdir = int(fp.get("direction", 0) or 0)
+                if funits > 0 and fdir != 0 and ref_px > 0:
+                    # 1 ky funding ~ f_rate * notional; am khi phai tra, duong khi duoc nhan
+                    funding_acc += -fdir * f_rate * funits * ref_px
+        except Exception:
+            funding_acc = 0.0
+        equity = self.current_balance + unrealized + funding_acc
         total_net_pnl = equity - self.initial_balance
         total_net_pnl_pct = (total_net_pnl / self.initial_balance) * 100.0
         closed_pnl = self.current_balance - self.initial_balance
@@ -1918,6 +2281,8 @@ class LiveTradingState:
             "closed_pnl": round(closed_pnl, 2),
             "is_running": self.is_running,
             "live_price": self.live_price,
+            "mark_price": round(float(getattr(self, "mark_price", 0.0) or 0.0), 2),
+            "mark_funding_rate": float(getattr(self, "mark_funding_rate", 0.0) or 0.0),
             "futures_price": self.live_price,
             "spot_price": round(getattr(self, "spot_price", self.live_price) or self.live_price, 2),
             "basis": round(self.live_price - (getattr(self, "spot_price", self.live_price) or self.live_price), 2),
@@ -2282,10 +2647,22 @@ class LiveTradingState:
 state = LiveTradingState(symbol="BTCUSDT", balance=5000.0)
 
 
-async def broadcast_state():
-    """Broadcast state to all connected browser WebSockets"""
+async def broadcast_state(force: bool = False):
+    """Broadcast state to all connected browser WebSockets.
+    Bo qua frame trung lap: neu gia + PnL + pending khong doi tu frame truoc thi khong serialize
+    full state (get_state_dict nang), tranh nghẽn event loop khi gia dung yen."""
     if not connected_clients:
         return
+    try:
+        sig = (round(state.live_price, 2),
+               round((state.current_position or {}).get("unrealized_pnl", 0.0), 2) if state.current_position else 0.0,
+               len(state.order_manager.pending_orders),
+               state.tick_count)
+    except Exception:
+        sig = None
+    if not force and sig is not None and sig == getattr(broadcast_state, "_last_sig", None):
+        return
+    broadcast_state._last_sig = sig
     state_json = json.dumps({"type": "tick", "data": state.get_state_dict()})
     to_remove = set()
     for ws in connected_clients:
@@ -2298,14 +2675,14 @@ async def broadcast_state():
 
 
 async def state_broadcast_loop():
-    """Publish current telemetry at 4 FPS without network calls per client."""
+    """Publish current telemetry up to ~10 FPS; bo frame trung de nhe event loop."""
     while True:
         try:
             if connected_clients and state.live_price > 0:
                 await broadcast_state()
         except Exception:
             pass
-        await asyncio.sleep(0.25)
+        await asyncio.sleep(0.1)
 
 
 async def ai_quant_background_loop():
@@ -2870,15 +3247,19 @@ async def get_settings():
 
 @app.post("/api/settings/update_monthly_target")
 async def update_monthly_target(payload: dict):
-    target_pct = float(payload.get("target_pct", 10.0))
+    profile = str(payload.get("profile", payload.get("profile_name", ""))).strip().lower() or None
+    target_pct = payload.get("target_pct", None)
+    target_pct = float(target_pct) if target_pct is not None else None
     enabled = bool(payload.get("enabled", True))
     auto_compensate = bool(payload.get("auto_compensate_deficit", True))
-    state.monthly_governor.update_config(target_pct, enabled, auto_compensate)
+    state.monthly_governor.update_config(target_pct, enabled, auto_compensate, profile=profile)
     await broadcast_state()
     gov_status = state.monthly_governor.evaluate(state.current_balance, state.trades)
     return {
         "status": "ok",
-        "message": f"Đã lưu cấu hình mục tiêu tháng: {target_pct:.1f}% (Tự động điều tiết an toàn: BẬT, Tự động bù thiếu hụt: {'BẬT' if auto_compensate else 'TẮT'})",
+        "profiles": {k: {"label": v["label"], "base_target_pct": v["base_target_pct"], "unlock": v["unlock"]} for k, v in state.monthly_governor.PROFILES.items()},
+        "active_profile": gov_status.profile_name,
+        "message": f"Đã lưu cấu hình mục tiêu tháng [{gov_status.profile_label}]: {gov_status.base_target_pct:.1f}% (Tự động điều tiết an toàn: BẬT, Tự động bù thiếu hụt: {'BẬT' if auto_compensate else 'TẮT'})",
         "monthly_target": asdict(gov_status),
         "capital_allocation": state.capital_allocator.export_state(
             state.current_balance,

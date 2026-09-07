@@ -190,5 +190,37 @@ class TestCarverSystematicFramework(unittest.TestCase):
         print(f"\nCarver Master Test Output:\n{res.summary_rationale}")
 
 
+    def test_turnover_buffer_min_notional_filter(self):
+        # Buffer manager with $350 min rebalance notional
+        buffer_mgr = PositionBufferManager(buffer_pct=0.25, min_contract_step=0.001, min_rebalance_notional=350.0)
+        target = 0.030 # 0.030 BTC target (~$2,000 USDT)
+        current = 0.027 # 0.003 BTC drift (~$200 USDT < $350 USDT)
+        price = 66000.0
+
+        # Without min_notional check (or price=0), it would rebalance 0.003 BTC
+        # With price=66000 and min_notional=350.0: 0.003 * 66000 = $198 < $350 -> MUST HOLD!
+        action, exec_qty, b_low, b_high, b_w = buffer_mgr.evaluate_buffer(
+            target_contracts=target,
+            current_contracts=current,
+            contract_step=0.001,
+            current_price=price,
+            min_notional=350.0
+        )
+        self.assertEqual(action, 'HOLD')
+        self.assertEqual(exec_qty, 0.0)
+
+        # But if drift is 0.008 BTC (~$528 USDT > $350 USDT), rebalance is allowed!
+        current_large_drift = 0.020 # 0.010 BTC drift -> $660 > $350
+        action2, exec_qty2, _, _, _ = buffer_mgr.evaluate_buffer(
+            target_contracts=target,
+            current_contracts=current_large_drift,
+            contract_step=0.001,
+            current_price=price,
+            min_notional=350.0
+        )
+        self.assertEqual(action2, 'BUY')
+        self.assertAlmostEqual(exec_qty2, 0.010, places=3)
+
+
 if __name__ == '__main__':
     unittest.main()

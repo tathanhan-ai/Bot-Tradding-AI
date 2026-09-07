@@ -150,19 +150,24 @@ class DynamicLeverageEngine:
             notes.append(f"Phòng thủ rủi ro (DD={current_drawdown_pct:.1f}%) -> Giảm đòn bẩy còn {lev}x")
 
         # 7. Liquidation Clearance Guarantee (Liquidation Buffer >= 3.0x SL Distance)
-        # On Binance Futures: Liquidation buffer ~ (0.98 / leverage) * 100%
+        # Dung cong thuc Isolated that: liq_dist = (1/lev - MMR - phi) * 100%,
+        # voi MMR tra theo bac notional uoc tinh (entry * lev) thay vi he so 0.98 cung.
+        from risk.risk_manager import FuturesRiskManager
         effective_sl_pct = max(sl_distance_pct, self.target_stop_pct)
         target_clearance_pct = effective_sl_pct * self.min_clearance_ratio * 100.0
 
         # Iteratively reduce leverage if liquidation distance is too close to Stop Loss
         while lev > self.min_leverage:
-            est_liq_dist = (0.98 / lev) * 100.0
+            est_notional = current_price * lev
+            est_mmr = FuturesRiskManager.mmr_for_notional(est_notional)
+            est_liq_dist = max(0.0, (1.0 / lev - est_mmr - 0.0005)) * 100.0
             if est_liq_dist >= target_clearance_pct:
                 break
             lev -= 1
 
         final_lev = max(self.min_leverage, min(self.max_leverage, lev))
-        final_liq_distance = round((0.98 / final_lev) * 100.0, 1)
+        final_mmr = FuturesRiskManager.mmr_for_notional(current_price * final_lev)
+        final_liq_distance = round(max(0.0, (1.0 / final_lev - final_mmr - 0.0005)) * 100.0, 1)
         clearance_ratio = round(final_liq_distance / max(0.1, effective_sl_pct * 100.0), 2)
 
         if final_liq_distance >= 28.0:

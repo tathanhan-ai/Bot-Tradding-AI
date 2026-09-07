@@ -52,22 +52,70 @@ class MonthlyGovernorStatus:
     target_daily_pnl_usdt: float = 0.0 # Expected profit pacing per day in USDT
     remaining_days: int = 1            # Days remaining in current month
     reserve_ratio_recommended: float = 0.15 # 0.30 if TARGET_ACHIEVED, 0.15 otherwise
+    profile_name: str = "growth"       # sustainable | balanced | growth | aggressive
+    profile_label: str = "Tăng trưởng 10-20%"
 
 
 class MonthlyTargetGovernor:
     MAX_CATCHUP_TARGET_CAP = 30.0      # Safety cap: target will never exceed 30%/month
+
+    # Ma trận mốc kỳ vọng lãi tháng — chọn 1 click qua update_config(profile=...).
+    # Bất biến an toàn: mọi profile giữ size_multiplier <= 1.0 (chống đuổi target),
+    # risk/trade vẫn do RiskConfig + CRO quản (<= 1.5-2.0% vốn).
+    PROFILES: Dict[str, Dict[str, Any]] = {
+        "sustainable": {   # Bền vững 3-5%: mặc định khi paper chưa đạt gate
+            "label": "Bền vững 3-5%",
+            "base_target_pct": 4.0,
+            "on_track": {"size": 1.0, "lev": 5, "conf": 55, "rr": 1.5},
+            "deficit_catchup": {"size": 0.85, "lev": 3, "conf": 65, "rr": 2.0},
+            "behind_pace": {"size": 0.80, "lev": 3, "conf": 70, "rr": 1.8},
+            "achieved": {"size": 0.50, "lev": 2, "conf": 75, "rr": 2.0},
+            "unlock": "Luôn mở (mặc định an toàn)",
+        },
+        "balanced": {      # Cân bằng 6-8%: mở khi paper đạt gate 20 lệnh
+            "label": "Cân bằng 6-8%",
+            "base_target_pct": 7.0,
+            "on_track": {"size": 1.0, "lev": 6, "conf": 55, "rr": 1.5},
+            "deficit_catchup": {"size": 0.85, "lev": 4, "conf": 65, "rr": 2.2},
+            "behind_pace": {"size": 0.80, "lev": 4, "conf": 70, "rr": 2.0},
+            "achieved": {"size": 0.50, "lev": 3, "conf": 75, "rr": 2.0},
+            "unlock": "Winrate 20 lệnh >45%, PF >1.5, expectancy >0",
+        },
+        "growth": {        # Tăng trưởng 10-20%: profile đang chạy live
+            "label": "Tăng trưởng 10-20%",
+            "base_target_pct": 10.0,
+            "on_track": {"size": 1.0, "lev": 8, "conf": 55, "rr": 1.5},
+            # RR catch-up 2.5 -> 2.2 cho toi khi paper dat gate (RR 2.5 kho khop khi thi truong yeu,
+            # sizing lai tu noi TP cho du RR cang lam giam fill)
+            "deficit_catchup": {"size": 0.85, "lev": 4, "conf": 65, "rr": 2.2},
+            "behind_pace": {"size": 0.80, "lev": 4, "conf": 70, "rr": 2.0},
+            "achieved": {"size": 0.50, "lev": 3, "conf": 75, "rr": 2.0},
+            "unlock": "Paper đạt gate như Balanced",
+        },
+        "aggressive": {    # Tốc chiến 20-30%: chỉ mở khi PF >2.0 trên 50 lệnh paper
+            "label": "Tốc chiến 20-30%",
+            "base_target_pct": 25.0,
+            "on_track": {"size": 1.0, "lev": 8, "conf": 60, "rr": 1.8},
+            "deficit_catchup": {"size": 0.80, "lev": 4, "conf": 70, "rr": 2.5},
+            "behind_pace": {"size": 0.75, "lev": 3, "conf": 72, "rr": 2.2},
+            "achieved": {"size": 0.40, "lev": 2, "conf": 80, "rr": 2.2},
+            "unlock": "PF >2.0 trên 50 lệnh paper",
+        },
+    }
 
     def __init__(
         self,
         base_target_pct: float = 10.0,
         enabled: bool = True,
         auto_compensate_deficit: bool = True,
-        storage = None
+        storage = None,
+        profile: str = "growth",
     ):
         self.base_target_pct = float(base_target_pct)
         self.enabled = bool(enabled)
         self.auto_compensate_deficit = bool(auto_compensate_deficit)
         self.storage = storage
+        self.profile_name = profile if profile in self.PROFILES else "growth"
 
         now = datetime.now()
         self.current_month_str = now.strftime("%Y-%m")
@@ -92,6 +140,11 @@ class MonthlyTargetGovernor:
             val_compensate = self.storage.get_setting("monthly_compensate_deficit")
             if val_compensate is not None:
                 self.auto_compensate_deficit = str(val_compensate).lower() in ("true", "1", "yes", "on")
+
+            val_profile = self.storage.get_setting("monthly_target_profile")
+            if val_profile in self.PROFILES:
+                self.profile_name = val_profile
+                self.base_target_pct = float(self.PROFILES[val_profile]["base_target_pct"])
 
             val_month = self.storage.get_setting("monthly_governor_month")
             val_start_bal = self.storage.get_setting("monthly_start_balance")
@@ -122,14 +175,20 @@ class MonthlyTargetGovernor:
             self.storage.save_setting("monthly_target_pct", self.base_target_pct)
             self.storage.save_setting("monthly_target_enabled", self.enabled)
             self.storage.save_setting("monthly_compensate_deficit", self.auto_compensate_deficit)
+            self.storage.save_setting("monthly_target_profile", self.profile_name)
             self.storage.save_setting("monthly_governor_month", self.current_month_str)
             self.storage.save_setting("monthly_start_balance", self.month_start_balance)
             self.storage.save_setting("monthly_carried_deficit", self.carried_deficit_pct)
         except Exception as e:
             print(f"[MonthlyTargetGovernor] Error saving state: {e}", flush=True)
 
-    def update_config(self, target_pct: float, enabled: bool, auto_compensate: bool):
-        self.base_target_pct = max(1.0, min(100.0, float(target_pct)))
+    def update_config(self, target_pct: Optional[float] = None, enabled: bool = True,
+                      auto_compensate: bool = True, profile: Optional[str] = None):
+        if profile in self.PROFILES:
+            self.profile_name = profile
+            self.base_target_pct = float(self.PROFILES[profile]["base_target_pct"])
+        if target_pct is not None:
+            self.base_target_pct = max(1.0, min(100.0, float(target_pct)))
         self.enabled = bool(enabled)
         self.auto_compensate_deficit = bool(auto_compensate)
         self._save_state()
@@ -231,13 +290,16 @@ class MonthlyTargetGovernor:
 
         progress_ratio = round(current_pnl_pct / effective_target_pct, 3) if effective_target_pct > 0 else 1.0
 
-        # Default standard settings
+        profile = self.PROFILES.get(self.profile_name, self.PROFILES["growth"])
+
+        # Default standard settings (lấy từ profile đang chọn, fallback ON_TRACK)
         regime = "ON_TRACK"
         protection_mode = "BALANCED"
-        size_multiplier = 1.0
-        max_leverage_cap = 10
-        min_ai_confidence = 55
-        min_risk_reward = 1.5
+        track = profile["on_track"]
+        size_multiplier = track["size"]
+        max_leverage_cap = track["lev"]
+        min_ai_confidence = track["conf"]
+        min_risk_reward = track["rr"]
         rationale = ""
 
         if not self.enabled:
@@ -245,13 +307,14 @@ class MonthlyTargetGovernor:
             protection_mode = "STANDARD"
             rationale = "Bộ điều tiết lãi suất kỳ vọng tháng đang TẮT. AI sử dụng quản trị rủi ro thông thường."
         elif current_pnl_pct >= effective_target_pct:
-            # 1. TARGET ACHIEVED -> Capital Preservation Mode
+            # 1. TARGET ACHIEVED -> Capital Preservation Mode (số theo profile)
             regime = "TARGET_ACHIEVED"
             protection_mode = "CAPITAL_PRESERVATION"
-            size_multiplier = 0.50          # Cut position sizes in half
-            max_leverage_cap = 3            # Limit leverage strictly to <= 3x
-            min_ai_confidence = 75          # Only trade high-conviction A+ setups
-            min_risk_reward = 2.0           # Minimum 1:2 R:R
+            achieved = profile["achieved"]
+            size_multiplier = achieved["size"]
+            max_leverage_cap = achieved["lev"]
+            min_ai_confidence = achieved["conf"]
+            min_risk_reward = achieved["rr"]
             rationale = (
                 f"🎉 ĐÃ ĐẠT MỤC TIÊU THÁNG ({current_pnl_pct:+.2f}% / {effective_target_pct:.1f}%): "
                 f"AI tự động kích hoạt chế độ BẢO TOÀN LỢI NHUẬN! Giảm 50% khối lượng lệnh mới, "
@@ -261,10 +324,11 @@ class MonthlyTargetGovernor:
             # 2. DEFICIT CATCH-UP MODE -> Strict Anti-Chasing (Never increase size or leverage after losses)
             regime = "DEFICIT_CATCHUP"
             protection_mode = "ADAPTIVE_CATCHUP"
-            size_multiplier = 0.85          # Hard invariant: size_multiplier <= 1.0 (anti-target chasing)
-            max_leverage_cap = 4            # Deficit leverage strictly below normal cap
-            min_ai_confidence = 65          # Filter out low-grade noise
-            min_risk_reward = 2.5           # Prioritize higher R:R (1:2.5+) to compound gains safely
+            catchup = profile["deficit_catchup"]
+            size_multiplier = catchup["size"]   # Hard invariant: size_multiplier <= 1.0 (anti-target chasing)
+            max_leverage_cap = catchup["lev"]   # Deficit leverage strictly below normal cap
+            min_ai_confidence = catchup["conf"] # Filter out low-grade noise
+            min_risk_reward = catchup["rr"]
             rationale = (
                 f"🔄 CHẾ ĐỘ BÙ THIẾU HỤT THÁNG TRƯỚC: Tháng trước chưa đạt mục tiêu (thiếu {self.carried_deficit_pct:.1f}%). "
                 f"Mục tiêu tháng này được điều chỉnh lên {effective_target_pct:.1f}%. "
@@ -274,23 +338,24 @@ class MonthlyTargetGovernor:
             # 3. BEHIND PACING -> Defensive Patience (Do NOT panic or overtrade)
             regime = "BEHIND_PACE"
             protection_mode = "DEFENSIVE_PATIENCE"
-            size_multiplier = 0.80          # Slightly reduce risk to prevent revenge trading
-            max_leverage_cap = 4
-            min_ai_confidence = 70
-            min_risk_reward = 2.0
+            behind = profile["behind_pace"]
+            size_multiplier = behind["size"]  # Slightly reduce risk to prevent revenge trading
+            max_leverage_cap = behind["lev"]
+            min_ai_confidence = behind["conf"]
+            min_risk_reward = behind["rr"]
             rationale = (
                 f"⚠️ TIẾN ĐỘ THÁNG CHẬM (Đã qua {day_of_month}/{days_in_month} ngày, đạt {current_pnl_pct:+.2f}% / {effective_target_pct:.1f}%): "
                 f"AI kích hoạt cơ chế KIÊN NHẪN PHÒNG THỦ - nghiêm cấm giao dịch ép lệnh (overtrading). "
                 f"Nếu không kịp đạt, phần thiếu hụt sẽ tự động được bù sang tháng sau một cách an toàn."
             )
         else:
-            # 4. NORMAL ON-TRACK
+            # 4. NORMAL ON-TRACK (số theo profile)
             regime = "ON_TRACK"
             protection_mode = "BALANCED"
-            size_multiplier = 1.0
-            max_leverage_cap = 8
-            min_ai_confidence = 55
-            min_risk_reward = 1.5
+            size_multiplier = track["size"]
+            max_leverage_cap = track["lev"]
+            min_ai_confidence = track["conf"]
+            min_risk_reward = track["rr"]
             rationale = (
                 f"⚖️ ĐANG ĐÚNG TIẾN ĐỘ THÁNG: Lãi hiện tại {current_pnl_pct:+.2f}% / Mục tiêu {effective_target_pct:.1f}% "
                 f"(Ngày {day_of_month}/{days_in_month} - {time_progress_pct:.0f}% tháng). AI duy trì nhịp độ giao dịch cân bằng."
@@ -330,5 +395,7 @@ class MonthlyTargetGovernor:
             target_pnl_usdt=target_pnl_usdt,
             target_daily_pnl_usdt=target_daily_pnl_usdt,
             remaining_days=remaining_days,
-            reserve_ratio_recommended=reserve_ratio_rec
+            reserve_ratio_recommended=reserve_ratio_rec,
+            profile_name=self.profile_name,
+            profile_label=profile.get("label", self.profile_name),
         )

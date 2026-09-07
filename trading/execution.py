@@ -204,10 +204,12 @@ class ExecutionLifecycle:
             return reason
         last_trade_closed = s.trades[-1].get("closed_at_ts", 0.0) if s.trades else 0.0
         now_ts = time.time()
-        is_cooldown_expired = (now_ts - last_trade_closed) > 300.0
-        if s.risk_manager.circuit_breaker_active:
+        streak = int(s.jesse_engine.compute_metrics().current_consecutive_losses or 0)
+        if streak >= 7 and (now_ts - last_trade_closed) < 24 * 3600.0:
+            return "Realized-loss halt: 7 consecutive losses (24h review)"
+        if streak >= 3 and (now_ts - last_trade_closed) <= 1800.0:
             return "Realized-loss circuit breaker"
-        if s.jesse_engine.compute_metrics().current_consecutive_losses >= 3 and not is_cooldown_expired:
+        if s.risk_manager.circuit_breaker_active:
             return "Realized-loss circuit breaker"
         price = snap.price if self.exchange_type(order) == "MARKET" else order.price
         if self.exchange_type(order) == "MARKET" and abs(price - order.price) / order.price > 0.0015:
@@ -277,7 +279,11 @@ class ExecutionLifecycle:
         capped_quantity = min(values["quantity"], available / max(order.price, s.live_price))
         metadata = (order.candidate_payload or {}).get("metadata", {})
         risk_pct = .0025 if metadata.get("probation") else (cro.risk_per_trade_pct / 100 if cro else .015)
-        unit_risk = abs(order.price - order.stop_loss) + order.price * .0014
+        fee_fn = getattr(s.fee_engine, "unit_risk_with_fees", None)
+        if callable(fee_fn):
+            unit_risk = fee_fn(order.price, abs(order.price - order.stop_loss))
+        else:
+            unit_risk = abs(order.price - order.stop_loss) + order.price * 2.0 * 0.0005
         capped_quantity = min(capped_quantity, wallet * risk_pct / unit_risk)
         if capped_quantity < values["quantity"]:
             ok, values = s.binance_api.normalize_order_values(order.symbol, capped_quantity, values.get("price"), order_type=kind, reference_price=s.live_price)
@@ -380,7 +386,7 @@ class ExecutionLifecycle:
             "execution_group": order.execution_group, "group_type": order.group_type,
             "direction": order.direction, "side": order.side, "order_type": order.order_type,
             "entry_price": price, "units": quantity, "notional": quantity * price,
-            "margin": quantity * price / order.leverage, "entry_fee": fee,
+            "margin": quantity * price / order.leverage, "leverage": order.leverage, "entry_fee": fee,
             "timeframe": order.timeframe, "entry_time": datetime.now(timezone.utc).isoformat(),
             "open_timestamp": time.time(), "entry_context": payload.get("metadata", {}).get("entry_context", {}),
             "unrealized_pnl": 0.0, "roe_pct": 0.0, "fee_estimated": True,
@@ -391,8 +397,10 @@ class ExecutionLifecycle:
                 "initial_risk": abs(price - order.stop_loss), "peak_price": price, "orders": [],
                 "entry_time": item["entry_time"], "open_timestamp": item["open_timestamp"],
                 "timeframe": order.timeframe, "is_manual_tpsl": False, "partial_tp_done": False,
-                "trailing_status": "Protected execution", "unrealized_pnl": 0.0,
+                "trailing_status": "Protected execution", "unrealized_pnl": 0.0, "net_upnl": 0.0,
                 "leverage": order.leverage, "protection_revision": 0,
+                # initial_margin co dinh de ROE chuan Binance = UPNL / initial margin
+                "initial_margin": quantity * price / order.leverage,
                 "staged_take_profits": payload.get("staged_take_profits", {}),
                 "tp_stage_initial_units": 0.0, "tp_stage_filled": {},
             }
@@ -414,6 +422,10 @@ class ExecutionLifecycle:
             return
         for field in ("units", "margin", "notional", "entry_fee"):
             pos[field] = sum(item.get(field, 0.0) for item in pos["orders"])
+        # initial_margin giu co dinh theo tung slice luc vao (khong giam khi chot mot phan),
+        # de ROE chuan = UPNL / initial margin nhu Binance.
+        if not pos.get("initial_margin"):
+            pos["initial_margin"] = pos.get("margin", 0.0)
         if pos["units"] <= 1e-10:
             if position_side in ("LONG", "SHORT"):
                 s.hedge_positions.pop(position_side, None)
@@ -655,6 +667,20 @@ class ExecutionLifecycle:
                         self.cancel(order)
             else:
                 self.cancel_pending_entries(reason)
+        total_take = 0.0
+        total_entry_fee = 0.0
+        total_margin = 0.0
+        total_gross = 0.0
+        sum_entry_val = 0.0
+        slice_ids = []
+        earliest_entry_time = None
+        earliest_open_ts = None
+        first_ctx = {}
+        parent_intent_id = ""
+        exec_group = ""
+        grp_type = ""
+        timeframe = pos.get("timeframe", s.active_timeframe)
+
         for item in ordered:
             if remaining <= 1e-10:
                 break
@@ -663,30 +689,81 @@ class ExecutionLifecycle:
             entry_fee = item["entry_fee"] * ratio
             margin = item["margin"] * ratio
             gross = (price - item["entry_price"]) * take * pos["direction"]
-            exit_fee = s.fee_engine.calculate_fee(price * take, is_maker=False)
-            net = gross - entry_fee - exit_fee
-            trade = dict(id=max([t["id"] for t in s.trades] or [0]) + 1, execution_id=f"{execution_id}:{item['slice_id']}",
-                symbol=s.symbol, timeframe=item["timeframe"], direction="LONG" if pos["direction"] == 1 else "SHORT",
-                entry_time=item["entry_time"], open_timestamp=item.get("open_timestamp"), entry_price=item["entry_price"],
-                breakeven_price=pos["breakeven_price"], exit_time=datetime.now(timezone.utc).isoformat(), closed_at_ts=time.time(),
-                exit_price=price, units=take, fee=entry_fee + exit_fee, pnl=net, return_pct=net / margin * 100 if margin else 0,
-                reason=reason, entry_context=item.get("entry_context", {}), parent_intent_id=item.get("parent_intent_id", ""),
-                execution_group=item.get("execution_group", ""), group_type=item.get("group_type", ""),
-                fee_estimated=True)
-            s.current_balance += gross - exit_fee
+
+            total_take += take
+            total_entry_fee += entry_fee
+            total_margin += margin
+            total_gross += gross
+            sum_entry_val += item["entry_price"] * take
+            slice_ids.append(str(item.get("slice_id", "")))
+            if earliest_entry_time is None or (item.get("entry_time") and item.get("entry_time") < earliest_entry_time):
+                earliest_entry_time = item.get("entry_time")
+                earliest_open_ts = item.get("open_timestamp")
+            if not first_ctx and item.get("entry_context"):
+                first_ctx = item.get("entry_context")
+            if not parent_intent_id and item.get("parent_intent_id"):
+                parent_intent_id = item.get("parent_intent_id")
+            if not exec_group and item.get("execution_group"):
+                exec_group = item.get("execution_group")
+            if not grp_type and item.get("group_type"):
+                grp_type = item.get("group_type")
+            if item.get("timeframe"):
+                timeframe = item.get("timeframe")
+
+            for field in ("units", "notional", "margin", "entry_fee"):
+                item[field] *= 1 - ratio
+            remaining -= take
+
+        if total_take > 1e-10:
+            avg_entry_price = sum_entry_val / total_take
+            # Phi thoat tinh theo taker (bao thu, nhat quan voi unrealized tru phi uoc tinh).
+            # entry_fee da tru vao balance luc mo lenh (apply_entry) nen khong tru lan 2 o day,
+            # nhung van cong vao tong phi hien thi va net de PnL phan anh dung chi phi that.
+            exit_fee = s.fee_engine.calculate_fee(price * total_take, is_maker=False)
+            net = total_gross - total_entry_fee - exit_fee
+            combined_slice_id = ":".join(slice_ids) if len(slice_ids) <= 2 else f"{slice_ids[0]}+({len(slice_ids)-1})"
+            trade = dict(
+                id=max([t["id"] for t in s.trades] or [0]) + 1,
+                execution_id=f"{execution_id}:{combined_slice_id}",
+                symbol=s.symbol,
+                timeframe=timeframe,
+                direction="LONG" if pos["direction"] == 1 else "SHORT",
+                entry_time=earliest_entry_time or datetime.now(timezone.utc).isoformat(),
+                open_timestamp=earliest_open_ts,
+                entry_price=round(avg_entry_price, 2),
+                breakeven_price=pos["breakeven_price"],
+                exit_time=datetime.now(timezone.utc).isoformat(),
+                closed_at_ts=time.time(),
+                exit_price=price,
+                units=round(total_take, 8),
+                fee=round(total_entry_fee + exit_fee, 4),
+                pnl=round(net, 4),
+                return_pct=round(net / total_margin * 100, 2) if total_margin else 0.0,
+                reason=reason,
+                entry_context=first_ctx,
+                parent_intent_id=parent_intent_id,
+                execution_group=exec_group,
+                group_type=grp_type,
+                fee_estimated=True
+            )
+            s.current_balance += total_gross - exit_fee
             s.total_fees += exit_fee
             s.trades.append(trade)
             s.jesse_engine.record_trade(net)
             s.risk_manager.ai_cro.record_trade_result(net)
             s.freqtrade_protections.on_trade_closed(trade)
-            ctx = trade["entry_context"]
-            if ctx:
-                s.trade_memory.record_trade_outcome(trade_id=trade["id"], direction=pos["direction"], entry_price=item["entry_price"],
-                    indicators=ctx["indicators"], of_data=ctx["of_data"], smc_data=ctx["smc_data"], vwap_data=ctx["vwap_data"],
-                    net_pnl=net, exit_reason=reason)
-            for field in ("units", "notional", "margin", "entry_fee"):
-                item[field] *= 1 - ratio
-            remaining -= take
+            if first_ctx:
+                s.trade_memory.record_trade_outcome(
+                    trade_id=trade["id"],
+                    direction=pos["direction"],
+                    entry_price=avg_entry_price,
+                    indicators=first_ctx.get("indicators", {}),
+                    of_data=first_ctx.get("of_data", {}),
+                    smc_data=first_ctx.get("smc_data", {}),
+                    vwap_data=first_ctx.get("vwap_data", {}),
+                    net_pnl=net,
+                    exit_reason=reason
+                )
             shadow = s.shadow_account.analyze_trade_history(s.trades, s.initial_balance)
             self.trace(trade["parent_intent_id"], "Stage 6 / Shadow Account", "PASS", "Realized fill feedback", **asdict(shadow))
         pos["orders"] = [item for item in pos["orders"] if item["units"] > 1e-10]
