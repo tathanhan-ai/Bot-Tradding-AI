@@ -86,6 +86,9 @@ class PipelineWiringTests(unittest.TestCase):
 
     def prime_directional_setup(self, alpha=30):
         s = self.state
+        s.market_source_times = dict(depth=time.time(), agg_trade=time.time(), kline_1m=time.time())
+        s.freqtrade_protections.max_drawdown_guard.peak_balance = s.current_balance
+        s.freqtrade_protections.max_drawdown_guard.pause_until = 0.0
         s.analyze_snapshot(s.build_market_snapshot())
         s.octobot_consensus.is_tradable = True
         s.octobot_consensus.recommended_direction = 1
@@ -101,6 +104,7 @@ class PipelineWiringTests(unittest.TestCase):
         self.prime_directional_setup()
         def candidate():
             return s.build_candidate_order(1, "MARKET", s.live_price, s.live_price-500, s.live_price+1000, "manual")
+        s.market_source_times = dict(depth=time.time(), agg_trade=time.time(), kline_1m=time.time())
         with patch.object(s, "analyze_snapshot"):
             decision = s.evaluate_candidate_pipeline(candidate())
         self.assertTrue(decision.approved, [(e.stage, e.reason, e.details) for e in decision.trace.entries])
@@ -111,6 +115,7 @@ class PipelineWiringTests(unittest.TestCase):
         s.order_flow_verdict = s.order_flow_engine.evaluate(s.live_price)
         with patch.object(type(s.order_flow_verdict), "absorption_signal", new_callable=property, fget=lambda _: "BEAR_ABSORPTION"):
             s.trade_memory.record_trade_outcome(1, 1, s.live_price, s.indicators, {"absorption_signal": "BEAR_ABSORPTION"}, {}, {"vwap_status": s.ai_verdict.vwap_status}, -10, "STOP_LOSS")
+            s.market_source_times = dict(depth=time.time(), agg_trade=time.time(), kline_1m=time.time())
             with patch.object(s, "analyze_snapshot"):
                 rejected = s.evaluate_candidate_pipeline(candidate())
         self.assertFalse(rejected.approved)
@@ -144,8 +149,9 @@ class PipelineWiringTests(unittest.TestCase):
         self.prime_directional_setup()
         s.order_research.recommended_type = "MARKET"
         s.order_research.optimal_price = s.live_price
-        s.current_position = dict(direction=1, units=1.0, entry_price=s.live_price,
-                                  stop_loss=s.live_price-500, margin=20000, unrealized_pnl=0)
+        s.current_position = dict(direction=1, units=1.0, entry_price=s.live_price - 500,
+                                  stop_loss=s.live_price-1000, margin=20000, unrealized_pnl=500)
+        s.market_source_times = dict(depth=time.time(), agg_trade=time.time(), kline_1m=time.time())
         with patch.object(s, "analyze_snapshot"):
             decision = s.evaluate_candidate_pipeline(s.build_candidate_order(0, "AUTO", s.live_price, 0, 0, "auto"))
         self.assertTrue(decision.approved, [(e.stage, e.reason) for e in decision.trace.entries])

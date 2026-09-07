@@ -1523,6 +1523,7 @@
                       <th class="p-2.5" data-i18n="th_entry">Giá Vào</th>
                       <th class="p-2.5" data-i18n="th_size">Khối Lượng</th>
                       <th class="p-2.5" data-i18n="th_margin">Ký Quỹ</th>
+                      <th class="p-2.5" data-i18n="th_leverage">Đòn Bẩy</th>
                       <th class="p-2.5" data-i18n="th_pnl_roe">PnL Chưa Chốt (ROE %)</th>
                       <th class="p-2.5" data-i18n="th_time">Thời Gian Vào</th>
                       <th class="p-2.5 text-center" data-i18n="th_actions">Thao Tác</th>
@@ -1530,7 +1531,7 @@
                   </thead>
                   <tbody id="pos-orders-body" class="divide-y divide-gray-800/60 mono">
                     <tr>
-                      <td colspan="10" class="p-6 text-center text-gray-500 font-sans" data-i18n="no_orders_in_pos">Chưa có lệnh nào trong vị thế.</td>
+                      <td colspan="11" class="p-6 text-center text-gray-500 font-sans" data-i18n="no_orders_in_pos">Chưa có lệnh nào trong vị thế.</td>
                     </tr>
                   </tbody>
                 </table>
@@ -4984,7 +4985,8 @@
         
         const unPnl = pos.unrealized_pnl;
         const roe = pos.roe_pct || 0.0;
-        statUnrealized.innerHTML = `${t('pos_unrealized_prefix')}<b class="${unPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'} mono">${unPnl >= 0 ? '+' : ''}$${unPnl.toFixed(2)} (ROE: ${roe >= 0 ? '+' : ''}${roe.toFixed(2)}%)</b>`;
+        const netPnl = pos.net_upnl !== undefined ? pos.net_upnl : unPnl;
+        statUnrealized.innerHTML = `${t('pos_unrealized_prefix')}<b class="${unPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'} mono">${unPnl >= 0 ? '+' : ''}$${unPnl.toFixed(2)} (ROE: ${roe >= 0 ? '+' : ''}${roe.toFixed(2)}%)</b> <span class="text-[11px] text-gray-400 mono" title="Net thuc nhan sau phi thoat uoc tinh (taker)">net ${netPnl >= 0 ? '+' : ''}$${netPnl.toFixed(2)}</span>`;
 
         const posTfEl = document.getElementById('pos-timeframe');
         if (posTfEl) posTfEl.innerText = `${tf} (${t('pos_tf_trade_suffix')})`;
@@ -5012,12 +5014,13 @@
         const posOrdersBody = document.getElementById('pos-orders-body');
         if (posOrdersBody) {
           if (orders.length === 0) {
-            posOrdersBody.innerHTML = `<tr><td colspan="10" class="p-6 text-center text-gray-500 font-sans">${t('no_orders_in_pos')}</td></tr>`;
+            posOrdersBody.innerHTML = `<tr><td colspan="11" class="p-6 text-center text-gray-500 font-sans">${t('no_orders_in_pos')}</td></tr>`;
           } else {
             posOrdersBody.innerHTML = orders.map(ord => {
               const isOrdLong = ord.direction === 1 || ord.side === 'LONG' || ord.side === 'BUY';
               const pnl = ord.unrealized_pnl !== undefined ? ord.unrealized_pnl : 0.0;
               const roe = ord.roe_pct !== undefined ? ord.roe_pct : 0.0;
+              const netSlice = ord.net_upnl !== undefined ? ord.net_upnl : pnl;
               const pnlColor = pnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
               const sliceId = ord.slice_id || ord.order_id || 'ORD-1';
               const shortId = ord.order_id ? `#${ord.order_id}` : (ord.slice_id ? `#${String(ord.slice_id).slice(-8)}` : '#ORD');
@@ -5041,8 +5044,9 @@
                   <td class="p-2.5 text-white font-bold">$${Number(ord.entry_price).toLocaleString('en-US', {minimumFractionDigits: 2})}</td>
                   <td class="p-2.5 text-gray-200">${ord.units} ${data.symbol.replace('USDT','')}</td>
                   <td class="p-2.5 text-amber-400 font-semibold">$${Number(ord.margin).toFixed(2)}</td>
+                  <td class="p-2.5"><span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-violet-950 text-violet-300 border border-violet-800">${ord.leverage || pos.leverage || '--'}x</span></td>
                   <td class="p-2.5 font-bold ${pnlColor}">
-                    ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${roe >= 0 ? '+' : ''}${roe.toFixed(2)}%)
+                    ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${roe >= 0 ? '+' : ''}${roe.toFixed(2)}%)<br><span class="text-[10px] text-gray-400 font-normal" title="Net thuc nhan sau phi">net ${netSlice >= 0 ? '+' : ''}$${netSlice.toFixed(2)}</span>
                   </td>
                   <td class="p-2.5 text-gray-400 text-[11px] mono whitespace-nowrap" title="${ord.entry_time || ''}">${timeDisplay}</td>
                   <td class="p-2.5 text-center">
@@ -5081,7 +5085,7 @@
         if (posOrdersBody) posOrdersBody.innerHTML = posOrders.map(order => {
           const sId = order.order_id ? `#${order.order_id}` : (order.slice_id ? `#${String(order.slice_id).slice(-8)}` : '#ORD');
           const fullId = order.slice_id || order.order_id || '';
-          return `<tr><td colspan="2" class="p-2 text-amber-300 mono cursor-help" title="${fullId}">${sId}</td><td class="p-2">GRID</td><td class="p-2 ${order.direction === 1 ? 'text-emerald-400' : 'text-rose-400'}">${order.direction === 1 ? 'LONG' : 'SHORT'}</td><td class="p-2">$${Number(order.entry_price).toFixed(2)}</td><td class="p-2">${order.units}</td><td class="p-2">$${Number(order.margin).toFixed(2)}</td><td class="p-2 ${order.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${order.unrealized_pnl >= 0 ? '+' : ''}$${Number(order.unrealized_pnl || 0).toFixed(2)}</td><td colspan="2" class="p-2 text-gray-500">Protected</td></tr>`;
+          return `<tr><td colspan="2" class="p-2 text-amber-300 mono cursor-help" title="${fullId}">${sId}</td><td class="p-2">GRID</td><td class="p-2 ${order.direction === 1 ? 'text-emerald-400' : 'text-rose-400'}">${order.direction === 1 ? 'LONG' : 'SHORT'}</td><td class="p-2">$${Number(order.entry_price).toFixed(2)}</td><td class="p-2">${order.units}</td><td class="p-2">$${Number(order.margin).toFixed(2)}</td><td class="p-2"><span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-violet-950 text-violet-300 border border-violet-800">${order.leverage || '--'}x</span></td><td class="p-2 ${order.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${order.unrealized_pnl >= 0 ? '+' : ''}$${Number(order.unrealized_pnl || 0).toFixed(2)}</td><td colspan="2" class="p-2 text-gray-500">Protected</td></tr>`;
         }).join('');
       } else {
         if (dockPosCount) {
@@ -7033,6 +7037,7 @@
         th_entry: "Giá Vào",
         th_size: "Khối Lượng",
         th_margin: "Ký Quỹ",
+        th_leverage: "Đòn Bẩy",
         th_pnl_roe: "PnL Chưa Chốt (ROE %)",
         th_time: "Thời Gian Vào",
         th_actions: "Thao Tác",
@@ -7692,6 +7697,7 @@
         th_entry: "Entry Price",
         th_size: "Size",
         th_margin: "Margin",
+        th_leverage: "Leverage",
         th_pnl_roe: "Unrealized PnL (ROE %)",
         th_time: "Entry Time",
         th_actions: "Actions",
@@ -7904,7 +7910,7 @@
         th_entry_price: "ENTRY",
         th_amount: "SIZE",
         th_margin: "MARGIN",
-        th_leverage: "LEV",
+        th_leverage: "Leverage",
         th_pnl: "UNREALIZED PNL",
         th_status: "STATUS",
         th_actions: "ACTIONS",

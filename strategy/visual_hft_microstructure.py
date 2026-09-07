@@ -41,7 +41,7 @@ class VisualHFTMetrics:
     completed_bucket_count: int = 0
     vpin_percentile: float = 0.0           # No historical percentile estimated yet.
     toxicity_regime: str = "WARMUP"
-    is_toxic_flow: bool = False             # Cảnh báo khẩn cấp khi VPIN > 0.65
+    is_toxic_flow: bool = False             # Cảnh báo khẩn cấp khi VPIN >= 0.70 (toxic_vpin_threshold)
 
     # 2. Weighted LOB Imbalance
     lob_imbalance_top1: float = 0.0         # Tầng 1 (Best Bid/Ask) [-1.0, 1.0]

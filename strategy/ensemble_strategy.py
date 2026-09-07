@@ -335,6 +335,14 @@ class EnsembleCoordinator:
             v_sweep.weight = max(0.05, v_sweep.weight - 0.05)
             v_reversion.weight = max(0.05, v_reversion.weight - 0.05)
 
+        # Chuan hoa lai tong trong so ve 1.0 (fine-tune tren cong/tru truc tiep lam tong lech 0.90-1.10)
+        total_w = v_trend.weight + v_candle.weight + v_reversion.weight + v_sweep.weight
+        if total_w > 0:
+            v_trend.weight /= total_w
+            v_candle.weight /= total_w
+            v_reversion.weight /= total_w
+            v_sweep.weight /= total_w
+
         # Calculate Weighted Consensus Score (-100 to +100)
         consensus_score = (
             (v_trend.score * v_trend.weight) +
@@ -354,10 +362,22 @@ class EnsembleCoordinator:
             verdict = "STRONG_SHORT"
             confidence = int(min(98, 60 + (abs(consensus_score) * 0.4)))
             rationale = f"Đồng thuận Đa Chiến Lược & Đa Khung Nến: {consensus_score:+.1f} điểm SHORT. {candle_res.confluence_verdict}."
+        elif consensus_score >= 30.0:
+            # Vung chuyen tiep: tranh nhay bac 44.9 GRID / 45.0 STRONG (size nho, doi council quyet)
+            direction = 1
+            verdict = "WEAK_LONG"
+            confidence = int(min(70, 55 + (consensus_score - 30.0) * 1.0))
+            rationale = f"Thien huong Long yeu ({consensus_score:+.1f} diem, vung chuyen tiep). Can council xac nhan, size tham do."
+        elif consensus_score <= -30.0:
+            direction = -1
+            verdict = "WEAK_SHORT"
+            confidence = int(min(70, 55 + (abs(consensus_score) - 30.0) * 1.0))
+            rationale = f"Thien huong Short yeu ({consensus_score:+.1f} diem, vung chuyen tiep). Can council xac nhan, size tham do."
         else:
             direction = 0
             verdict = "SIDEWAY_GRID"
-            confidence = 88
+            # Confidence scale theo do trung tinh nhung tran thap hon: tin hieu yeu khong duoc hien thi tu tin
+            confidence = int(max(55, min(75, 75 - abs(consensus_score) * 0.4)))
             rationale = f"Điểm số đa chiến lược ở mức trung tính ({consensus_score:+.1f} điểm). AI điều phối kích hoạt Bot Lưới cân đối 10 tầng để thu gom lợi nhuận sideway."
 
         return EnsembleResult(

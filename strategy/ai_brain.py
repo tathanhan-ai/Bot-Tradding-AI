@@ -90,16 +90,17 @@ class AIQuantBrain:
         tr = np.maximum(high - low, np.maximum(abs(high - close.shift(1)), abs(low - close.shift(1))))
         atr = float(tr.ewm(alpha=1/14, adjust=False).mean().iloc[-1])
 
-        # ADX (Directional Movement)
+        # ADX Wilder (Directional Movement lam muot dung: +DI/-DI smoothed 14 ky roi moi ra DX/ADX)
         up_move = high.diff()
         down_move = -low.diff()
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        tr_sum = tr.rolling(14).sum().iloc[-1]
-        plus_di = (pd.Series(plus_dm).rolling(14).sum().iloc[-1] / max(tr_sum, 1e-6)) * 100
-        minus_di = (pd.Series(minus_dm).rolling(14).sum().iloc[-1] / max(tr_sum, 1e-6)) * 100
-        dx = (abs(plus_di - minus_di) / max(plus_di + minus_di, 1e-6)) * 100
-        adx = float(min(100.0, max(0.0, dx)))
+        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
+        minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
+        atr_w = tr.ewm(alpha=1 / 14, adjust=False).mean()
+        plus_di = 100 * (plus_dm.ewm(alpha=1 / 14, adjust=False).mean() / atr_w.replace(0, np.nan))
+        minus_di = 100 * (minus_dm.ewm(alpha=1 / 14, adjust=False).mean() / atr_w.replace(0, np.nan))
+        dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan))
+        adx_raw = float(dx.ewm(alpha=1 / 14, adjust=False).mean().iloc[-1])
+        adx = float(min(100.0, max(0.0, adx_raw))) if np.isfinite(adx_raw) else 0.0
 
         # Choppiness Index (CHOP)
         tr_14 = tr.rolling(14).sum().iloc[-1]

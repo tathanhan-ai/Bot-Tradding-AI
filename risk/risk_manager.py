@@ -71,22 +71,47 @@ class FuturesRiskManager:
         if daily_loss >= self.config.daily_max_loss_pct:
             self.circuit_breaker_active = True
 
+    # Binance USD(S)-M position brackets (BTCUSDT, notional USDT):
+    # (upper_notional, mmr). Tier 1 ~0.40%, tang dan theo bac de tranh danh gia thap liq khi lenh lon.
+    MMR_BRACKETS = (
+        (5_000_000, 0.004),
+        (25_000_000, 0.005),
+        (50_000_000, 0.010),
+        (250_000_000, 0.025),
+        (float("inf"), 0.050),
+    )
+
+    @classmethod
+    def mmr_for_notional(cls, notional_usdt: float) -> float:
+        for upper, mmr in cls.MMR_BRACKETS:
+            if notional_usdt <= upper:
+                return mmr
+        return 0.050
+
     def calculate_liquidation_price(
         self,
         entry_price: float,
         direction: int,
         leverage: int,
-        mmr: float = 0.005 # Maintenance margin rate ~ 0.5% on Binance Tier 1
+        mmr: float = 0.0,  # 0 = tu tra theo bac notional (entry * leverage)
+        notional_usdt: float = 0.0,
+        taker_fee_rate: float = 0.0005,  # tru phi dong/mo uoc tinh de liq bao thu hon
     ) -> float:
         """
-        Estimate Isolated liquidation price on Binance Futures
+        Estimate Isolated liquidation price on Binance Futures.
+        Liq = Entry * (1 -/+ 1/leverage + MMR + phi) de phan anh chi phi that.
         """
+        lev = max(1, int(leverage))
+        if mmr <= 0:
+            base_notional = notional_usdt if notional_usdt > 0 else entry_price * lev
+            mmr = self.mmr_for_notional(base_notional)
+        cushion = mmr + taker_fee_rate
         if direction == 1:  # LONG
-            # Liq = Entry * (1 - 1/leverage + mmr)
-            return max(0.0, entry_price * (1.0 - (1.0 / leverage) + mmr))
+            # Liq = Entry * (1 - 1/leverage + mmr + phi)
+            return max(0.0, entry_price * (1.0 - (1.0 / lev) + cushion))
         else:  # SHORT
-            # Liq = Entry * (1 + 1/leverage - mmr)
-            return entry_price * (1.0 + (1.0 / leverage) - mmr)
+            # Liq = Entry * (1 + 1/leverage - mmr - phi)
+            return entry_price * (1.0 + (1.0 / lev) - cushion)
 
     def evaluate_order(
         self,

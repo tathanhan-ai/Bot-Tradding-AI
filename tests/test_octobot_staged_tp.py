@@ -63,9 +63,19 @@ class TestOctoBotStagedTP(unittest.TestCase):
         self.assertIsNotNone(setup.staged_tp)
 
     def test_server_state_contains_valid_staged_tp(self):
-        state = LiveTradingState()
-        state.live_price = 85000.0
-        data = state.get_state_dict()
+        # Dung state sach (khong vi the live) de tranh nhiem state live ban (VD dang co SHORT that
+        # entry ~79k trong khi test dat live_price gia 85k -> TP tinh tu entry that, so sanh sai).
+        import tempfile
+        from pathlib import Path
+        from data.persistent_storage import PersistentStorageManager
+        tmp = tempfile.TemporaryDirectory(prefix="octo-staged-")
+        try:
+            state = LiveTradingState(storage=PersistentStorageManager(Path(tmp.name) / "db.sqlite", Path(tmp.name) / "backup.json"))
+            state.live_price = 85000.0
+            state.current_position = None
+            data = state.get_state_dict()
+        finally:
+            tmp.cleanup()
         self.assertIn("octobot", data)
         self.assertIn("staged_tp", data["octobot"])
         tp = data["octobot"]["staged_tp"]

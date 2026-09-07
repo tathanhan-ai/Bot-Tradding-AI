@@ -36,6 +36,8 @@ class SwarmCouncilVerdict:
     availability_reason: str = ""
     order_id: str = ""
     snapshot_id: str = ""
+    can_negotiate: bool = False
+    rejection_categories: Dict[str, List[str]] = field(default_factory=dict)
 
     @property
     def approved(self) -> bool:
@@ -77,6 +79,8 @@ class VibeSwarmCouncil:
         self.last_completed_at = 0.0
         self._background_pending = False
         self._background_lock = threading.Lock()
+        self._queued_kwargs: Dict[str, Any] = {}
+        self._has_queued = False
 
     @property
     def latest_verdict(self) -> Optional[SwarmCouncilVerdict]:
@@ -184,6 +188,19 @@ class VibeSwarmCouncil:
 
         approvals = sum(vote.vote == "APPROVE" for vote in votes)
         passed = approvals >= self.min_votes_required
+        rejection_categories: Dict[str, List[str]] = {
+            "risk": [],
+            "macro": [],
+            "execution": [],
+            "quant": []
+        }
+        if not passed:
+            for v in votes:
+                if v.vote == "REJECT":
+                    agent = v.agent_id.lower()
+                    cat = "risk" if "risk" in agent else ("macro" if "macro" in agent else ("execution" if ("exec" in agent or "execution" in agent) else "quant"))
+                    rejection_categories[cat].append(v.thesis)
+
         verdict = SwarmCouncilVerdict(
             council_verdict="APPROVED" if passed else "REJECTED",
             consensus_passed=passed,
@@ -193,6 +210,8 @@ class VibeSwarmCouncil:
             council_rationale=f"Independent council: {approvals}/4 APPROVE votes (threshold {self.min_votes_required}/4).",
             timestamp=datetime.now().strftime("%H:%M:%S"),
             available=True,
+            can_negotiate=not passed,
+            rejection_categories=rejection_categories,
         )
         self.last_verdict = verdict
         self.last_completed_at = time.time()
@@ -206,17 +225,31 @@ class VibeSwarmCouncil:
             return self._unavailable_verdict("AI Council disabled")
         with self._background_lock:
             if self._background_pending:
+                # Giữ lại yêu cầu mới nhất thay vì drop: đánh dấu pending để worker lấy sau khi xong
+                self._queued_kwargs = kwargs
+                self._has_queued = True
                 return None
             self._background_pending = True
 
-        def run() -> None:
+        def run(first_kwargs: Dict[str, Any]) -> None:
             try:
-                self.evaluate_council(**kwargs)
+                self.evaluate_council(**first_kwargs)
             finally:
                 with self._background_lock:
-                    self._background_pending = False
+                    queued = self._has_queued
+                    next_kwargs = self._queued_kwargs
+                    self._queued_kwargs = {}
+                    self._has_queued = False
+                    if not queued:
+                        self._background_pending = False
+            if queued:
+                try:
+                    self.evaluate_council(**next_kwargs)
+                finally:
+                    with self._background_lock:
+                        self._background_pending = False
 
-        threading.Thread(target=run, name="vibe-council-async", daemon=True).start()
+        threading.Thread(target=run, args=(kwargs,), name="vibe-council-async", daemon=True).start()
         return None
 
     def _role_contexts(
@@ -231,6 +264,11 @@ class VibeSwarmCouncil:
         jesse_metrics: Any,
         octobot_metrics: Any,
     ) -> Dict[str, Dict[str, Any]]:
+        tactical_formation = getattr(order_research, "tactical_formation", "DEFENSIVE_SNIPER") if order_research else "DEFENSIVE_SNIPER"
+        staged_exits = getattr(order_research, "staged_exits", []) if order_research else []
+        sleeve_allocation = getattr(order_research, "sleeve_allocation", {}) if order_research else {}
+        fee_tier = getattr(order_research, "fee_tier", "MAKER (0.02%)") if order_research else "MAKER (0.02%)"
+
         order = {
             "side": getattr(order_research, "recommended_side", "UNKNOWN"),
             "type": getattr(order_research, "recommended_type", "UNKNOWN"),
@@ -240,6 +278,10 @@ class VibeSwarmCouncil:
             "risk_reward": getattr(order_research, "rr_ratio", 0.0),
             "leverage": getattr(order_research, "optimal_leverage", 0),
             "margin": getattr(order_research, "optimal_margin", 0.0),
+            "tactical_formation": tactical_formation,
+            "staged_exits": staged_exits,
+            "sleeve_allocation": sleeve_allocation,
+            "fee_tier": fee_tier,
         }
         def serialise(value: Any) -> Dict[str, Any]:
             return asdict(value) if value and hasattr(value, "__dataclass_fields__") else {}
@@ -250,6 +292,8 @@ class VibeSwarmCouncil:
                 "mtf_radar": getattr(ai_verdict, "mtf_radar", {}),
                 "ensemble": {"score": getattr(ensemble_result, "consensus_score", 0.0), "verdict": getattr(ensemble_result, "consensus_verdict", "UNKNOWN")},
                 "octobot": {"state": getattr(octobot_metrics, "consensus_state", "UNKNOWN"), "direction": getattr(octobot_metrics, "recommended_direction", 0)},
+                "tactical_formation": tactical_formation,
+                "proposed_side": order["side"],
             },
             "quant": {
                 "price": current_price,
@@ -257,16 +301,20 @@ class VibeSwarmCouncil:
                 "alpha_zoo": serialise(alpha_zoo_metrics),
                 "order_flow": {"vpin": getattr(visual_hft_metrics, "vpin", None), "lob_imbalance_20": getattr(visual_hft_metrics, "lob_imbalance_20", None)},
                 "proposed_side": order["side"],
+                "tactical_formation": tactical_formation,
             },
             "risk": {
                 "order": order,
                 "jesse": serialise(jesse_metrics),
                 "risk_status": {"consecutive_losses": getattr(jesse_metrics, "current_consecutive_losses", 0), "expectancy": getattr(jesse_metrics, "expectancy_usdt", 0.0)},
+                "tactical_formation": tactical_formation,
+                "sleeve_allocation": sleeve_allocation,
             },
             "execution": {
-                "order": {key: order[key] for key in ("side", "type", "entry", "leverage", "margin")},
+                "order": order,
                 "microstructure": {"vpin": getattr(visual_hft_metrics, "vpin", None), "resilience": getattr(visual_hft_metrics, "market_resilience_pct", None), "lob_imbalance_20": getattr(visual_hft_metrics, "lob_imbalance_20", None)},
                 "carver": getattr(order_research, "carver_output", {}),
+                "fee_tier": fee_tier,
             },
         }
 

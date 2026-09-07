@@ -16,7 +16,9 @@ class RiskConfig:
     risk_per_trade_pct: float = 0.015  # 1.5% balance risk per trade
     max_account_risk_pct: float = 0.05 # Max 5% total open risk across all positions
     default_leverage: int = 3          # Default leverage 3x (safe zone)
-    max_leverage: int = 5              # Hard cap leverage
+    # TRAN CUNG DUY NHAT toan he thong: dynamic engine, governor profile, sizing gate
+    # deu phai min(ket qua, max_leverage). Doi o day la doi khap noi, hien thi trong UI.
+    max_leverage: int = 5              # Hard cap leverage (single source of truth)
     daily_max_loss_pct: float = 0.04   # Circuit breaker: stop bot if daily loss >= 4%
 
 @dataclass

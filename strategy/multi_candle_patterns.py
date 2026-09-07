@@ -364,7 +364,9 @@ class MultiTimeframeCandleStrategyEngine:
         elif macro_bias == "BEARISH" and ((p_15m and p_15m.bias == "BULLISH") or (p_5m and p_5m.bias == "BULLISH")):
             macro_alignment = False
 
-        # Determine tactical timeframe from the clearest/strongest pattern
+        # Determine tactical timeframe from the clearest/strongest pattern.
+        # Ha nguong 65 -> 55 de khung tac chien kich hoat duoc (Tweezer 78, Engulfing 75-95
+        # van qua; Inside Bar 60 van qua khi thuan huong; chi nen thuong 40 bi loai).
         target_bias = "BULLISH" if weighted_score > 0 else ("BEARISH" if weighted_score < 0 else None)
         tactical_tf = active_timeframe or "15m"
         best_str = 0.0
@@ -372,7 +374,7 @@ class MultiTimeframeCandleStrategyEngine:
         if target_bias:
             for tf_cand in candidate_tfs:
                 p_cand = patterns.get(tf_cand)
-                if p_cand and p_cand.bias == target_bias and p_cand.strength > best_str and p_cand.strength >= 65.0:
+                if p_cand and p_cand.bias == target_bias and p_cand.strength > best_str and p_cand.strength >= 55.0:
                     best_str = p_cand.strength
                     tactical_tf = tf_cand
 

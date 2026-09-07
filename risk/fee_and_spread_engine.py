@@ -125,6 +125,15 @@ class SpreadFeeEngine:
         rate = self.maker_fee_rate if is_maker else self.taker_fee_rate
         return round(notional * rate, 4)
 
+    def unit_risk_with_fees(self, entry_price: float, stop_distance: float) -> float:
+        """
+        Risk that don vi (USDT/don vi) dung chung cho sizing_gate va submit:
+        stop_distance + phi mo + phi dong uoc tinh theo taker (bao thu).
+        Thay the hai kieu cu lech nhau: sizing (2*taker+0.0004) va submit (0.0014 cung).
+        """
+        fee_per_unit = entry_price * (2.0 * self.taker_fee_rate)
+        return max(0.0, stop_distance) + fee_per_unit
+
     def calculate_breakeven_price(
         self,
         entry_price: float,
