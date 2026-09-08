@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 
+from strategy.ninerouter_key import VibeSwarmCouncilKeyLoader
+
 
 @dataclass
 class AICopilotVerdict:
@@ -49,11 +51,16 @@ class AIModelCopilot:
         self.gateway_url = gateway_url.rstrip("/")
         self.default_model = default_model if default_model not in ("gemini-2.0-flash", "gemini-2.5-flash", "") else "ag/gemini-3.8-flash"
         import os
-        self.api_key = api_key or os.environ.get("NINEROUTER_API_KEY", "sk-b4a922a69924f20a-b6s8st-780e9a2f")
+        # P0: khong key cung trong source. Key lay tu tham so > settings (UI) > moi truong.
+        self.api_key = api_key or VibeSwarmCouncilKeyLoader.load() or os.environ.get("NINEROUTER_API_KEY")
         self.timeout_sec = timeout_sec
         self.last_verdict: Optional[AICopilotVerdict] = None
         self.user_instruction: str = ""
         self.is_active: bool = True
+
+    def refresh_api_key(self, api_key: Optional[str] = None) -> None:
+        import os
+        self.api_key = api_key or VibeSwarmCouncilKeyLoader.load() or os.environ.get("NINEROUTER_API_KEY")
 
     def set_user_instruction(self, instruction: str):
         self.user_instruction = instruction.strip()

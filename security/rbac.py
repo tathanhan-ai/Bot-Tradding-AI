@@ -119,7 +119,18 @@ class AuthManager:
         token = token.strip()
         if token.startswith("Bearer "):
             token = token[len("Bearer "):].strip()
-        return self.sessions.get(token)
+        session = self.sessions.get(token)
+        if session is None:
+            return None
+        # Het han sau 12 gio
+        if time.time() - session.created_at > 12 * 3600:
+            self.sessions.pop(token, None)
+            return None
+        return session
+
+    def revoke_token(self, token: Optional[str]) -> None:
+        if token:
+            self.sessions.pop(token.strip(), None)
 
     def authenticate(self, token: Optional[str]) -> Optional[UserSession]:
         return self.authenticate_token(token)

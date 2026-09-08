@@ -71,7 +71,9 @@ class VibeSwarmCouncil:
         self.gateway_url = gateway_url.rstrip("/")
         self.default_model = default_model
         import os
-        self.api_key = api_key or os.environ.get("NINEROUTER_API_KEY", "sk-b4a922a69924f20a-b6s8st-780e9a2f")
+        # P0: khong key cung trong source. Key lay tu tham so > settings (UI) > moi truong.
+        # Thieu key -> AI_REQUIRED tu choi entry (fail-closed), chi chay deterministic khi dat ro mode.
+        self.api_key = api_key or self._load_key_from_settings() or os.environ.get("NINEROUTER_API_KEY")
         self.min_votes_required = max(2, min(4, min_votes_required))
         self.enabled = enabled
         self.agent_models = {agent_id: default_model for agent_id in self.AGENT_META}
@@ -97,6 +99,19 @@ class VibeSwarmCouncil:
     @consensus_threshold.setter
     def consensus_threshold(self, value: int) -> None:
         self.min_votes_required = max(2, min(4, int(value)))
+
+    @staticmethod
+    def _load_key_from_settings() -> Optional[str]:
+        # Doc key 9Router do nguoi dung nhap trong Settings (luu qua SecretProvider, khong trong source).
+        try:
+            from strategy.ninerouter_key import load_ninerouter_key
+            return load_ninerouter_key()
+        except Exception:
+            return None
+
+    def refresh_api_key(self, api_key: Optional[str] = None) -> None:
+        import os
+        self.api_key = api_key or self._load_key_from_settings() or os.environ.get("NINEROUTER_API_KEY")
 
     def update_config(
         self,
