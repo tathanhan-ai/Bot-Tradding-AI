@@ -2741,32 +2741,69 @@ async def websocket_endpoint(websocket: WebSocket):
         connected_clients.discard(websocket)
 
 
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard(request: Request):
-    token = request.cookies.get("desk_token")
+    # P0: khong tu cap ADMIN token. Chua login -> trang login, khong inject token vao JS.
+    token = request.cookies.get("desk_session")
     session = get_auth_manager().authenticate_token(token)
     if not session:
-        admin_sessions = [s for s in get_auth_manager().sessions.values() if s.role == Role.ADMIN]
-        token = admin_sessions[0].token if admin_sessions else "desk-local-token"
+        login_html = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>Login - Trading Desk</title></head>
+        <body style="background:#0b0e13;color:#e5e7eb;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh">
+        <form method="post" action="/auth/login" style="background:#111827;padding:32px;border-radius:12px;border:1px solid #374151">
+        <h2>Trading Desk Login</h2>
+        <input name="token" type="password" placeholder="Desk token" style="padding:10px;width:280px;background:#030712;color:#fff;border:1px solid #374151;border-radius:6px"/>
+        <button type="submit" style="padding:10px 18px;margin-left:8px;background:#059669;color:#fff;border:none;border-radius:6px">Login</button>
+        </form></body></html>"""
+        return HTMLResponse(content=login_html)
 
     with open(TEMPLATE_PATH, "r", encoding="utf-8") as f:
         html = f.read()
 
-    if "</head>" in html:
-        html = html.replace("</head>", f'<script>window.__DESK_TOKEN__ = "{token}";</script></head>')
-
     resp = HTMLResponse(content=html)
-    resp.set_cookie("desk_token", token, httponly=False, samesite="strict")
+    return resp
+
+
+@app.post("/auth/login")
+async def auth_login(request: Request):
+    # Login local: nhan token (tu Settings hoac bien moi truong), tao session cookie HttpOnly.
+    form = await request.form()
+    token = str(form.get("token", "") or "").strip()
+    if not token:
+        try:
+            body = await request.json()
+            token = str(body.get("token", "") or "").strip()
+        except Exception:
+            token = ""
+    session = get_auth_manager().authenticate_token(token)
+    if not session:
+        raise HTTPException(status_code=401, detail="Invalid desk token")
+    resp = HTMLResponse(content='<html><head><meta http-equiv="refresh" content="0;url=/"></head><body>OK</body></html>')
+    resp.set_cookie("desk_session", token, httponly=True, samesite="strict")
+    return resp
+
+
+@app.post("/auth/logout")
+async def auth_logout(request: Request):
+    token = request.cookies.get("desk_session")
+    if token:
+        get_auth_manager().revoke_token(token)
+    resp = HTMLResponse(content='<html><head><meta http-equiv="refresh" content="0;url=/"></head><body>Logged out</body></html>')
+    resp.delete_cookie("desk_session")
     return resp
 
 
 @app.get("/api/state")
-async def get_state():
+async def get_state(session: UserSession = Depends(require_role(Role.VIEWER))):
     return state.get_state_dict()
 
 
 @app.get("/api/storage/telemetry")
-async def get_storage_telemetry():
+async def get_storage_telemetry(session: UserSession = Depends(require_role(Role.VIEWER))):
     return state.storage.get_storage_telemetry()
 
 
@@ -2791,7 +2828,7 @@ def get_klines(symbol: Optional[str] = None, interval: str = "15m", limit: int =
 
 @app.post("/api/action/toggle")
 @serialized_action
-def toggle_bot():
+def toggle_bot(session: UserSession = Depends(require_role(Role.OPERATOR))):
     state.is_running = not state.is_running
     return {"status": "ok", "is_running": state.is_running}
 
@@ -2905,7 +2942,7 @@ def toggle_grid(session: UserSession = Depends(require_role(Role.OPERATOR))):
 
 @app.post("/api/action/ai_copilot_reason")
 @serialized_action
-def ai_copilot_reason(instruction: Optional[str] = None):
+def ai_copilot_reason(instruction: Optional[str] = None, session: UserSession = Depends(require_role(Role.OPERATOR))):
     if instruction:
         state.ai_copilot.set_user_instruction(instruction)
     
@@ -2926,7 +2963,7 @@ def ai_copilot_reason(instruction: Optional[str] = None):
 
 
 @app.post("/api/action/set_ai_copilot_instruction")
-async def set_ai_copilot_instruction(instruction: str = ""):
+async def set_ai_copilot_instruction(instruction: str = "", session: UserSession = Depends(require_role(Role.ADMIN))):
     state.ai_copilot.set_user_instruction(instruction)
     state.storage.save_setting("ai_copilot_user_instruction", instruction)
     print(f"💬 [USER INSTRUCTION] Tiếp nhận chỉ thị từ người dùng & lưu SQLite: '{instruction}'", flush=True)
@@ -2935,7 +2972,7 @@ async def set_ai_copilot_instruction(instruction: str = ""):
 
 
 @app.post("/api/action/set_active_tab")
-async def set_active_tab(tab: str = "intel-copilot"):
+async def set_active_tab(tab: str = "intel-copilot", session: UserSession = Depends(require_role(Role.OPERATOR))):
     state.storage.save_setting("active_intel_tab", tab)
     return {"status": "ok", "active_tab": tab}
 
@@ -2948,7 +2985,7 @@ async def get_ai_models():
 
 
 @app.post("/api/action/set_ai_model")
-async def set_ai_model(model: str = "ag/gemini-3.8-flash-high"):
+async def set_ai_model(model: str = "ag/gemini-3.8-flash-high", session: UserSession = Depends(require_role(Role.ADMIN))):
     state.ai_copilot.set_model(model)
     state.storage.save_setting("ai_copilot_model", state.ai_copilot.default_model)
     print(f"🤖 [AI COPILOT] Đã chuyển sang mô hình AI: {state.ai_copilot.default_model} và lưu vĩnh viễn vào SQLite", flush=True)
@@ -2970,7 +3007,7 @@ def place_custom_order(
     callback_pct: float = 0.8,
     twap_slices: int = 5,
     twap_interval_ticks: int = 6
-):
+, session: UserSession = Depends(require_role(Role.OPERATOR))):
     """
     Supports all 7 professional order types:
     MARKET, LIMIT, POST_ONLY, CONDITIONAL, TRAILING_STOP, TWAP, SCALE_RATIO
@@ -3004,7 +3041,7 @@ def place_custom_order(
 
 @app.post("/api/action/cancel_order")
 @serialized_action
-def cancel_order(order_id: int):
+def cancel_order(order_id: int, session: UserSession = Depends(require_role(Role.OPERATOR))):
     target = next((o for o in state.order_manager.pending_orders if o.order_id == order_id), None)
     if not target:
         return {"status": "not_found"}
@@ -3026,13 +3063,13 @@ def update_pending_order(
     take_profit: Optional[float] = None,
     leverage: Optional[int] = None,
     callback_pct: Optional[float] = None
-):
+, session: UserSession = Depends(require_role(Role.OPERATOR))):
     return state.replace_pending(order_id, price=price, units=units, margin=margin, timeframe=timeframe, order_type=order_type, side=side, trigger_price=trigger_price, stop_loss=stop_loss, take_profit=take_profit, leverage=leverage, callback_pct=callback_pct)
 
 
 @app.post("/api/action/execute_pending_order")
 @serialized_action
-def execute_pending_order(order_id: int):
+def execute_pending_order(order_id: int, session: UserSession = Depends(require_role(Role.OPERATOR))):
     return state.replace_pending(order_id, execute_now=True)
 
 
@@ -3044,7 +3081,7 @@ class UpdateTpSlRequest(BaseModel):
 
 @app.post("/api/action/update_position_tp_sl")
 @serialized_action
-def update_position_tp_sl(req: UpdateTpSlRequest):
+def update_position_tp_sl(req: UpdateTpSlRequest, session: UserSession = Depends(require_role(Role.OPERATOR))):
     if not state.current_position:
         raise HTTPException(status_code=400, detail="Không có vị thế nào đang mở!")
 
@@ -3067,7 +3104,7 @@ def update_position_tp_sl(req: UpdateTpSlRequest):
 
 @app.post("/api/action/close_order_slice")
 @serialized_action
-def close_order_slice(slice_id: str):
+def close_order_slice(slice_id: str, session: UserSession = Depends(require_role(Role.OPERATOR))):
     if not state.current_position:
         raise HTTPException(status_code=400, detail="Không có vị thế nào đang mở!")
 
@@ -3087,7 +3124,7 @@ def update_order_slice(
     margin: Optional[float] = None,
     timeframe: Optional[str] = None,
     order_type: Optional[str] = None
-):
+, session: UserSession = Depends(require_role(Role.OPERATOR))):
     if not state.current_position:
         raise HTTPException(status_code=400, detail="Không có vị thế nào đang mở!")
 
@@ -3107,7 +3144,7 @@ def update_order_slice(
 
 @app.post("/api/action/set_timeframe")
 @serialized_action
-def set_timeframe(timeframe: str = "15m"):
+def set_timeframe(timeframe: str = "15m", session: UserSession = Depends(require_role(Role.OPERATOR))):
     tf = timeframe.strip()
     if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"):
         return {"status": "error", "message": f"Khung thời gian '{timeframe}' không hợp lệ"}
@@ -3139,7 +3176,7 @@ def set_timeframe(timeframe: str = "15m"):
 
 @app.post("/api/action/place_dual_bracket")
 @serialized_action
-def place_dual_bracket():
+def place_dual_bracket(session: UserSession = Depends(require_role(Role.OPERATOR))):
     res = state.order_research
     if not res:
         return {"status": "error", "message": "Nghiên cứu AI chưa sẵn sàng"}
@@ -3169,7 +3206,7 @@ def place_dual_bracket():
 
 @app.post("/api/action/partial_close")
 @serialized_action
-def partial_close(ratio: float = 0.5):
+def partial_close(ratio: float = 0.5, session: UserSession = Depends(require_role(Role.OPERATOR))):
     if not math.isfinite(ratio) or not 0 < ratio <= 1:
         return {"status": "rejected", "reason": "Ratio must be in (0, 1]"}
     if not state.current_position:
@@ -3180,7 +3217,7 @@ def partial_close(ratio: float = 0.5):
 
 @app.post("/api/action/lock_breakeven")
 @serialized_action
-def lock_breakeven():
+def lock_breakeven(session: UserSession = Depends(require_role(Role.OPERATOR))):
     if not state.current_position:
         return {"status": "error", "message": "Không có vị thế nào đang mở"}
     ok = state.lock_breakeven_now()
@@ -3189,7 +3226,7 @@ def lock_breakeven():
 
 @app.post("/api/action/set_risk_pct")
 @serialized_action
-def set_risk_pct(risk_pct: float = 1.5):
+def set_risk_pct(risk_pct: float = 1.5, session: UserSession = Depends(require_role(Role.OPERATOR))):
     clamped = max(0.2, min(5.0, risk_pct))
     state.risk_manager.ai_cro.user_risk_pct = clamped
     regime = state.ai_verdict.regime if state.ai_verdict else "BALANCED"
@@ -3249,7 +3286,7 @@ async def get_settings():
 
 
 @app.post("/api/settings/update_monthly_target")
-async def update_monthly_target(payload: dict):
+async def update_monthly_target(payload: dict, session: UserSession = Depends(require_role(Role.ADMIN))):
     profile = str(payload.get("profile", payload.get("profile_name", ""))).strip().lower() or None
     target_pct = payload.get("target_pct", None)
     target_pct = float(target_pct) if target_pct is not None else None
@@ -3357,6 +3394,54 @@ def save_api_keys(payload: dict, request: Request, session: UserSession = Depend
         return {"status": "ok", "message": "Đã lưu thông tin API Binance an toàn vào SecretProvider!"}
 
 
+@app.get("/api/settings/ninerouter_key_status")
+async def ninerouter_key_status(session: UserSession = Depends(require_role(Role.ADMIN))):
+    # Chi tra ve trang thai co/khong key, KHONG bao gio tra key that.
+    has_env = bool(os.environ.get("NINEROUTER_API_KEY"))
+    has_settings = False
+    try:
+        from strategy.ninerouter_key import load_ninerouter_key
+        has_settings = bool(load_ninerouter_key())
+    except Exception:
+        pass
+    return {"status": "ok", "has_env_key": has_env, "has_settings_key": has_settings,
+            "council_key_set": bool(getattr(state.vibe_swarm, "api_key", "")),
+            "copilot_key_set": bool(getattr(state.ai_copilot, "api_key", ""))}
+
+
+@app.post("/api/settings/save_ninerouter_key")
+@serialized_action
+def save_ninerouter_key(payload: dict, request: Request, session: UserSession = Depends(require_role(Role.ADMIN))):
+    # P0: key 9Router do nguoi dung nhap trong Settings (local), luu qua SecretProvider.
+    verify_trusted_origin(request, ALLOWED_ORIGINS)
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    if not get_rate_limiter().is_allowed(f"ninekey_{client_ip}", max_requests=5, window_seconds=60.0):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded for credential updates")
+    new_key = str(payload.get("api_key", payload.get("ninerouter_api_key", ""))).strip()
+    if not new_key or "*" in new_key:
+        raise HTTPException(status_code=422, detail="API key khong hop le")
+    state.storage.save_setting("ninerouter_api_key", new_key)
+    try:
+        state.vibe_swarm.refresh_api_key(new_key)
+    except Exception:
+        pass
+    try:
+        state.ai_copilot.refresh_api_key(new_key)
+    except Exception:
+        pass
+    get_audit_logger().log(
+        actor_id=session.user_id,
+        role=session.role.value,
+        action="SAVE_NINEROUTER_KEY",
+        resource="ai/9router",
+        request_id=f"req-{uuid.uuid4().hex[:8]}",
+        result="SUCCESS",
+        source_ip=client_ip,
+        parameters={}
+    )
+    return {"status": "ok", "message": "Đã lưu 9Router API key vào Settings an toàn!"}
+
+
 @app.post("/api/settings/set_decision_mode")
 @serialized_action
 def set_decision_mode(payload: dict, request: Request, session: UserSession = Depends(require_role(Role.ADMIN))):
@@ -3380,54 +3465,19 @@ def set_decision_mode(payload: dict, request: Request, session: UserSession = De
 
 @app.post("/api/settings/test_connection")
 @serialized_action
-def test_binance_connection(payload: Optional[dict] = None):
-    if state.execution.live or state.current_position or state.order_manager.pending_orders:
-        payload = None  # Active account credentials are immutable during exposure.
+def test_binance_connection(payload: Optional[dict] = None, session: UserSession = Depends(require_role(Role.OPERATOR))):
+    # P0: test_connection CHI duoc test ket noi bang credential DA LUU (qua save_api_keys/ADMIN).
+    # Khong nhan api_key/api_secret, khong nhan base_url/proxy_url tu request (chong bypass + SSRF).
     exchange = "binance"
     if payload:
         exchange = str(payload.get("exchange", "binance")).strip().lower()
-
     if exchange == "mexc":
-        if payload:
-            mexc_key = str(payload.get("api_key", payload.get("mexc_api_key", ""))).strip()
-            mexc_secret = str(payload.get("api_secret", payload.get("mexc_api_secret", ""))).strip()
-            mexc_base = str(payload.get("base_url", payload.get("mexc_base_url", ""))).strip()
-            mexc_proxy = str(payload.get("proxy_url", payload.get("mexc_proxy_url", ""))).strip()
-
-            if mexc_key and "*" not in mexc_key:
-                state.mexc_api.api_key = mexc_key
-                state.storage.save_setting("mexc_api_key", mexc_key)
-            if mexc_secret and "*" not in mexc_secret:
-                state.mexc_api.api_secret = mexc_secret
-                state.storage.save_setting("mexc_api_secret", mexc_secret)
-            if mexc_base:
-                state.mexc_api.base_url = mexc_base
-                state.storage.save_setting("mexc_base_url", mexc_base)
-            if mexc_proxy is not None:
-                state.mexc_api.proxy_url = mexc_proxy
-                state.storage.save_setting("mexc_proxy_url", mexc_proxy)
-
         return state.mexc_api.test_connection()
-
-    else:
-        if payload:
-            api_key = str(payload.get("api_key", "")).strip()
-            api_secret = str(payload.get("api_secret", "")).strip()
-            raw_tn = payload.get("is_testnet", False)
-            is_testnet = (raw_tn is True) or str(raw_tn).strip().lower() in ("true", "1", "yes", "on")
-            if api_key and "*" not in api_key:
-                state.binance_api.api_key = api_key
-                state.storage.save_setting("api_key", api_key)
-            if api_secret and "*" not in api_secret:
-                state.binance_api.api_secret = api_secret
-                state.storage.save_setting("api_secret", api_secret)
-            state.binance_api.is_testnet = is_testnet
-            state.storage.save_setting("is_testnet", is_testnet)
-        return state.binance_api.test_connection()
+    return state.binance_api.test_connection()
 
 
 @app.post("/api/settings/switch_exchange")
-async def switch_exchange(payload: dict):
+async def switch_exchange(payload: dict, session: UserSession = Depends(require_role(Role.ADMIN))):
     if state.current_position or state.hedge_positions or state.order_manager.pending_orders or state.execution.live:
         return {"status": "rejected", "reason": "Close/cancel exposure before switching exchange"}
     ex = str(payload.get("exchange", "binance")).strip().lower()
@@ -3468,7 +3518,7 @@ async def switch_exchange(payload: dict):
 
 @app.post("/api/settings/toggle_mode")
 @serialized_action
-def toggle_trading_mode(payload: dict):
+def toggle_trading_mode(payload: dict, session: UserSession = Depends(require_role(Role.ADMIN))):
     if state.current_position or state.hedge_positions or state.order_manager.pending_orders or state.execution.entry_exit_barrier:
         return {"status": "rejected", "reason": "Close/cancel exposure before switching execution environment"}
     live_enabled = payload.get("live_enabled", False)
@@ -3512,7 +3562,7 @@ def toggle_trading_mode(payload: dict):
 
 
 @app.post("/api/settings/update_fees")
-async def update_fees(payload: dict):
+async def update_fees(payload: dict, session: UserSession = Depends(require_role(Role.ADMIN))):
     default_tier = "MEXC_STANDARD" if state.active_exchange == "mexc" else "VIP_0"
     vip_tier = str(payload.get("vip_tier", default_tier))
     use_bnb = bool(payload.get("use_bnb_discount", False))
@@ -3534,7 +3584,7 @@ async def update_fees(payload: dict):
 
 
 @app.post("/api/settings/sync_api_fees")
-async def sync_api_fees():
+async def sync_api_fees(session: UserSession = Depends(require_role(Role.ADMIN))):
     api_manager = state.active_exchange_api
     res = api_manager.fetch_commission_rate(state.symbol)
     if res.get("success", False):
@@ -3549,7 +3599,7 @@ async def sync_api_fees():
 
 @app.post("/api/settings/reset_data")
 @serialized_action
-def reset_data(amount: float = 1000.0):
+def reset_data(amount: float = 1000.0, session: UserSession = Depends(require_role(Role.ADMIN))):
     if state.execution.live or state.current_position or state.hedge_positions or state.order_manager.pending_orders:
         return {"status": "rejected", "reason": "Close/cancel exposure before resetting paper state"}
     if not math.isfinite(amount) or amount <= 0:
@@ -3692,7 +3742,7 @@ def import_data(payload: dict, session: UserSession = Depends(require_role(Role.
 # -------------------------------------------------------------
 @app.get("/api/settings/vibe")
 @app.get("/api/action/get_vibe_config")
-async def get_vibe_config():
+async def get_vibe_config(session: UserSession = Depends(require_role(Role.VIEWER))):
     return {
         "status": "ok",
         "config": state.storage.get_vibe_config(),
@@ -3704,7 +3754,7 @@ async def get_vibe_config():
 @app.post("/api/settings/vibe")
 @app.post("/api/action/save_vibe_config")
 @serialized_action
-def save_vibe_config(payload: dict):
+def save_vibe_config(payload: dict, session: UserSession = Depends(require_role(Role.ADMIN))):
     enabled = bool(payload.get("enabled", True))
     min_votes = int(payload.get("min_votes", 3))
     macro_model = str(payload.get("macro_model", "ag/gemini-3.8-flash-high")).strip()
@@ -3737,7 +3787,7 @@ def save_vibe_config(payload: dict):
 
 @app.post("/api/action/run_vibe_swarm_debate")
 @serialized_action
-def run_vibe_swarm_debate():
+def run_vibe_swarm_debate(session: UserSession = Depends(require_role(Role.OPERATOR))):
     verdict = state.vibe_swarm.evaluate_council(
         current_price=state.live_price,
         indicators=state.indicators,

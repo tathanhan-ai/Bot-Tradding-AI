@@ -36,8 +36,7 @@ class GovernorStorage:
 
 class FeedbackPersistenceTest(unittest.TestCase):
     def setUp(self):
-        output_root = Path("D:/Codex")
-        self.temp = tempfile.TemporaryDirectory(prefix="feedback-test-", dir=str(output_root) if output_root.is_dir() else None)
+        self.temp = tempfile.TemporaryDirectory(prefix="feedback-test-")
         self.addCleanup(self.temp.cleanup)
         self.db_path = Path(self.temp.name) / "feedback.db"
         self.backup_path = Path(self.temp.name) / "backup.json"

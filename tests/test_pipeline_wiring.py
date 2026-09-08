@@ -17,7 +17,7 @@ from ui.server import LiveTradingState
 
 class PipelineWiringTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(dir="D:/Codex", prefix="pipeline-test-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="pipeline-test-")
         root = Path(self.tmp.name)
         self.state = LiveTradingState(storage=PersistentStorageManager(root / "db.sqlite", root / "backup.json"))
         self.state.vibe_swarm.enabled = False

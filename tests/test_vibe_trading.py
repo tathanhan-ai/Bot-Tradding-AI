@@ -185,7 +185,7 @@ class TestVibeTrading(unittest.TestCase):
     def test_persistent_storage_vibe_config(self):
         import tempfile
         from pathlib import Path
-        temp = tempfile.TemporaryDirectory(dir="D:/Codex", prefix="vibe-test-")
+        temp = tempfile.TemporaryDirectory(prefix="vibe-test-")
         self.addCleanup(temp.cleanup)
         storage = PersistentStorageManager(db_path=Path(temp.name) / "test.db", json_backup_path=Path(temp.name) / "backup.json")
         cfg = storage.save_vibe_config(

@@ -22,7 +22,7 @@ from ui.server import app, state
 
 class ControlPlaneSecurityTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(dir="D:/Codex", prefix="sec-test-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="sec-test-")
         self.tmp_dir = Path(self.tmp.name)
         self.client = TestClient(app)
         from security.rbac import get_auth_manager
