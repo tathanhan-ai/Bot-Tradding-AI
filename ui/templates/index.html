@@ -147,7 +147,7 @@
         <button type="button" id="header-exchange-badge" onclick="openSettingsModal()" aria-label="Mở cài đặt sàn và chế độ" class="px-2 py-1 rounded-md text-[10px] font-bold bg-[#141b2b] text-amber-300 border border-gray-700 hover:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 transition flex items-center gap-1.5 whitespace-nowrap" data-i18n-title="nav_exchange_title" title="Sàn giao dịch: Binance Futures (Bấm để mở cài đặt)">
           <span class="w-2 h-2 rounded-full bg-amber-400"></span>
           <span id="header-exchange-text" class="hidden sm:inline">BINANCE</span>
-          <span id="header-mode-badge" class="hidden md:inline text-cyan-400 font-normal">| <span data-i18n="nav_mode_demo">MÔ PHỎNG</span></span>
+          <span id="header-mode-badge" class="hidden md:inline text-cyan-400 font-normal">| Mô phỏng</span>
         </button>
 
         <!-- MORE MENU DROPDOWN (Gom toàn bộ nút phụ vào 1 Menu chức năng cực gọn) -->
@@ -1940,8 +1940,11 @@
                 🟢 MEXC Futures (Contract)
               </button>
             </div>
-            <div id="active-exchange-pill" class="text-[11px] font-bold px-2.5 py-1 rounded-md bg-amber-950/70 text-amber-300 border border-amber-700/60 flex items-center gap-1">
-              <span data-i18n="lbl_active_exchange">⚡ Đang Giao Dịch:</span> <b id="active-exchange-pill-name">BINANCE</b>
+            <div class="flex items-center gap-2">
+              <div id="active-exchange-pill" class="text-[11px] font-bold px-2.5 py-1 rounded-md bg-amber-950/70 text-amber-300 border border-amber-700/60 flex items-center gap-1">
+                <span data-i18n="lbl_active_exchange">⚡ Đang Giao Dịch:</span> <b id="active-exchange-pill-name">BINANCE</b>
+              </div>
+              <button type="button" onclick="setActiveExchangeFromTab()" title="Chuyển sàn giao dịch thật sang tab đang chọn" class="px-2.5 py-1 rounded-md text-[11px] font-bold bg-[#141b2b] hover:bg-amber-500/20 text-gray-200 hover:text-amber-300 border border-gray-700 hover:border-amber-500 transition cursor-pointer">🔀 Chuyển sàn</button>
             </div>
           </div>
 
@@ -2949,6 +2952,39 @@
             <span>💾</span> <span data-i18n="btn_save_changes">Lưu Thay Đổi</span>
           </button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL THÔNG BÁO THỐNG NHẤT (thay toàn bộ alert() trình duyệt) -->
+  <div id="modal-notify" class="fixed inset-0 bg-black/80 z-[60] hidden flex items-center justify-center p-4 backdrop-blur-sm">
+    <div class="bg-[#0f141c] border border-gray-700 rounded-xl max-w-md w-full p-5 shadow-2xl space-y-4">
+      <div class="flex justify-between items-center border-b border-gray-800 pb-3">
+        <span class="text-base font-bold text-white flex items-center gap-1.5">
+          <span id="notify-icon">ℹ️</span> <span id="notify-title">Thông báo</span>
+        </span>
+        <button onclick="closeNotifyModal()" class="text-gray-400 hover:text-white text-lg font-bold">✕</button>
+      </div>
+      <div id="notify-message" class="text-xs text-gray-200 leading-relaxed whitespace-pre-line"></div>
+      <div class="flex justify-end gap-2 pt-1">
+        <button onclick="closeNotifyModal()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg transition">Đã hiểu</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL XÁC NHẬN THỐNG NHẤT (thay toàn bộ confirm() trình duyệt) -->
+  <div id="modal-confirm" class="fixed inset-0 bg-black/80 z-[60] hidden flex items-center justify-center p-4 backdrop-blur-sm">
+    <div class="bg-[#0f141c] border border-amber-700/60 rounded-xl max-w-md w-full p-5 shadow-2xl space-y-4">
+      <div class="flex justify-between items-center border-b border-gray-800 pb-3">
+        <span class="text-base font-bold text-white flex items-center gap-1.5">
+          <span>⚠️</span> <span id="confirm-title">Xác nhận</span>
+        </span>
+        <button onclick="closeConfirmModal(false)" class="text-gray-400 hover:text-white text-lg font-bold">✕</button>
+      </div>
+      <div id="confirm-message" class="text-xs text-gray-200 leading-relaxed whitespace-pre-line"></div>
+      <div class="flex justify-end gap-2 pt-1">
+        <button onclick="closeConfirmModal(false)" class="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-bold rounded-lg transition">Hủy bỏ</button>
+        <button onclick="closeConfirmModal(true)" id="btn-confirm-ok" class="px-4 py-2 bg-gradient-to-r from-amber-600 to-yellow-600 hover:from-amber-500 hover:to-yellow-500 text-black text-xs font-bold rounded-lg transition shadow">Đồng ý</button>
       </div>
     </div>
   </div>
@@ -3991,21 +4027,24 @@
       try {
         const res = await fetch('/api/action/lock_breakeven', { method: 'POST' });
         const json = await res.json();
-        alert(json.message || t('alert_sl_be_success'));
+        showNotifyModal('ok', 'Đã khóa hòa vốn', notifyMsg(json, 'Đã dời Stop Loss về điểm hòa vốn.'));
       } catch (e) {
-        alert(t('alert_sl_be_error') + e);
+        showNotifyModal('err', 'Không khóa được hòa vốn', 'Lỗi kết nối: ' + (e && e.message ? e.message : e));
       }
     }
 
     async function closePartialNow(ratio = 0.5) {
       const pct = Math.round(ratio * 100);
-      if (!confirm((t('confirm_close_partial') || 'Bạn có chắc muốn chốt {pct}% vị thế?').replace('{pct}', pct))) return;
+      const ok = await showConfirmModal('Chốt lời một phần',
+        'Bạn có chắc muốn chốt ' + pct + '% vị thế đang mở?',
+        'Chốt ' + pct + '%');
+      if (!ok) return;
       try {
         const res = await fetch(`/api/action/partial_close?ratio=${ratio}`, { method: 'POST' });
         const json = await res.json();
-        alert(json.message || t('alert_close_partial_success'));
+        showNotifyModal('ok', 'Đã chốt lời', notifyMsg(json, 'Đã chốt ' + pct + '% vị thế.'));
       } catch (e) {
-        alert(t('alert_close_partial_error') + e);
+        showNotifyModal('err', 'Không chốt được lời', 'Lỗi kết nối khi chốt lời: ' + (e && e.message ? e.message : e));
       }
     }
 
@@ -5527,17 +5566,18 @@
         }
         const modeBadge = document.getElementById('header-mode-badge');
         if (modeBadge) {
-          const liveOn = !!(s.is_live_enabled ?? data.is_live_enabled);
-          const onTestnet = (s.is_testnet ?? data.is_testnet ?? true);
+          const tm = String(data.trading_mode || s.trading_mode || '').toLowerCase();
+          const liveOn = !!(s.is_live_enabled ?? data.is_live_enabled) || tm.indexOf('live') === 0;
+          const onTestnet = (s.is_testnet ?? data.is_testnet ?? (tm !== 'live_mainnet'));
           if (liveOn && !onTestnet) {
-            modeBadge.innerText = '💰 LIVE MAINNET';
-            modeBadge.className = 'px-2.5 py-1.5 rounded-lg text-xs font-bold bg-rose-500/20 text-rose-300 border border-rose-500 flex items-center gap-1.5 animate-pulse cursor-pointer shadow-sm';
+            modeBadge.innerText = '| Tiền thật';
+            modeBadge.className = 'hidden md:inline text-rose-300 font-bold';
           } else if (liveOn) {
-            modeBadge.innerText = '🔥 LIVE TESTNET';
-            modeBadge.className = 'px-2.5 py-1.5 rounded-lg text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500 flex items-center gap-1.5 animate-pulse cursor-pointer shadow-sm';
+            modeBadge.innerText = '| Testnet';
+            modeBadge.className = 'hidden md:inline text-amber-300 font-bold';
           } else {
-            modeBadge.innerText = t('nav_mode_demo');
-            modeBadge.className = 'px-2.5 py-1.5 rounded-lg text-xs font-bold bg-cyan-950 text-cyan-300 border border-cyan-700 flex items-center gap-1.5 cursor-pointer shadow-sm';
+            modeBadge.innerText = '| Mô phỏng';
+            modeBadge.className = 'hidden md:inline text-cyan-400 font-normal';
           }
         }
         const feeBadge = document.getElementById('header-fee-badge');
@@ -5788,7 +5828,10 @@
     }
 
     async function emergencyClose() {
-      if (confirm(t("confirm_emergency_close"))) {
+      const ok = await showConfirmModal('Đóng toàn bộ vị thế',
+        'Bạn có chắc muốn đóng TẤT CẢ vị thế đang mở? Hành động này không thể hoàn tác.',
+        'Đóng tất cả');
+      if (ok) {
         await fetch('/api/action/close_all', { method: 'POST' });
         fetchStateRest();
       }
@@ -6079,32 +6122,37 @@
     }
 
     async function cancelOrder(orderId) {
-      if (confirm(t('confirm_cancel_order_prompt').replace('{id}', orderId))) {
+      const ok = await showConfirmModal('Hủy lệnh chờ',
+        'Bạn có chắc muốn hủy lệnh chờ #' + orderId + '?',
+        'Hủy lệnh');
+      if (ok) {
         await fetch(`/api/action/cancel_order?order_id=${orderId}`, { method: 'POST' });
         fetchStateRest();
       }
     }
 
     async function executePendingOrder(orderId) {
-      if (!confirm(t('confirm_fill_now_prompt').replace('{id}', orderId))) {
+      const ok = await showConfirmModal('Khớp lệnh ngay',
+        'Bạn có chắc muốn khớp ngay lệnh chờ #' + orderId + ' theo giá thị trường?',
+        'Khớp ngay');
+      if (!ok) {
         return;
       }
       try {
         const res = await fetch(`/api/action/execute_pending_order?order_id=${orderId}`, { method: 'POST' });
         const data = await res.json();
         if (data.status === 'ok') {
-          alert(`✅ ${data.message || t('alert_fill_now_success')}`);
+          showNotifyModal('ok', 'Đã khớp lệnh', notifyMsg(data, 'Đã khớp lệnh chờ #' + orderId + '.'));
           if (typeof switchDockTab === 'function') {
             switchDockTab('position');
           }
         } else {
-          alert(`❌ ${t('alert_fill_now_failed')}:\n${data.message || ''}`);
+          showNotifyModal('err', 'Không khớp được lệnh', notifyMsg(data, 'Không khớp được lệnh chờ #' + orderId + '.'));
         }
         fetchStateRest();
       } catch (e) {
-        alert(t('alert_fill_now_error') + e.message);
+        showNotifyModal('err', 'Lỗi kết nối', 'Lỗi kết nối khi khớp lệnh: ' + (e && e.message ? e.message : e));
       }
-    }
 
     function loadOrderToForm(orderId) {
       const orders = (latestFullState && latestFullState.pending_orders) ? latestFullState.pending_orders : [];
@@ -6141,7 +6189,10 @@
     }
 
     async function resetBalance() {
-      if (confirm(t("confirm_reset_balance"))) {
+      const ok = await showConfirmModal('Đặt lại số dư mô phỏng',
+        'Bạn có chắc muốn đặt lại số dư mô phỏng về $5,000? Lịch sử lệnh mô phỏng sẽ giữ nguyên.',
+        'Đặt lại');
+      if (ok) {
         await fetch('/api/action/reset_balance?amount=5000', { method: 'POST' });
         fetchStateRest();
       }
@@ -6262,6 +6313,12 @@
         if (btnMexc) {
           btnMexc.className = 'px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 text-gray-400 hover:text-white border border-transparent';
         }
+      }
+      // Tab sàn CHỈ đổi giao diện (không gọi API ở đây để tránh lặp vô hạn
+      // khi mở Settings cũng gọi selectExchangeTab). Muốn chuyển sàn thật
+      // thì bấm nút "Chuyển sang sàn này" -> setActiveExchangeAction().
+      if (false && typeof setActiveExchangeAction === 'function') {
+        setActiveExchangeAction(exchange);
       }
     }
 
@@ -6822,16 +6879,98 @@
       }
     }
 
+    // Modal thông báo tiếng Việt chuẩn (thay toàn bộ alert() cũ).
+    // Mọi thông điệp đều có chữ Việt rõ ràng, không bao giờ hiện undefined.
+    function notifyMsg(data, fallback) {
+      if (typeof data === 'string' && data.trim()) return data;
+      if (data && typeof data === 'object') {
+        const keys = ['message', 'reason', 'detail', 'error', 'msg'];
+        for (let i = 0; i < keys.length; i++) {
+          const v = data[keys[i]];
+          if (typeof v === 'string' && v.trim() && v !== 'undefined') return v;
+        }
+      }
+      return fallback;
+    }
+
+    function showNotifyModal(kind, title, message) {
+      const m = document.getElementById('modal-notify');
+      const icon = document.getElementById('notify-icon');
+      const titleEl = document.getElementById('notify-title');
+      const msgEl = document.getElementById('notify-message');
+      if (icon) icon.innerText = kind === 'ok' ? '✅' : (kind === 'warn' ? '⚠️' : '❌');
+      if (titleEl) titleEl.innerText = title || 'Thông báo';
+      if (msgEl) msgEl.innerText = message || 'Đã thực hiện xong.';
+      if (m) m.classList.remove('hidden');
+    }
+
+    // Chuyen toan bo alert() cu sang modal tieng Viet (khong sua tung cho goi).
+    // Giu tuong thich: moi alert(x) tu dong hien modal, khong bao gio undefined.
+    (function routeAlertToModal() {
+      if (window.__alertRoutedToModal) return;
+      window.__alertRoutedToModal = true;
+      window.alert = function (msg) {
+        try {
+          if (typeof showNotifyModal === 'function') {
+            const text = (msg === undefined || msg === null) ? 'Đã thực hiện xong.' : String(msg);
+            const isErr = /^(❌|Lỗi|LOI|Error|Failed|Không|Khong)/i.test(text.trim());
+            showNotifyModal(isErr ? 'err' : 'ok', isErr ? 'Có lỗi xảy ra' : 'Hoàn tất', text);
+            return;
+          }
+        } catch (e) {}
+      };
+    })();
+
+    function closeNotifyModal() {
+      const m = document.getElementById('modal-notify');
+      if (m) m.classList.add('hidden');
+    }
+
+    // Modal xác nhận thống nhất (thay toàn bộ confirm() cũ).
+    // Trả về Promise<boolean>: true = Đồng ý, false = Hủy bỏ/✕.
+    let confirmResolve = null;
+    function showConfirmModal(title, message, okLabel) {
+      const m = document.getElementById('modal-confirm');
+      const titleEl = document.getElementById('confirm-title');
+      const msgEl = document.getElementById('confirm-message');
+      const okBtn = document.getElementById('btn-confirm-ok');
+      if (titleEl) titleEl.innerText = title || 'Xác nhận';
+      if (msgEl) msgEl.innerText = message || 'Bạn có chắc chắn muốn tiếp tục?';
+      if (okBtn) okBtn.innerText = okLabel || 'Đồng ý';
+      if (m) m.classList.remove('hidden');
+      return new Promise((resolve) => { confirmResolve = resolve; });
+    }
+
+    function closeConfirmModal(result) {
+      const m = document.getElementById('modal-confirm');
+      if (m) m.classList.add('hidden');
+      if (typeof confirmResolve === 'function') {
+        const r = confirmResolve;
+        confirmResolve = null;
+        r(!!result);
+      }
+    }
+
+    // Nut "Chuyen san": lay tab dang chon (Binance/MEXC) roi chuyen that.
+    function setActiveExchangeFromTab() {
+      const boxMexc = document.getElementById('box-exchange-mexc');
+      const isMexc = boxMexc && !boxMexc.classList.contains('hidden');
+      setActiveExchangeAction(isMexc ? 'mexc' : 'binance');
+    }
+
     async function setActiveExchangeAction(exchange) {
+      const exName = exchange === 'mexc' ? 'MEXC Futures' : 'Binance Futures';
       try {
         const res = await fetch('/api/settings/switch_exchange', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ exchange: exchange })
         });
-        const data = await res.json();
+        let data = {};
+        try { data = await res.json(); } catch (e) { data = {}; }
         if (data.status === 'ok') {
-          alert(data.message);
+          showNotifyModal('ok', 'Chuyển sàn thành công',
+            notifyMsg(data, 'Đã chuyển sang sàn hoạt động: ' + exName + '!'));
           const pillName = document.getElementById('active-exchange-pill-name');
           const pill = document.getElementById('active-exchange-pill');
           if (pillName) pillName.innerText = exchange === 'mexc' ? 'MEXC' : 'BINANCE';
@@ -6840,12 +6979,15 @@
               ? 'text-[11px] font-bold px-2.5 py-1 rounded-md bg-emerald-950/70 text-emerald-300 border border-emerald-700/60 flex items-center gap-1'
               : 'text-[11px] font-bold px-2.5 py-1 rounded-md bg-amber-950/70 text-amber-300 border border-amber-700/60 flex items-center gap-1';
           }
-          fetchStateRest();
+          if (typeof fetchStateRest === 'function') fetchStateRest();
         } else {
-          alert(data.message || (currentLanguage === 'vi' ? 'Lỗi chuyển sàn giao dịch' : (currentLanguage === 'zh' ? '切换交易所失败' : 'Failed to switch exchange')));
+          showNotifyModal('err', 'Không chuyển được sàn',
+            notifyMsg(data, 'Không chuyển được sang ' + exName + '. Hãy đóng hết vị thế và lệnh chờ rồi thử lại.'));
         }
       } catch (err) {
-        alert((currentLanguage === 'vi' ? 'Lỗi chuyển sàn: ' : (currentLanguage === 'zh' ? '切换交易所网络错误: ' : 'Exchange switch error: ')) + err.message);
+        showNotifyModal('err', 'Lỗi kết nối khi chuyển sàn',
+          'Không gọi được máy chủ bot khi chuyển sang ' + exName + '. Hãy kiểm tra bot có đang chạy ở cổng 8000 không rồi thử lại.'
+          + (err && err.message ? '\nChi tiết: ' + err.message : ''));
       }
     }
 
@@ -7068,15 +7210,15 @@
     }
 
     async function resetDataAction() {
-      if (confirm(t("confirm_reset_sqlite"))) {
+      const ok = await showConfirmModal('Xoa du lieu che do hien tai',
+        'Ban co chac muon xoa trang so sach cua che do hien tai va dat lai so du? So cua che do con lai duoc giu nguyen.',
+        'Xoa du lieu');
+      if (ok) {
         try {
-          const res = await fetch('/api/settings/reset_data?amount=1000', { method: 'POST' });
-          const data = await res.json();
-          alert(data.message || t('alert_reset_data_success'));
+          await fetch('/api/settings/reset_data?amount=1000', { method: 'POST' });
           closeSettingsModal();
           fetchStateRest();
         } catch (e) {
-          alert((currentLanguage === 'vi' ? 'Lỗi reset dữ liệu: ' : (currentLanguage === 'zh' ? '重置数据失败: ' : 'Error resetting data: ')) + e.message);
         }
       }
     }
@@ -9307,8 +9449,10 @@
       const isOverwrite = document.getElementById('import-mode-overwrite') ? document.getElementById('import-mode-overwrite').checked : false;
       const mode = isOverwrite ? 'overwrite' : 'merge';
 
-      const confirmMsg = isOverwrite ? t('confirm_overwrite_import') : t('confirm_merge_import');
-      if (!confirm(confirmMsg)) {
+      const confirmMsg = isOverwrite
+        ? 'Chế độ GHI ĐÈ sẽ xóa sổ sách hiện tại rồi mới nhập. Bạn có chắc chắn?'
+        : 'Chế độ GỘP THÊM sẽ giữ dữ liệu cũ và thêm dữ liệu mới. Tiếp tục nhập?';
+      if (!await showConfirmModal('Xác nhận khôi phục dữ liệu', confirmMsg, 'Bắt đầu nhập')) {
         return;
       }
 
@@ -9568,7 +9712,10 @@
     async function logoutDesk() {
       // Chi dang xuat giao dien: xoa cookie + chuyen ve trang login.
       // Bot (auto-cycle, WS engine, broadcast) chay doc lap tren server nen VAN CHAY BINH THUONG.
-      if (!confirm('Thoát phiên đăng nhập?\n\nBot vẫn chạy nền bình thường — đăng nhập lại bất cứ lúc nào.')) return;
+      const ok = await showConfirmModal('Thoát phiên đăng nhập',
+        'Bot vẫn chạy nền bình thường — đăng nhập lại bất cứ lúc nào. Bạn có chắc muốn thoát?',
+        'Thoát');
+      if (!ok) return;
       try { if (wsClient) { try { wsClient.close(); } catch (e) {} } } catch (e) {}
       try { await fetch('/auth/logout', { method: 'POST' }); } catch (e) {}
       window.location.href = '/';
@@ -9922,7 +10069,10 @@
     }
 
     async function closeOrderSlice(sliceId) {
-      if (!confirm(t('confirm_close_suborder_prompt').replace('{id}', sliceId))) {
+      const ok = await showConfirmModal('Đóng lệnh lẻ',
+        'Bạn có chắc muốn đóng riêng lệnh #' + sliceId + '?',
+        'Đóng lệnh');
+      if (!ok) {
         return;
       }
       try {

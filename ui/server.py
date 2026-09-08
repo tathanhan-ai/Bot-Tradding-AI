@@ -2830,8 +2830,14 @@ class LiveTradingState:
             "settings": {
                 "active_exchange": self.active_exchange,
                 "exchange_name": "MEXC Futures" if self.active_exchange == "mexc" else "Binance Futures",
-                **self.binance_api.get_masked_credentials(),
-                **self.mexc_api.get_masked_credentials(),
+                "is_live_enabled": bool(self.binance_api.is_live_enabled),
+                "is_testnet": bool(self.binance_api.is_testnet),
+                "ledger_mode": str(getattr(getattr(self, "storage", None), "mode", "paper") or "paper"),
+                "trading_mode": (
+                    "live_testnet" if self.binance_api.is_live_enabled and self.binance_api.is_testnet
+                    else ("live_mainnet" if self.binance_api.is_live_enabled else "paper")),
+                **{k: v for k, v in self.binance_api.get_masked_credentials().items() if k != "exchange"},
+                **{k: v for k, v in self.mexc_api.get_masked_credentials().items() if k not in ("exchange", "is_live_enabled")},
                 "binance": self.binance_api.get_masked_credentials(),
                 "mexc": self.mexc_api.get_masked_credentials(),
                 "vip_tier": self.fee_engine.vip_tier,
@@ -3599,8 +3605,8 @@ async def get_settings(session: UserSession = Depends(require_role(Role.VIEWER))
         "settings": {
             "active_exchange": state.active_exchange,
             "exchange_name": "MEXC Futures" if state.active_exchange == "mexc" else "Binance Futures",
-            **state.binance_api.get_masked_credentials(),
-            **state.mexc_api.get_masked_credentials(),
+            **{k: v for k, v in state.binance_api.get_masked_credentials().items() if k != "exchange"},
+            **{k: v for k, v in state.mexc_api.get_masked_credentials().items() if k not in ("exchange", "is_live_enabled")},
             "server_public_ip": cached_public_ip,
             "vip_tier": state.fee_engine.vip_tier,
             "vip_name": BINANCE_VIP_TIERS.get(state.fee_engine.vip_tier, {}).get("name", state.fee_engine.vip_tier),
@@ -3813,7 +3819,8 @@ def test_binance_connection(payload: Optional[dict] = None, session: UserSession
 @app.post("/api/settings/switch_exchange")
 async def switch_exchange(payload: dict, session: UserSession = Depends(require_role(Role.ADMIN))):
     if state.current_position or state.hedge_positions or state.order_manager.pending_orders or state.execution.live:
-        return {"status": "rejected", "reason": "Close/cancel exposure before switching exchange"}
+        msg = "Đang có vị thế hoặc lệnh chờ (hoặc bot đang chạy live) — hãy đóng hết và tắt live trước khi chuyển sàn."
+        return {"status": "rejected", "reason": msg, "message": msg}
     ex = str(payload.get("exchange", "binance")).strip().lower()
     if ex not in ("binance", "mexc"):
         return {"status": "error", "message": "Sàn giao dịch không hợp lệ. Chọn 'binance' hoặc 'mexc'."}
