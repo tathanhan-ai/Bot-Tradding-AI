@@ -2752,13 +2752,63 @@ async def get_dashboard(request: Request):
     token = request.cookies.get("desk_session")
     session = get_auth_manager().authenticate_token(token)
     if not session:
-        login_html = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>Login - Trading Desk</title></head>
-        <body style="background:#0b0e13;color:#e5e7eb;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh">
-        <form method="post" action="/auth/login" style="background:#111827;padding:32px;border-radius:12px;border:1px solid #374151">
-        <h2>Trading Desk Login</h2>
-        <input name="token" type="password" placeholder="Desk token" style="padding:10px;width:280px;background:#030712;color:#fff;border:1px solid #374151;border-radius:6px"/>
-        <button type="submit" style="padding:10px 18px;margin-left:8px;background:#059669;color:#fff;border:none;border-radius:6px">Login</button>
-        </form></body></html>"""
+        login_html = """<!DOCTYPE html><html lang="vi"><head><meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Login - Binance Futures Quant Desk</title>
+        <style>
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+          body { background: radial-gradient(1200px 800px at 70% -10%, #1e293b 0%, #0b0e13 55%, #06080c 100%);
+            color: #e5e7eb; font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+            display: flex; align-items: center; justify-content: center; min-height: 100vh; overflow: hidden; }
+          .orb { position: absolute; border-radius: 50%; filter: blur(90px); opacity: .35; animation: float 9s ease-in-out infinite; }
+          .orb1 { width: 420px; height: 420px; background: #059669; top: -120px; left: -100px; }
+          .orb2 { width: 360px; height: 360px; background: #7c3aed; bottom: -120px; right: -80px; animation-delay: -4s; }
+          @keyframes float { 0%,100% { transform: translateY(0) } 50% { transform: translateY(28px) } }
+          .card { position: relative; background: rgba(17,24,39,.85); backdrop-filter: blur(12px);
+            padding: 40px 38px; border-radius: 18px; border: 1px solid #1f2937; width: 400px;
+            box-shadow: 0 25px 60px rgba(0,0,0,.55); animation: rise .5s ease both; }
+          @keyframes rise { from { opacity: 0; transform: translateY(18px) } to { opacity: 1; transform: none } }
+          .logo { width: 54px; height: 54px; border-radius: 14px; display: flex; align-items: center; justify-content: center;
+            font-size: 26px; background: linear-gradient(135deg, #059669, #10b981); box-shadow: 0 8px 24px rgba(16,185,129,.4); }
+          h1 { font-size: 19px; margin: 16px 0 4px; }
+          .sub { color: #9ca3af; font-size: 13px; margin-bottom: 22px; }
+          input { width: 100%; padding: 13px 14px; background: #030712; color: #fff;
+            border: 1px solid #374151; border-radius: 10px; font-size: 14px; outline: none; transition: border .2s, box-shadow .2s; }
+          input:focus { border-color: #10b981; box-shadow: 0 0 0 3px rgba(16,185,129,.2); }
+          button { width: 100%; margin-top: 14px; padding: 13px; border: none; border-radius: 10px; cursor: pointer;
+            font-size: 15px; font-weight: 700; color: #fff; background: linear-gradient(135deg, #059669, #10b981);
+            transition: transform .15s, box-shadow .2s; }
+          button:hover { transform: translateY(-1px); box-shadow: 0 10px 28px rgba(16,185,129,.45); }
+          button:active { transform: none; }
+          button.loading { opacity: .7; pointer-events: none; }
+          .roles { display: flex; gap: 8px; margin-top: 16px; }
+          .roles span { flex: 1; text-align: center; font-size: 11px; padding: 6px 4px; border-radius: 8px;
+            background: #030712; border: 1px solid #1f2937; color: #9ca3af; }
+          .err { display: none; margin-top: 12px; padding: 10px 12px; border-radius: 10px; font-size: 13px;
+            background: rgba(127,29,29,.35); border: 1px solid #7f1d1d; color: #fca5a5; animation: shake .4s; }
+          .err.show { display: block; }
+          @keyframes shake { 0%,100% { transform: none } 25% { transform: translateX(-6px) } 75% { transform: translateX(6px) } }
+        </style></head>
+        <body><div class="orb orb1"></div><div class="orb orb2"></div>
+        <div class="card">
+          <div class="logo">📊</div>
+          <h1>Binance Futures Quant Desk</h1>
+          <div class="sub">Institutional Trading Terminal — đăng nhập để tiếp tục</div>
+          <form id="f" method="post" action="/auth/login">
+            <input id="tok" name="token" type="password" placeholder="🔑 Nhập Desk token..." autocomplete="off" autofocus/>
+            <div class="err" id="err">❌ Token không đúng, thử lại nhé!</div>
+            <button id="btn" type="submit">Đăng nhập →</button>
+          </form>
+          <div class="roles"><span>👁 Viewer: xem</span><span>⚙ Operator: điều hành</span><span>👑 Admin: full quyền</span></div>
+        </div>
+        <script>
+          const q = new URLSearchParams(location.search);
+          if (q.get('error')) { document.getElementById('err').classList.add('show'); }
+          document.getElementById('f').addEventListener('submit', () => {
+            const b = document.getElementById('btn');
+            b.classList.add('loading'); b.textContent = '⏳ Đang xác thực...';
+          });
+        </script></body></html>"""
         return HTMLResponse(content=login_html)
 
     with open(TEMPLATE_PATH, "r", encoding="utf-8") as f:
@@ -2787,8 +2837,36 @@ async def auth_login(request: Request):
             token = ""
     session = get_auth_manager().authenticate_token(token)
     if not session:
-        raise HTTPException(status_code=401, detail="Invalid desk token")
-    resp = HTMLResponse(content='<html><head><meta http-equiv="refresh" content="0;url=/"></head><body>OK</body></html>')
+        fail_html = """<!DOCTYPE html><html lang="vi"><head><meta charset="utf-8">
+        <meta http-equiv="refresh" content="2.5;url=/?error=1">
+        <title>Đăng nhập thất bại</title>
+        <style>body{background:#0b0e13;color:#e5e7eb;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+        .box{text-align:center;animation:pop .4s ease both}
+        @keyframes pop{from{opacity:0;transform:scale(.85)}to{opacity:1;transform:scale(1)}}
+        .icon{font-size:64px;animation:shake .5s}
+        @keyframes shake{0%,100%{transform:none}25%{transform:translateX(-8px) rotate(-8deg)}75%{transform:translateX(8px) rotate(8deg)}}
+        h2{color:#fca5a5}.sub{color:#9ca3af;font-size:13px;margin-top:8px}
+        .bar{width:220px;height:4px;background:#1f2937;border-radius:99px;margin:18px auto 0;overflow:hidden}
+        .bar i{display:block;height:100%;width:40%;background:#ef4444;border-radius:99px;animation:load 1.2s ease infinite}
+        @keyframes load{from{margin-left:-40%}to{margin-left:100%}}</style></head>
+        <body><div class="box"><div class="icon">❌</div><h2>Token không đúng!</h2>
+        <div class="sub">Đang quay lại trang đăng nhập...</div><div class="bar"><i></i></div></div></body></html>"""
+        return HTMLResponse(content=fail_html, status_code=401)
+    ok_html = """<!DOCTYPE html><html lang="vi"><head><meta charset="utf-8">
+    <meta http-equiv="refresh" content="1.2;url=/">
+    <title>Đăng nhập thành công</title>
+    <style>body{background:#0b0e13;color:#e5e7eb;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+    .box{text-align:center;animation:pop .4s ease both}
+    @keyframes pop{from{opacity:0;transform:scale(.85)}to{opacity:1;transform:scale(1)}}
+    .icon{font-size:64px;animation:bounce 1s ease infinite}
+    @keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
+    h2{color:#6ee7b7}.sub{color:#9ca3af;font-size:13px;margin-top:8px}
+    .bar{width:220px;height:4px;background:#1f2937;border-radius:99px;margin:18px auto 0;overflow:hidden}
+    .bar i{display:block;height:100%;width:40%;background:#10b981;border-radius:99px;animation:load .8s ease infinite}
+    @keyframes load{from{margin-left:-40%}to{margin-left:100%}}</style></head>
+    <body><div class="box"><div class="icon">✅</div><h2>Đăng nhập thành công!</h2>
+    <div class="sub">Đang mở Trading Desk...</div><div class="bar"><i></i></div></div></body></html>"""
+    resp = HTMLResponse(content=ok_html)
     resp.set_cookie("desk_session", token, httponly=True, samesite="strict")
     return resp
 
