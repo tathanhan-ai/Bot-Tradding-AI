@@ -2451,6 +2451,17 @@ class LiveTradingState:
             "exchange_available": round(float(getattr(self, "exchange_available", 0.0) or 0.0), 2),
             "exchange_balance_drift": float(getattr(self, "exchange_balance_drift", 0.0) or 0.0),
             "exchange_sync_error": str(getattr(self, "exchange_sync_error", "") or ""),
+            # Chế độ giao dịch (quan trọng nhất cho badge header + radio Settings):
+            # frontend trước đây đọc s.is_live_enabled nhưng state không trả ->
+            # undefined -> luôn rẽ nhánh Demo dù bot đang live.
+            "is_live_enabled": bool(self.binance_api.is_live_enabled),
+            "is_testnet": bool(self.binance_api.is_testnet),
+            "mainnet_confirmed": bool(getattr(self.binance_api, "mainnet_confirmed", False)),
+            "active_exchange": self.active_exchange,
+            "ledger_mode": str(getattr(getattr(self, "storage", None), "mode", "paper") or "paper"),
+            "trading_mode": (
+                "live_testnet" if self.binance_api.is_live_enabled and self.binance_api.is_testnet
+                else ("live_mainnet" if self.binance_api.is_live_enabled else "paper")),
             "equity": round(equity, 2),            "unrealized_pnl": round(unrealized, 2),
             "initial_balance": self.initial_balance,
             "net_pnl": round(total_net_pnl, 2),
@@ -3103,6 +3114,12 @@ def get_klines(symbol: Optional[str] = None, interval: str = "15m", limit: int =
 @serialized_action
 def toggle_bot(session: UserSession = Depends(require_role(Role.OPERATOR))):
     state.is_running = not state.is_running
+    # Lưu theo sổ mode để restart không mất trạng thái BOT (trước đây chỉ
+    # giữ RAM nên restart là BOT tự bật lại dù user đã tắt).
+    try:
+        state.persist_current_state()
+    except Exception:
+        pass
     return {"status": "ok", "is_running": state.is_running}
 
 
@@ -3536,6 +3553,12 @@ async def get_settings(session: UserSession = Depends(require_role(Role.VIEWER))
         "status": "ok",
         "server_public_ip": cached_public_ip,
         "active_exchange": state.active_exchange,
+        "is_live_enabled": bool(state.binance_api.is_live_enabled),
+        "is_testnet": bool(state.binance_api.is_testnet),
+        "ledger_mode": str(getattr(getattr(state, "storage", None), "mode", "paper") or "paper"),
+        "trading_mode": (
+            "live_testnet" if state.binance_api.is_live_enabled and state.binance_api.is_testnet
+            else ("live_mainnet" if state.binance_api.is_live_enabled else "paper")),
         "binance": state.binance_api.get_masked_credentials(),
         "mexc": state.mexc_api.get_masked_credentials(),
         "settings": {

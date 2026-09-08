@@ -5527,8 +5527,13 @@
         }
         const modeBadge = document.getElementById('header-mode-badge');
         if (modeBadge) {
-          if (s.is_live_enabled) {
-            modeBadge.innerText = '🔥 LIVE FUTURES';
+          const liveOn = !!(s.is_live_enabled ?? data.is_live_enabled);
+          const onTestnet = (s.is_testnet ?? data.is_testnet ?? true);
+          if (liveOn && !onTestnet) {
+            modeBadge.innerText = '💰 LIVE MAINNET';
+            modeBadge.className = 'px-2.5 py-1.5 rounded-lg text-xs font-bold bg-rose-500/20 text-rose-300 border border-rose-500 flex items-center gap-1.5 animate-pulse cursor-pointer shadow-sm';
+          } else if (liveOn) {
+            modeBadge.innerText = '🔥 LIVE TESTNET';
             modeBadge.className = 'px-2.5 py-1.5 rounded-lg text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500 flex items-center gap-1.5 animate-pulse cursor-pointer shadow-sm';
           } else {
             modeBadge.innerText = t('nav_mode_demo');
@@ -6283,13 +6288,18 @@
           }
           selectExchangeTab(activeEx);
 
-          // Mode
+          // Mode (đọc cờ live + fallback trading_mode để hết dính Demo khi live)
           const demoRadio = document.getElementById('mode-radio-demo');
           const liveRadio = document.getElementById('mode-radio-live');
-          if (s.is_live_enabled) {
+          const liveOn = !!(s.is_live_enabled ?? data.is_live_enabled) ||
+            (data.trading_mode && data.trading_mode !== 'paper') ||
+            (s.trading_mode && s.trading_mode !== 'paper');
+          if (liveOn) {
             if (liveRadio) liveRadio.checked = true;
+            if (demoRadio) demoRadio.checked = false;
           } else {
             if (demoRadio) demoRadio.checked = true;
+            if (liveRadio) liveRadio.checked = false;
           }
 
           // Binance Keys
@@ -6951,6 +6961,22 @@
         if (data.status === 'ok') {
           showLiveConfirmSuccess(liveConfirmMsg(data,
             liveConfirmText('live_confirm_ok', 'Da bat che do Live thanh cong!')));
+          // Đồng bộ radio + badge ngay, không chờ fetchStateRest (trước đây
+          // radio kẹt ở Demo dù server đã live -> tưởng chưa bật).
+          const liveRadio = document.getElementById('mode-radio-live');
+          const demoRadio = document.getElementById('mode-radio-demo');
+          if (liveRadio) liveRadio.checked = true;
+          if (demoRadio) demoRadio.checked = false;
+          const modeBadge = document.getElementById('header-mode-badge');
+          if (modeBadge) {
+            if (liveConfirmState.isMainnet) {
+              modeBadge.innerText = '💰 LIVE MAINNET';
+              modeBadge.className = 'px-2.5 py-1.5 rounded-lg text-xs font-bold bg-rose-500/20 text-rose-300 border border-rose-500 flex items-center gap-1.5 animate-pulse cursor-pointer shadow-sm';
+            } else {
+              modeBadge.innerText = '🔥 LIVE TESTNET';
+              modeBadge.className = 'px-2.5 py-1.5 rounded-lg text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500 flex items-center gap-1.5 animate-pulse cursor-pointer shadow-sm';
+            }
+          }
           setTimeout(() => {
             const m = document.getElementById('modal-live-confirm');
             if (m) m.classList.add('hidden');
