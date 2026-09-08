@@ -244,6 +244,66 @@ class BinanceAPIManager:
         except (KeyError, TypeError, ValueError, InvalidOperation, ZeroDivisionError) as exc:
             return False, {"code": -2, "msg": f"Binance filters: {exc}"}
 
+    def get_wallet_snapshot(self) -> Dict[str, Any]:
+        """Đọc số dư ví Futures THẬT từ sàn (wallet + khả dụng + quyền trade).
+
+        Dùng để đồng bộ vốn live: sizing phải nghe số tiền server, không dùng
+        vốn ảo nội bộ phình/xẹp theo ledger cũ. Trả về dict success/wallet_balance/
+        available_balance/can_trade; thất bại thì success=False và caller giữ vốn cũ.
+        """
+        if not self.api_key or not self.api_secret:
+            return {"success": False, "message": "Chưa cấu hình API Key/Secret.",
+                    "wallet_balance": 0.0, "available_balance": 0.0, "can_trade": False}
+        ok, acc = self._send_request("GET", "/fapi/v2/account", signed=True)
+        if not ok or not isinstance(acc, dict):
+            msg = acc.get("msg", "Lỗi đọc tài khoản") if isinstance(acc, dict) else "Lỗi đọc tài khoản"
+            return {"success": False, "message": msg,
+                    "wallet_balance": 0.0, "available_balance": 0.0, "can_trade": False}
+        try:
+            wallet = float(acc.get("totalWalletBalance", 0.0) or 0.0)
+            avail = float(acc.get("availableBalance", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return {"success": False, "message": "Số dư sàn trả về không hợp lệ.",
+                    "wallet_balance": 0.0, "available_balance": 0.0, "can_trade": False}
+        if not (math.isfinite(wallet) and math.isfinite(avail)) or wallet < 0 or avail < 0:
+            return {"success": False, "message": "Số dư sàn không hữu hạn.",
+                    "wallet_balance": 0.0, "available_balance": 0.0, "can_trade": False}
+        return {"success": True, "wallet_balance": wallet, "available_balance": avail,
+                "can_trade": bool(acc.get("canTrade", False))}
+
+    def get_position_snapshot(self, symbol: str) -> Dict[str, Any]:
+        """Đọc vị thế THẬT của symbol từ sàn (positionRisk) để đối chiếu ledger.
+
+        Trả về success + danh sách vị thế có khối lượng khác 0:
+        [{position_side, amount, entry_price, unrealized_pnl, leverage}].
+        """
+        sym = (symbol or "").upper().strip()
+        if not sym:
+            return {"success": False, "message": "Thiếu symbol.", "positions": []}
+        ok, data = self._send_request("GET", "/fapi/v3/positionRisk", {"symbol": sym})
+        if not ok or not isinstance(data, list):
+            msg = data.get("msg", "Lỗi đọc vị thế") if isinstance(data, dict) else "Lỗi đọc vị thế"
+            return {"success": False, "message": msg, "positions": []}
+        out = []
+        for item in data:
+            try:
+                amt = float(item.get("positionAmt", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if abs(amt) <= 0:
+                continue
+            try:
+                out.append({
+                    "position_side": str(item.get("positionSide", "BOTH")).upper(),
+                    "amount": amt,
+                    "entry_price": float(item.get("entryPrice", 0.0) or 0.0),
+                    "unrealized_pnl": float(item.get("unRealizedProfit", 0.0) or 0.0),
+                    "leverage": float(item.get("leverage", 0.0) or 0.0),
+                })
+            except (TypeError, ValueError):
+                continue
+        return {"success": True, "positions": out}
+
     def test_connection(self) -> Dict[str, Any]:
         """
         Tests API connection, ping latency, and verifies account credentials.

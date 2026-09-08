@@ -137,9 +137,10 @@ def test_monotonic_ratchet_stoploss():
     }
     indicators = {"atr": 300.0, "rsi": 55.0}
 
-    # Case A: Profit reaches +1.0R (Price = 81,500) -> Lock Breakeven
-    decision = coordinator.evaluate_position(pos, 81500.0, indicators, None, None)
-    assert decision.action == "LOCK_BREAKEVEN", f"Expected LOCK_BREAKEVEN at +1.0R, got {decision.action}"
+    # Case A: Profit reaches +0.5R (Price = 81,250) -> Lock Breakeven sớm
+    # (winner-protection: không chờ +1.0R mới khóa, winner không trượt về SL gốc)
+    decision = coordinator.evaluate_position(pos, 81250.0, indicators, None, None)
+    assert decision.action == "LOCK_BREAKEVEN", f"Expected LOCK_BREAKEVEN at +0.5R, got {decision.action}"
     pos["stop_loss"] = decision.new_stop_loss
     pos["is_risk_free"] = True
     print(f"  [Pass] At +1.0R, SL ratcheted to Breakeven: ${decision.new_stop_loss}")

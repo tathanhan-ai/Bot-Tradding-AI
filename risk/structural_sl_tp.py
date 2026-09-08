@@ -102,22 +102,47 @@ class StructuralRiskCalculator:
     def find_swing_points(self, df: pd.DataFrame, window: int = 5, lookback: int = 20) -> Tuple[float, float, float, float]:
         """
         Finds recent swing highs and swing lows from candle data.
+        Fractal pivot: một đáy chỉ được công nhận khi nến giữa THẤP HƠN cả
+        `window` nến hai bên (đỉnh thì ngược lại) — không còn lấy min/max trần
+        của cả dải nến nên SL neo đúng cấu trúc, râu quét đơn lẻ không chạm.
         Returns: (recent_swing_low, major_support, recent_swing_high, major_resistance)
         """
-        if df is None or len(df) < window * 2:
+        if df is None or len(df) < window * 2 + 1:
             return 0.0, 0.0, 0.0, 0.0
 
-        highs = df["high"]
-        lows = df["low"]
+        highs = df["high"].to_numpy(dtype=float)
+        lows = df["low"].to_numpy(dtype=float)
 
-        # Local swings
         eff_lookback = min(len(df), max(10, lookback))
-        local_low = float(lows.iloc[-eff_lookback:].min())
-        local_high = float(highs.iloc[-eff_lookback:].max())
+        seg_lo = lows[-eff_lookback:]
+        seg_hi = highs[-eff_lookback:]
 
-        # Major structural levels (last 60 candles)
-        major_support = float(lows.iloc[-min(len(df), 60):].min())
-        major_resist = float(highs.iloc[-min(len(df), 60):].max())
+        fractal_lows: list = []
+        fractal_highs: list = []
+        n = len(seg_lo)
+        for i in range(window, n - window):
+            center_lo = seg_lo[i]
+            if bool((center_lo < seg_lo[i - window:i]).all() and (center_lo < seg_lo[i + 1:i + window + 1]).all()):
+                fractal_lows.append(float(center_lo))
+            center_hi = seg_hi[i]
+            if bool((center_hi > seg_hi[i - window:i]).all() and (center_hi > seg_hi[i + 1:i + window + 1]).all()):
+                fractal_highs.append(float(center_hi))
+
+        # Đáy/đỉnh fractal gần nhất; không có pivot hợp lệ thì fallback biên
+        # ATR-wide chứ không lấy min/max trần (vốn là đáy râu đơn lẻ).
+        if fractal_lows:
+            local_low = fractal_lows[-1]
+        else:
+            local_low = float(np.percentile(seg_lo, 10))
+        if fractal_highs:
+            local_high = fractal_highs[-1]
+        else:
+            local_high = float(np.percentile(seg_hi, 90))
+
+        # Major structural levels (last 60 candles): vẫn dùng biên cứng vì đây
+        # là vùng cản/tường thanh khoản, không phải neo SL trực tiếp.
+        major_support = float(lows[-min(len(df), 60):].min())
+        major_resist = float(highs[-min(len(df), 60):].max())
 
         return local_low, major_support, local_high, major_resist
 

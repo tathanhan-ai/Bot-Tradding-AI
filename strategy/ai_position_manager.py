@@ -1,11 +1,14 @@
 """
 AI Dynamic Position Coordinator & Smart Exit Optimizer
 Continuously coordinates open positions on every price tick:
-1. Dynamic Breakeven & Risk-Free Trade Lock (Dời SL về Entry + Phí Sàn khi lãi >= +0.8R)
-2. Dynamic TP Expansion (Nới TP theo cản khung lớn 1h/4h khi sóng mạnh để gồng lời dài hơi)
-3. Trailing Stop along Swing Highs/Lows with ATR buffer
-4. AI Early Take-Profit (Chốt lời khi RSI quá mua/quá bán cực đại cạn kiệt lực đẩy)
-5. AI Early Cut-Loss (Cắt lỗ sớm ở -0.4R khi cấu trúc thị trường bị bẻ gãy)
+1. Early Breakeven Lock (Dời SL về Entry + Phí Sàn khi lãi >= +0.5R thay vì +1.0R:
+   winner không còn đường trượt về SL gốc)
+2. Early Partial Take-Profit 50% tại +1.0R (thay vì +1.2R) hoặc khi đã đi
+   50% đường tới TP: vùng lãi vừa phải khóa một phần, không chờ TP xa RR 2-3.5
+3. Peak-anchored trailing: SL bám đỉnh lãi (peak - 1.0 ATR), không bao giờ lùi
+4. TP Expansion chỉ khi R >= 2.0, momentum KHỎE VÀ macro đồng thuận, nới tối đa
+   +1.0 ATR (thay vì +2.5 ATR), SL khóa tối thiểu +1.0R
+5. AI Early Take-Profit (RSI kiệt sức) / AI Early Cut-Loss (-0.4R gãy cấu trúc)
 """
 import time
 from dataclasses import dataclass
@@ -115,11 +118,13 @@ class AIPositionCoordinator:
                 )
 
         # =========================================================================
-        # 1. MILESTONE 1: DỜI SL VỀ ENTRY (KHÓA HÒA VỐN + PHÍ SÀN = RISK-FREE TRADE)
+        # 1. MILESTONE 1: DỜI SL VỀ ENTRY SỚM (KHÓA HÒA VỐN + PHÍ SÀN = RISK-FREE)
+        # Winner-protection: kích hoạt từ +0.5R (thay vì +1.0R) để lệnh lãi đậm
+        # sớm không còn đường trượt về SL gốc khi giá đảo chiều.
         # =========================================================================
         if not is_risk_free:
-            # Trigger ONLY when confirmed in profit >= +1.0R (never on tiny 1-tick fluctuations)
-            if r_multiple >= 1.0 and gain_usdt > 0:
+            # Trigger sớm từ +0.5R đã xác nhận lãi (gain_usdt > 0), không chờ +1.0R
+            if r_multiple >= 0.5 and gain_usdt > 0:
                 if direction == 1 and current_sl < breakeven:
                     # SL must always be strictly below current price with at least 0.3 ATR breathing room
                     new_sl = round(min(breakeven, current_price - (0.3 * atr)), 2)
@@ -141,7 +146,9 @@ class AIPositionCoordinator:
                         )
 
         # =========================================================================
-        # 1.5 MILESTONE 1.5: CHỐT LỜI TỪNG PHẦN 50/50 (PARTIAL TAKE PROFIT) TẠI TP1
+        # 1.5 MILESTONE 1.5: CHỐT LỜI TỪNG PHẦN 50% SỚM (PARTIAL TAKE PROFIT)
+        # Kích hoạt từ +1.0R (thay vì +1.2R): vùng lãi vừa phải khóa một phần,
+        # không chờ TP xa RR 2-3.5 mới chốt đồng đầu tiên.
         # =========================================================================
         staged = pos.get("staged_take_profits") or {}
         staged_budget = any(staged.get(stage, 0) > 0 and staged.get(f"{stage}_ratio", 0) > 0
@@ -151,46 +158,52 @@ class AIPositionCoordinator:
         if not staged_budget and not pos.get("partial_tp_done", False):
             dist_to_tp = abs(current_tp - entry)
             progress_pct = (abs(current_price - entry) / max(dist_to_tp, 1.0)) if dist_to_tp > 0 else 0.0
-            if gain_usdt > 0 and (r_multiple >= 1.2 or progress_pct >= 0.60):
+            if gain_usdt > 0 and (r_multiple >= 1.0 or progress_pct >= 0.50):
                 safe_sl = max(current_sl, breakeven) if direction == 1 else min(current_sl, breakeven)
                 return AIPositionDecision(
                     action="PARTIAL_TAKE_PROFIT",
                     new_stop_loss=safe_sl,
-                    reason=f"CHỐT LỜI 50% TẠI TP1 💰 (${current_price:,.2f} | +{r_multiple:.2f}R)",
+                    reason=f"CHỐT LỜI 50% SỚM 💰 (${current_price:,.2f} | +{r_multiple:.2f}R)",
                     status_display="⏳ Đề xuất chốt 50% — chờ xác nhận"
                 )
 
         # =========================================================================
-        # 2. MILESTONE 2: NỚI RỘNG TP THEO CẢN LỚN ĐỂ GỒNG LÃI DÀI HƠI (TP EXPANSION)
+        # 2. MILESTONE 2: NỚI RỘNG TP — CHỈ KHI ĐÃ LÃI DÀY (R >= 2.0) + XU HƯỚNG
+        # THẬT SỰ ĐỒNG THUẬN. Nới tối đa +1.0 ATR, SL khóa tối thiểu +1.0R.
+        # Chống mẫu hình cũ: chạm 85% TP là nới +2.5 ATR rồi quay đầu mất winner.
         # =========================================================================
-        # When price reaches >= 85% of initial TP, check if momentum supports riding big trend
+        # When price reaches >= 85% of initial TP, only extend if profit is
+        # already deep (R >= 2.0) AND momentum + macro both agree.
         dist_total = abs(current_tp - entry)
         curr_progress = (current_price - entry) * direction / dist_total if dist_total > 0 else 0.0
 
-        if not tp_expanded and curr_progress >= 0.85:
-            # Check momentum: Not extremely exhausted yet (RSI between 55-72 for Long, 28-45 for Short)
-            momentum_healthy = (55.0 <= rsi <= 74.0) if direction == 1 else (26.0 <= rsi <= 45.0)
-            macro_trend_aligned = (ai_verdict and ai_verdict.regime == ("TRENDING_BULL" if direction == 1 else "TRENDING_BEAR"))
+        if not tp_expanded and curr_progress >= 0.85 and r_multiple >= 2.0:
+            # Check momentum: healthy but not exhausted (RSI 55-70 Long, 30-45 Short)
+            momentum_healthy = (55.0 <= rsi <= 70.0) if direction == 1 else (30.0 <= rsi <= 45.0)
+            # Không có verdict (unit test/backtest) thì coi như đồng thuận để không chặn;
+            # live có verdict thì đòi CẢ momentum lẫn macro (AND) mới nới.
+            macro_trend_aligned = (ai_verdict is None) or (getattr(ai_verdict, "regime", None) == ("TRENDING_BULL" if direction == 1 else "TRENDING_BEAR"))
 
-            if momentum_healthy or macro_trend_aligned:
+            # Yêu cầu CẢ momentum lẫn macro đồng thuận (AND chứ không OR) mới nới
+            if momentum_healthy and macro_trend_aligned:
                 # Find higher timeframe target
                 macro_target = 0.0
                 if ai_verdict:
                     macro_target = ai_verdict.resistance_price if direction == 1 else ai_verdict.support_price
 
                 if direction == 1:
-                    new_tp = round(max(current_tp + (2.5 * atr), macro_target * 0.998), 2)
-                    locked_sl = round(entry + (0.7 * initial_risk), 2)  # Lock in at least +0.7R profit
+                    new_tp = round(max(current_tp + (1.0 * atr), macro_target * 0.998), 2)
+                    locked_sl = round(entry + (1.0 * initial_risk), 2)  # Khóa tối thiểu +1.0R
                 else:
-                    new_tp = round(min(current_tp - (2.5 * atr), macro_target * 1.002), 2) if macro_target > 0 else round(current_tp - (2.5 * atr), 2)
-                    locked_sl = round(entry - (0.7 * initial_risk), 2)
+                    new_tp = round(min(current_tp - (1.0 * atr), macro_target * 1.002), 2) if macro_target > 0 else round(current_tp - (1.0 * atr), 2)
+                    locked_sl = round(entry - (1.0 * initial_risk), 2)
 
                 return AIPositionDecision(
                     action="EXPAND_TAKE_PROFIT",
                     new_stop_loss=locked_sl,
                     new_take_profit=new_tp,
-                    reason=f"NỚI RỘNG TP GỒNG SÓNG DÀI HƠI 🚀 (Dời SL khóa lãi lên ${locked_sl:,.1f}, Nới TP lên ${new_tp:,.1f})",
-                    status_display=f"🚀 NỚI TP GỒNG LÃI DÀI: ${new_tp:,.1f}"
+                    reason=f"NỚI TP CÓ KIỂM SOÁT 🚀 (R={r_multiple:.1f} đã dày, SL khóa +1.0R tại ${locked_sl:,.1f}, TP mới ${new_tp:,.1f})",
+                    status_display=f"🚀 NỚI TP GỒNG LÃI: ${new_tp:,.1f}"
                 )
 
         # =========================================================================
@@ -242,26 +255,31 @@ class AIPositionCoordinator:
                 )
 
         # =========================================================================
-        # 5. DYNAMIC TRAILING STOP THEO SÓNG (Nếu đã có lãi tốt)
+        # 5. PEAK-ANCHORED TRAILING STOP (SL bám ĐỈNH LÃI, không bám giá hiện tại)
+        # peak_price được tick mỗi nến — SL = peak ∓ 1.0 ATR từ +1.0R trở lên.
+        # Winner trượt về vẫn giữ phần lớn lãi đỉnh, không trả hết cho thị trường.
         # =========================================================================
-        if r_multiple >= 1.2:
+        if r_multiple >= 1.0 and gain_usdt > 0:
+            peak = float(pos.get("peak_price", current_price) or current_price)
             if direction == 1:
-                trail_sl = round(current_price - (1.2 * atr), 2)
-                if trail_sl > current_sl:
+                peak = max(peak, current_price)
+                trail_sl = round(peak - (1.0 * atr), 2)
+                if trail_sl > current_sl and trail_sl < current_price:
                     return AIPositionDecision(
                         action="UPDATE_TRAILING",
                         new_stop_loss=trail_sl,
-                        reason=f"Nâng Trailing Stop lên ${trail_sl:,.2f} để khóa lợi nhuận",
-                        status_display=f"🚀 AI Trailing Khóa Lãi: ${trail_sl:,.1f}"
+                        reason=f"Trailing bám đỉnh ${peak:,.2f} − 1.0 ATR → SL ${trail_sl:,.2f} (khóa +{r_multiple:.1f}R)",
+                        status_display=f"🚀 Trailing đỉnh lãi: ${trail_sl:,.1f}"
                     )
             else:
-                trail_sl = round(current_price + (1.2 * atr), 2)
-                if trail_sl < current_sl:
+                peak = min(peak, current_price)
+                trail_sl = round(peak + (1.0 * atr), 2)
+                if trail_sl < current_sl and trail_sl > current_price:
                     return AIPositionDecision(
                         action="UPDATE_TRAILING",
                         new_stop_loss=trail_sl,
-                        reason=f"Hạ Trailing Stop xuống ${trail_sl:,.2f} để khóa lợi nhuận",
-                        status_display=f"🚀 AI Trailing Khóa Lãi: ${trail_sl:,.1f}"
+                        reason=f"Trailing bám đáy ${peak:,.2f} + 1.0 ATR → SL ${trail_sl:,.2f} (khóa +{r_multiple:.1f}R)",
+                        status_display=f"🚀 Trailing đáy lãi: ${trail_sl:,.1f}"
                     )
 
         return AIPositionDecision(action="HOLD", status_display="AI Giám Sát Realtime 👁️")

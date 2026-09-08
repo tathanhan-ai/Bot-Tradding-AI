@@ -386,6 +386,12 @@ class LiveTradingState:
         # Mark price chuan san (tinh UPNL/thanh ly). Khac mid bookTicker (khop lenh).
         self.mark_price = 0.0
         self.mark_funding_rate = 0.0
+        # Live exchange-balance sync: vốn thật từ sàn, drift, lỗi sync gần nhất.
+        self.exchange_wallet = 0.0
+        self.exchange_available = 0.0
+        self.exchange_balance_drift = 0.0
+        self.exchange_sync_error = ""
+        self._last_exchange_sync = 0.0
 
         self.indicators = {
             "ema": None,
@@ -592,6 +598,45 @@ class LiveTradingState:
                     self.fast_pnl_tick()
         except Exception:
             pass
+
+    def sync_exchange_balance(self, force: bool = False) -> None:
+        """Đồng bộ vốn live theo số dư ví THẬT từ sàn (poll mỗi 30s khi live).
+
+        Bot nghe số tiền server: current_balance = wallet sàn, mọi sizing phía
+        sau dùng vốn thật. Sai số >10% vẫn sync nhưng cắm cờ drift để execution
+        từ chối lệnh mới cho tới khi chênh lệch được xử lý. Thất bại mạng thì
+        giữ vốn cũ (fail-safe: không đặt lệnh trên số dư ma).
+        """
+        if not (self.active_exchange == "binance" and self.binance_api.is_live_enabled):
+            return
+        now = time.time()
+        if not force and now - getattr(self, "_last_exchange_sync", 0.0) < 30.0:
+            return
+        self._last_exchange_sync = now
+        try:
+            snap = self.binance_api.get_wallet_snapshot()
+        except Exception as exc:
+            self.exchange_sync_error = str(exc)[:200]
+            return
+        if not snap.get("success"):
+            self.exchange_sync_error = str(snap.get("message", "sync failed"))[:200]
+            return
+        wallet = float(snap.get("wallet_balance", 0.0) or 0.0)
+        if wallet <= 0:
+            self.exchange_sync_error = "Exchange wallet is zero; keeping ledger capital"
+            return
+        drift = abs(wallet - self.current_balance) / max(wallet, 1e-9)
+        self.exchange_wallet = wallet
+        self.exchange_available = float(snap.get("available_balance", 0.0) or 0.0)
+        self.exchange_balance_drift = round(drift, 4)
+        self.exchange_sync_error = ""
+        # Sync vốn theo sàn; initial_balance giữ nguyên để PnL lịch sử không méo.
+        self.current_balance = wallet
+        self.risk_manager.update_balance(wallet)
+        if drift > 0.10:
+            print(f"[BALANCE SYNC] ⚠️ Ví sàn ${wallet:,.2f} lệch {drift*100:.1f}% so với ledger — đã sync, chặn lệnh mới tới khi kiểm tra.", flush=True)
+        else:
+            print(f"[BALANCE SYNC] ✅ Vốn live = ví sàn ${wallet:,.2f} (khả dụng ${self.exchange_available:,.2f})", flush=True)
 
     def get_structure_df(self) -> Optional[pd.DataFrame]:
         df = self.data_map.get(self.active_timeframe)
@@ -1939,6 +1984,11 @@ class LiveTradingState:
             self.risk_manager.sync_day()
             if self.live_price <= 0:
                 return
+            # Live nghe số tiền server trước mọi sizing: sync vốn theo ví sàn.
+            try:
+                self.sync_exchange_balance()
+            except Exception:
+                pass
             self.reconcile_binance_testnet_orders()
             self.process_execution_tick(self.live_price)
             self.repair_closed_history()
@@ -2276,8 +2326,11 @@ class LiveTradingState:
         return {
             "symbol": self.symbol,
             "balance": round(self.current_balance, 2),
-            "equity": round(equity, 2),
-            "unrealized_pnl": round(unrealized, 2),
+            "exchange_wallet": round(float(getattr(self, "exchange_wallet", 0.0) or 0.0), 2),
+            "exchange_available": round(float(getattr(self, "exchange_available", 0.0) or 0.0), 2),
+            "exchange_balance_drift": float(getattr(self, "exchange_balance_drift", 0.0) or 0.0),
+            "exchange_sync_error": str(getattr(self, "exchange_sync_error", "") or ""),
+            "equity": round(equity, 2),            "unrealized_pnl": round(unrealized, 2),
             "initial_balance": self.initial_balance,
             "net_pnl": round(total_net_pnl, 2),
             "net_pnl_pct": round(total_net_pnl_pct, 2),
@@ -3635,6 +3688,14 @@ def toggle_trading_mode(payload: dict, session: UserSession = Depends(require_ro
     state.binance_api.is_live_enabled = live_enabled
     state.mexc_api.is_live_enabled = False
     state.storage.save_setting("is_live_enabled", live_enabled)
+    if live_enabled:
+        # Bật live là sync vốn ngay theo ví sàn, không sizing trên ledger cũ.
+        try:
+            state.sync_exchange_balance(force=True)
+        except Exception as exc:
+            return {"status": "error", "message": f"Không đồng bộ được số dư sàn: {exc}"}
+        if getattr(state, "exchange_sync_error", ""):
+            return {"status": "error", "message": f"Không đồng bộ được số dư sàn: {state.exchange_sync_error}"}
     if state.ws_engine:
         asyncio.run_coroutine_threadsafe(state.ws_engine.stop(), app.state.event_loop).result(timeout=20)
     state.market_source_times.clear()

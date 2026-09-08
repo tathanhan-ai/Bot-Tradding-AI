@@ -270,6 +270,16 @@ class ExecutionLifecycle:
             self.trace(order.parent_intent_id, "Execution / Account", "VETO", "No verified Testnet wallet and available margin")
             self.persist()
             return
+        if self.live:
+            # Live nghe số tiền server: ví sàn lệch quá 10% so với vốn bot thì
+            # KHÔNG cho sizing trên vốn sai — từ chối để chờ sync_exchange_balance.
+            drift = abs(wallet - s.current_balance) / max(wallet, 1e-9)
+            if drift > 0.10:
+                order.status = "REJECTED"
+                self.trace(order.parent_intent_id, "Execution / Account", "VETO",
+                           f"Exchange wallet ${wallet:,.2f} diverges {drift * 100:.1f}% from bot capital ${s.current_balance:,.2f}; sync before sizing")
+                self.persist()
+                return
         open_notional = sum(position.get("units", 0) * s.live_price for _, position in self.all_positions())
         reserved_notional = sum(max(0, o.units - o.exchange_executed_quantity) * max(o.price, s.live_price) for o in pending)
         cro = s.risk_manager.ai_cro.last_verdict
