@@ -32,12 +32,16 @@ class BinanceAPIManager:
         api_key: str = "",
         api_secret: str = "",
         is_testnet: bool = False,
-        is_live_enabled: bool = False
+        is_live_enabled: bool = False,
+        mainnet_confirmed: bool = False
     ):
         self.api_key = api_key.strip()
         self.api_secret = api_secret.strip()
         self.is_testnet = is_testnet
         self.is_live_enabled = is_live_enabled
+        # Mainnet tiền thật: chỉ cho phép khi user xác nhận rõ ràng qua UI
+        # (toggle_mode với confirm_mainnet=true). Mặc định False = chặn cứng.
+        self.mainnet_confirmed = bool(mainnet_confirmed)
         self.server_time_offset_ms = 0
         self._clock_synced_at = 0.0
         self._symbol_filters: Dict[str, Any] = {}
@@ -50,6 +54,8 @@ class BinanceAPIManager:
         self.api_key = api_key.strip()
         self.api_secret = api_secret.strip()
         self.is_testnet = is_testnet
+        # Đổi mạng/key là thu hồi xác nhận Mainnet — phải xác nhận lại từ đầu.
+        self.mainnet_confirmed = False
         self._clock_synced_at = 0.0
         self._symbol_filters.clear()
 
@@ -142,10 +148,10 @@ class BinanceAPIManager:
             return False, {"code": -999, "msg": f"Lỗi kết nối mạng: {str(e)}"}
 
     def _write_error(self) -> Optional[Dict[str, Any]]:
-        if not self.is_testnet:
-            return {"code": -997, "msg": "Mainnet không nằm trong scope thực thi. Chỉ Binance Testnet được phép."}
         if not self.is_live_enabled:
-            return {"code": -998, "msg": "Giao dịch Binance Testnet chưa được bật."}
+            return {"code": -998, "msg": "Giao dịch live chưa được bật."}
+        if not self.is_testnet and not getattr(self, "mainnet_confirmed", False):
+            return {"code": -997, "msg": "Mainnet tiền thật yêu cầu xác nhận rõ ràng (confirm_mainnet=true khi bật live)."}
         if not self.api_key or not self.api_secret:
             return {"code": -1, "msg": "Thiếu Binance API Key hoặc Secret Key."}
         return None

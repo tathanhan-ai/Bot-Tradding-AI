@@ -136,13 +136,30 @@ class BinanceExecutionTest(unittest.TestCase):
     def test_all_writes_are_testnet_only_even_direct_transport(self):
         manager = self.manager()
         with patch("urllib.request.urlopen") as transport:
+            # Mainnet chua xac nhan -> chan; live tat -> chan (giong cu)
             for testnet, enabled in ((False, True), (True, False)):
                 manager.is_testnet, manager.is_live_enabled = testnet, enabled
+                manager.mainnet_confirmed = False
                 self.assertFalse(manager.place_order_live("BTCUSDT", "BUY", "MARKET", .01)[0])
                 self.assertFalse(manager.cancel_order("BTCUSDT", order_id="algo:12")[0])
                 self.assertFalse(manager.prepare_testnet_trading("BTCUSDT", 2)[0])
                 self.assertFalse(manager._send_request("POST", "/fapi/v1/leverage", {"leverage": 2})[0])
             transport.assert_not_called()
+
+    def test_mainnet_writes_require_explicit_confirmation(self):
+        manager = self.manager()
+        manager.is_testnet, manager.is_live_enabled = False, True
+        manager.mainnet_confirmed = False
+        with patch("urllib.request.urlopen") as transport:
+            self.assertFalse(manager.place_order_live("BTCUSDT", "BUY", "MARKET", .01)[0])
+            self.assertFalse(manager.cancel_order("BTCUSDT", order_id="algo:12")[0])
+            transport.assert_not_called()
+        # Sau xac nhan: cho phep di qua gate (transport duoc goi, ket qua tuy
+        # mock; quan trong la khong con bi chan -997).
+        manager.mainnet_confirmed = True
+        manager._send_request = Mock(return_value=(True, {"orderId": 1, "status": "NEW", "executedQty": "0"}))
+        ok, _ = manager.cancel_order("BTCUSDT", order_id="123")
+        self.assertTrue(ok)
 
     def test_one_way_and_leverage_are_prepared_only_on_testnet(self):
         manager = self.manager()

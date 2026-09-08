@@ -6814,11 +6814,26 @@
 
     async function onModeRadioChanged(mode) {
       const isLive = mode === 'live';
+      const isMainnet = (document.getElementById('setting-network')?.value || 'mainnet') !== 'testnet';
       if (isLive) {
         const conf = confirm(t('confirm_live_mode_warning'));
         if (!conf) {
           document.getElementById('mode-radio-demo').checked = true;
           return;
+        }
+        // Mainnet tiền thật: xác nhận lần 2 riêng cho tiền thật trước khi gửi.
+        if (isMainnet) {
+          const conf2 = confirm(
+            currentLanguage === 'zh'
+              ? '⚠️ 。\nUSDT ——。\n\n'
+              : (currentLanguage === 'en'
+                ? '⚠️ Second confirmation: you selected Binance MAINNET (REAL MONEY).\nThe bot will place orders with real USDT — losses are real losses.\n\nStart live with real funds?'
+                : '⚠️ Xác nhận lần 2: bạn đang chọn Binance MAINNET (TIỀN THẬT).\nBot sẽ đặt lệnh bằng USDT thật — lỗ là mất tiền thật.\n\nChắc chắn bật live tiền thật?')
+          );
+          if (!conf2) {
+            document.getElementById('mode-radio-demo').checked = true;
+            return;
+          }
         }
       }
 
@@ -6826,7 +6841,7 @@
         const res = await fetch('/api/settings/toggle_mode', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ live_enabled: isLive })
+          body: JSON.stringify({ live_enabled: isLive, confirm_mainnet: isLive && isMainnet })
         });
         const data = await res.json();
         if (data.status === 'error') {

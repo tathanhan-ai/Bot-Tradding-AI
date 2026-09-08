@@ -185,8 +185,10 @@ class ExecutionLifecycle:
             return "Full close is reconciling outstanding entry children"
         snap = s.build_market_snapshot()
         issues = snap.freshness_issues()
-        if self.live and (not s.binance_api.is_testnet or snap.environment != "testnet"):
-            issues.append("Testnet market-data/execution mismatch")
+        if self.live:
+            expected_env = "testnet" if s.binance_api.is_testnet else "mainnet"
+            if snap.environment != expected_env:
+                issues.append(f"market-data/execution mismatch (live={expected_env}, data={snap.environment})")
         if issues:
             return "; ".join(issues)
         metrics = snap.context["hft"]

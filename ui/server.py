@@ -243,11 +243,13 @@ class LiveTradingState:
         mexc_proxy_url = str(saved_settings.get("mexc_proxy_url", "")).strip()
 
         # Live Binance Futures API Manager (Mainnet & Testnet)
+        mainnet_ok = _as_bool(saved_settings.get("mainnet_confirmed"), False)
         self.binance_api = BinanceAPIManager(
             api_key=api_key,
             api_secret=api_secret,
             is_testnet=is_testnet,
-            is_live_enabled=is_live
+            is_live_enabled=is_live,
+            mainnet_confirmed=mainnet_ok
         )
 
         # Live MEXC Contract (Futures) API Manager
@@ -831,7 +833,10 @@ class LiveTradingState:
                 bids=bids,
                 asks=asks,
                 frames={tf: frame.copy(deep=True) for tf, frame in self.data_map.items()},
-                environment="testnet" if self.active_exchange == "binance" and self.ws_engine and self.ws_engine.is_testnet else "paper",
+                environment=(
+                    "testnet" if self.active_exchange == "binance" and self.ws_engine and self.ws_engine.is_testnet
+                    else ("mainnet" if self.active_exchange == "binance" and self.binance_api.is_live_enabled and not self.binance_api.is_testnet
+                          else "paper")),
                 context={
                     "hft": hft,
                     "flow": flow,
@@ -1004,8 +1009,11 @@ class LiveTradingState:
                 return StageOutcome.veto("snapshot exchange does not match selected execution venue")
             if self.active_exchange == "mexc" and self.mexc_api.is_live_enabled:
                 return StageOutcome.veto("MEXC native execution is locked; paper-only is mandatory")
-            if self.binance_api.is_live_enabled and (not self.binance_api.is_testnet or _snapshot.environment != "testnet"):
-                return StageOutcome.veto("execution/data environment mismatch or mainnet disabled")
+            if self.binance_api.is_live_enabled:
+                expected_env = "testnet" if self.binance_api.is_testnet else "mainnet"
+                if _snapshot.environment != expected_env:
+                    return StageOutcome.veto(
+                        f"execution/data environment mismatch (live={expected_env}, data={_snapshot.environment})")
             if getattr(self, "execution_blocker", ""):
                 return StageOutcome.veto(self.execution_blocker)
             equity = self.current_balance + (self.current_position.get("unrealized_pnl", 0.0) if self.current_position else 0.0) + sum(pos.get("unrealized_pnl", 0.0) for pos in self.hedge_positions.values())
@@ -2629,7 +2637,10 @@ class LiveTradingState:
                 "execution_intents": [asdict(o) for o in self.order_manager.orders[-30:]],
                 "protective_orders": deepcopy(self.execution.protective[-30:]),
                 "execution_traces": deepcopy(dict(list(self.execution.traces.items())[-10:])),
-                "data_environment": "testnet" if self.ws_engine and self.ws_engine.is_testnet else "paper",
+                "data_environment": (
+                    "testnet" if self.ws_engine and self.ws_engine.is_testnet
+                    else ("mainnet" if self.active_exchange == "binance" and self.binance_api.is_live_enabled and not self.binance_api.is_testnet
+                          else "paper")),
                 "stream_errors": dict(self.ws_engine.last_error) if self.ws_engine else {},
                 "clock_offset_ms": self.ws_engine.clock_offset_ms if self.ws_engine else None,
                 "source_age_seconds": {
@@ -3520,6 +3531,9 @@ def save_api_keys(payload: dict, request: Request, session: UserSession = Depend
             state.binance_api.api_secret = api_secret
         state.storage.save_setting("is_testnet", is_testnet)
         state.binance_api.is_testnet = is_testnet
+        # Đổi mạng/key là thu hồi xác nhận Mainnet — live Mainnet phải xác nhận lại.
+        state.binance_api.mainnet_confirmed = False
+        state.storage.save_setting("mainnet_confirmed", False)
 
         if set_active:
             state.active_exchange = "binance"
@@ -3671,8 +3685,17 @@ def toggle_trading_mode(payload: dict, session: UserSession = Depends(require_ro
     if live_enabled:
         if state.active_exchange != "binance":
             return {"status": "error", "message": "MEXC chỉ chạy paper-only cho đến khi có market-data và lifecycle parity."}
-        if not state.binance_api.is_testnet:
-            return {"status": "error", "message": "Scope hiện tại chỉ cho phép Binance Futures Testnet, không bật Mainnet."}
+        # Mainnet tiền thật: yêu cầu xác nhận rõ ràng (confirm_mainnet=true).
+        # Testnet thì không cần. Không xác nhận -> từ chối, tiền thật không bật mù.
+        wants_mainnet = not state.binance_api.is_testnet
+        confirm_mainnet = bool(payload.get("confirm_mainnet", False))
+        if wants_mainnet and not confirm_mainnet:
+            return {"status": "error",
+                    "message": "Bạn đang bật LIVE trên Binance Mainnet (TIỀN THẬT). "
+                               "Hãy xác nhận lại với confirm_mainnet=true — bot sẽ đặt lệnh thật trừ ví thật."}
+        if wants_mainnet:
+            state.binance_api.mainnet_confirmed = True
+            state.storage.save_setting("mainnet_confirmed", True)
         conn_res = state.active_exchange_api.test_connection()
         if not conn_res.get("success", False):
             return {
@@ -3688,6 +3711,10 @@ def toggle_trading_mode(payload: dict, session: UserSession = Depends(require_ro
     state.binance_api.is_live_enabled = live_enabled
     state.mexc_api.is_live_enabled = False
     state.storage.save_setting("is_live_enabled", live_enabled)
+    if not live_enabled:
+        # Tắt live là thu hồi xác nhận Mainnet — lần bật sau phải xác nhận lại.
+        state.binance_api.mainnet_confirmed = False
+        state.storage.save_setting("mainnet_confirmed", False)
     if live_enabled:
         # Bật live là sync vốn ngay theo ví sàn, không sizing trên ledger cũ.
         try:
@@ -3709,7 +3736,12 @@ def toggle_trading_mode(payload: dict, session: UserSession = Depends(require_ro
     state.initialize_history()
     state.init_ws_engine()
     asyncio.run_coroutine_threadsafe(state.ws_engine.start(), app.state.event_loop).result(timeout=20)
-    mode_text = "BINANCE TESTNET" if live_enabled else "MÔ PHỎNG (PAPER TRADING) 🧪"
+    if state.binance_api.is_live_enabled and state.binance_api.is_testnet:
+        mode_text = "BINANCE TESTNET"
+    elif state.binance_api.is_live_enabled:
+        mode_text = "BINANCE MAINNET (TIỀN THẬT) 💰"
+    else:
+        mode_text = "MÔ PHỎNG (PAPER TRADING) 🧪"
     return {"status": "ok", "live_enabled": live_enabled, "message": f"Đã chuyển sang chế độ {mode_text}"}
 
 
