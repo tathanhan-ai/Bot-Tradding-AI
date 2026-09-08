@@ -220,6 +220,11 @@ class LiveTradingState:
 
         is_testnet = _as_bool(saved_settings.get("is_testnet"), False)
         is_live = _as_bool(saved_settings.get("is_live_enabled"), False)
+        # Sổ sách tách biệt paper/live: khởi động ở đúng bộ dữ liệu của chế độ.
+        try:
+            self.storage.set_mode("live" if is_live else "paper")
+        except Exception:
+            pass
         vip_tier = saved_settings.get("vip_tier", "VIP_0")
         use_bnb = _as_bool(saved_settings.get("use_bnb_discount"), False)
         custom_maker = saved_settings.get("custom_maker_fee")
@@ -308,9 +313,10 @@ class LiveTradingState:
         self.available_ai_models = ["ag/gemini-3.8-flash", "ag/gemini-3.8-flash-high", "ag/gemini-3.7-flash-high", "ag/claude-sonnet-4-6", "ds/deepseek-chat", "ds/deepseek-reasoner"]
 
         # Monthly Target Governor & Adaptive Capital Allocation
-        target_pct = float(saved_settings.get("monthly_target_pct", 10.0))
-        target_enabled = _as_bool(saved_settings.get("monthly_target_enabled"), True)
-        compensate_def = _as_bool(saved_settings.get("monthly_compensate_deficit"), True)
+        # (get_setting qua scope mode — live đọc key _live, paper đọc key gốc)
+        target_pct = float(self.storage.get_setting("monthly_target_pct", 10.0))
+        target_enabled = _as_bool(self.storage.get_setting("monthly_target_enabled", True), True)
+        compensate_def = _as_bool(self.storage.get_setting("monthly_compensate_deficit", True), True)
         self.monthly_governor = MonthlyTargetGovernor(
             base_target_pct=target_pct,
             enabled=target_enabled,
@@ -337,6 +343,28 @@ class LiveTradingState:
         # Nen dispatcher khi cung loai lenh bi veto lien tiep (VD 3x SCALE_RATIO bi memory veto):
         # key = (order_type, direction) -> {count, last_veto_ts}
         self.veto_streak: Dict[str, Dict[str, float]] = {}
+        self._load_mode_ledger(symbol=symbol, balance=balance)
+
+    def _load_mode_ledger(self, symbol: str = "BTCUSDT", balance: float = 5000.0) -> None:
+        """Nạp toàn bộ sổ sách của chế độ hiện tại (paper/live tách biệt).
+
+        Gọi lúc khởi động và mỗi lần đổi chế độ: số dư, lệnh, bài học AI,
+        mục tiêu tháng, engine rủi ro đều chuyển sang bộ của mode mới.
+        Không vị thế/lệnh chờ nào được mang sang (toggle đã chặn từ trước).
+        """
+        # Reset RAM về rỗng trước khi nạp sổ mới — chống sót dữ liệu mode cũ.
+        self.trades = []
+        self.trade_memory.memory_records = []
+        self.current_position = None
+        self.hedge_positions = {}
+        self.total_fees = 0.0
+        self.jesse_engine.trade_pnls = []
+        self.jesse_engine.current_consecutive_losses = 0
+        self.jesse_engine.max_consecutive_losses = 0
+        self.risk_manager.ai_cro.consecutive_losses = 0
+        self.risk_manager.ai_cro.consecutive_wins = 0
+        self.risk_manager.ai_cro.circuit_breaker = False
+        self.risk_manager.ai_cro.last_verdict = None
 
         # Load persisted account state if available
         saved_state = self.storage.load_account_state()
@@ -355,6 +383,10 @@ class LiveTradingState:
             saved_peak = saved_state.get("peak_balance", self.current_balance)
             self.freqtrade_protections.max_drawdown_guard.peak_balance = saved_peak
             self.risk_manager.update_balance(self.current_balance)
+        else:
+            self.symbol = symbol
+            self.initial_balance = balance
+            self.current_balance = balance
 
         # Load persisted trades
         self.trades = self.storage.load_trades(limit=200)
@@ -380,7 +412,25 @@ class LiveTradingState:
             )
             self.trade_memory.memory_records.append(rec)
 
-        print(f"📦 [SQLITE KHÔI PHỤC] Đã nạp {len(self.trades)} lệnh lịch sử, {len(self.trade_memory.memory_records)} bài học kinh nghiệm, số dư: ${self.current_balance:,.2f}", flush=True)
+        # Mục tiêu tháng theo mode: nạp lại governor từ key scoped của mode mới
+        # (dùng get_setting để qua ánh xạ _live, không đọc dict thô).
+        try:
+            target_pct = float(self.storage.get_setting("monthly_target_pct", 10.0))
+            target_enabled = str(self.storage.get_setting("monthly_target_enabled", True)).lower() in ("true", "1", "yes", "on")
+            compensate_def = str(self.storage.get_setting("monthly_compensate_deficit", True)).lower() in ("true", "1", "yes", "on")
+            profile = str(self.storage.get_setting("monthly_target_profile", "growth"))
+            self.monthly_governor.update_config(None, target_enabled, compensate_def, profile=profile)
+            if target_pct and profile not in self.monthly_governor.PROFILES:
+                self.monthly_governor.base_target_pct = target_pct
+                try:
+                    self.storage.save_setting("monthly_target_pct", target_pct)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        mode_tag = "LIVE 💰" if self.storage.mode == "live" else "PAPER 🧪"
+        print(f"📦 [SỔ {mode_tag}] Đã nạp {len(self.trades)} lệnh, {len(self.trade_memory.memory_records)} bài học, số dư: ${self.current_balance:,.2f}", flush=True)
 
         self.funding_rate = 0.0001
         self.next_funding_time = 0
@@ -2889,6 +2939,10 @@ async def get_dashboard(request: Request):
 @app.post("/auth/login")
 async def auth_login(request: Request):
     # Login local: nhan token (tu Settings hoac bien moi truong), tao session cookie HttpOnly.
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    # Bound brute-force attempts before parsing/authenticating the supplied token.
+    if not get_rate_limiter().is_allowed(f"login_{client_ip}", max_requests=10, window_seconds=60.0):
+        raise HTTPException(status_code=429, detail="Too many login attempts")
     # Doc JSON hoac urlencoded tho, khong dung request.form() de khoi can python-multipart.
     token = ""
     try:
@@ -2963,7 +3017,8 @@ async def get_storage_telemetry(session: UserSession = Depends(require_role(Role
 
 
 @app.get("/api/klines")
-def get_klines(symbol: Optional[str] = None, interval: str = "15m", limit: int = 120):
+def get_klines(symbol: Optional[str] = None, interval: str = "15m", limit: int = 120,
+               session: UserSession = Depends(require_role(Role.VIEWER))):
     """
     Returns candlestick OHLCV data for TradingView chart across timeframes:
     1m, 3m, 5m, 15m, 30m, 1h, 4h, 1d
@@ -3133,7 +3188,7 @@ async def set_active_tab(tab: str = "intel-copilot", session: UserSession = Depe
 
 
 @app.get("/api/action/get_ai_models")
-async def get_ai_models():
+async def get_ai_models(session: UserSession = Depends(require_role(Role.VIEWER))):
     models = await asyncio.to_thread(state.ai_copilot.get_available_models)
     state.available_ai_models = models
     return {"status": "ok", "models": models, "active_model": state.ai_copilot.default_model}
@@ -3404,7 +3459,7 @@ def set_risk_pct(risk_pct: float = 1.5, session: UserSession = Depends(require_r
 cached_public_ip = "1.52.182.16"
 
 @app.get("/api/settings")
-async def get_settings():
+async def get_settings(session: UserSession = Depends(require_role(Role.VIEWER))):
     global cached_public_ip
     try:
         import urllib.request
@@ -3683,6 +3738,32 @@ def toggle_trading_mode(payload: dict, session: UserSession = Depends(require_ro
     live_enabled = payload.get("live_enabled", False)
     if not isinstance(live_enabled, bool):
         return {"status": "rejected", "reason": "live_enabled must be boolean"}
+
+    # Keep the previous mode until every activation step has completed.  A
+    # failed account sync or stream restart must not leave the process (or its
+    # persisted settings) advertising live trading.
+    previous_live = bool(state.binance_api.is_live_enabled)
+    previous_mexc_live = bool(state.mexc_api.is_live_enabled)
+    previous_mainnet_confirmed = bool(state.binance_api.mainnet_confirmed)
+    previous_saved_live = state.storage.get_setting("is_live_enabled", previous_live)
+    previous_saved_mainnet = state.storage.get_setting("mainnet_confirmed", previous_mainnet_confirmed)
+
+    def rollback_mode() -> None:
+        state.binance_api.is_live_enabled = previous_live
+        state.mexc_api.is_live_enabled = previous_mexc_live
+        state.binance_api.mainnet_confirmed = previous_mainnet_confirmed
+        state.storage.save_setting("is_live_enabled", previous_saved_live)
+        state.storage.save_setting("mainnet_confirmed", previous_saved_mainnet)
+        # Trả sổ RAM về mode cũ — chống kẹt ở sổ mới khi kích hoạt thất bại.
+        try:
+            state.storage.set_mode("live" if previous_live else "paper")
+        except Exception:
+            pass
+        try:
+            state._load_mode_ledger()
+        except Exception:
+            pass
+
     if live_enabled:
         if state.active_exchange != "binance":
             return {"status": "error", "message": "MEXC chỉ chạy paper-only cho đến khi có market-data và lifecycle parity."}
@@ -3694,9 +3775,6 @@ def toggle_trading_mode(payload: dict, session: UserSession = Depends(require_ro
             return {"status": "error",
                     "message": "Bạn đang bật LIVE trên Binance Mainnet (TIỀN THẬT). "
                                "Hãy xác nhận lại với confirm_mainnet=true — bot sẽ đặt lệnh thật trừ ví thật."}
-        if wants_mainnet:
-            state.binance_api.mainnet_confirmed = True
-            state.storage.save_setting("mainnet_confirmed", True)
         conn_res = state.active_exchange_api.test_connection()
         if not conn_res.get("success", False):
             return {
@@ -3711,39 +3789,64 @@ def toggle_trading_mode(payload: dict, session: UserSession = Depends(require_ro
 
     state.binance_api.is_live_enabled = live_enabled
     state.mexc_api.is_live_enabled = False
-    state.storage.save_setting("is_live_enabled", live_enabled)
     if not live_enabled:
         # Tắt live là thu hồi xác nhận Mainnet — lần bật sau phải xác nhận lại.
         state.binance_api.mainnet_confirmed = False
-        state.storage.save_setting("mainnet_confirmed", False)
+    elif not state.binance_api.is_testnet:
+        state.binance_api.mainnet_confirmed = True
+    try:
+        if state.ws_engine:
+            asyncio.run_coroutine_threadsafe(state.ws_engine.stop(), app.state.event_loop).result(timeout=20)
+        state.market_source_times.clear()
+        state.data_map.clear()
+        state.visual_hft = VisualHFTMicrostructureEngine(bucket_size_btc=10.0, num_buckets=30)
+        state.order_flow_engine = OrderFlowCVDEngine(max_ticks=3000, window_seconds=60)
+        state.order_flow_verdict = None
+        state.latest_l2_bids = []
+        state.latest_l2_asks = []
+        state.execution.startup_reconciled = False
+        state.initialize_history()
+        state.init_ws_engine()
+        asyncio.run_coroutine_threadsafe(state.ws_engine.start(), app.state.event_loop).result(timeout=20)
+    except Exception as exc:
+        rollback_mode()
+        return {"status": "error", "message": f"Không thể khởi động lại market data: {type(exc).__name__}"}
+
+    # Đổi chế độ = chuyển hẳn bộ sổ sách: nạp số dư/lệnh/bài học/mục tiêu
+    # tháng của mode mới, clear RAM mode cũ (vị thế/lệnh chờ đã chặn từ đầu).
+    try:
+        state.storage.set_mode("live" if live_enabled else "paper")
+    except Exception:
+        pass
+    try:
+        state._load_mode_ledger()
+    except Exception as exc:
+        rollback_mode()
+        return {"status": "error", "message": f"Không nạp được sổ {('live' if live_enabled else 'paper')}: {type(exc).__name__}"}
     if live_enabled:
-        # Bật live là sync vốn ngay theo ví sàn, không sizing trên ledger cũ.
+        # Sync vốn theo ví sàn SAU khi sổ live đã nạp (ghi đè số dư sổ live).
         try:
             state.sync_exchange_balance(force=True)
         except Exception as exc:
+            rollback_mode()
             return {"status": "error", "message": f"Không đồng bộ được số dư sàn: {exc}"}
         if getattr(state, "exchange_sync_error", ""):
+            rollback_mode()
             return {"status": "error", "message": f"Không đồng bộ được số dư sàn: {state.exchange_sync_error}"}
-    if state.ws_engine:
-        asyncio.run_coroutine_threadsafe(state.ws_engine.stop(), app.state.event_loop).result(timeout=20)
-    state.market_source_times.clear()
-    state.data_map.clear()
-    state.visual_hft = VisualHFTMicrostructureEngine(bucket_size_btc=10.0, num_buckets=30)
-    state.order_flow_engine = OrderFlowCVDEngine(max_ticks=3000, window_seconds=60)
-    state.order_flow_verdict = None
-    state.latest_l2_bids = []
-    state.latest_l2_asks = []
-    state.execution.startup_reconciled = False
-    state.initialize_history()
-    state.init_ws_engine()
-    asyncio.run_coroutine_threadsafe(state.ws_engine.start(), app.state.event_loop).result(timeout=20)
+    state.persist_current_state()
+
+    state.storage.save_setting("is_live_enabled", live_enabled)
+    state.storage.save_setting("mainnet_confirmed", bool(state.binance_api.mainnet_confirmed))
     if state.binance_api.is_live_enabled and state.binance_api.is_testnet:
         mode_text = "BINANCE TESTNET"
     elif state.binance_api.is_live_enabled:
         mode_text = "BINANCE MAINNET (TIỀN THẬT) 💰"
     else:
         mode_text = "MÔ PHỎNG (PAPER TRADING) 🧪"
-    return {"status": "ok", "live_enabled": live_enabled, "message": f"Đã chuyển sang chế độ {mode_text}"}
+    ledger_tag = "LIVE" if live_enabled else "PAPER"
+    return {"status": "ok", "live_enabled": live_enabled,
+            "message": f"Đã chuyển sang chế độ {mode_text} — sổ {ledger_tag} riêng: "
+                       f"{len(state.trades)} lệnh, số dư ${state.current_balance:,.2f}"}
 
 
 @app.post("/api/settings/update_fees")

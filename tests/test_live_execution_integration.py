@@ -182,6 +182,19 @@ class LiveExecutionIntegrationTest(unittest.TestCase):
         next_order.leverage = 5
         self.assertIn("current position leverage", lifecycle.entry_guard(next_order))
 
+    def test_oversized_exchange_receipt_is_rejected_before_position_apply(self):
+        state = make_state()
+        order, _ = state.order_manager.place_order(
+            "BTCUSDT", "LIMIT", "BUY", 60000, 120, 3, quantity=.01,
+            stop_loss=59000, take_profit=62000, client_order_id="oversized-receipt",
+        )
+        self.assertFalse(state.order_manager.record_exchange_update(order.order_id, {
+            "orderId": "exchange-oversized", "status": "FILLED",
+            "executedQty": ".02", "avgPrice": "60000",
+        }))
+        self.assertEqual(order.exchange_executed_quantity, 0.0)
+        self.assertEqual(order.status, "PENDING")
+
     def test_unknown_entry_blocks_further_submission_but_reconciles(self):
         state = make_state(live=True)
         lifecycle = ExecutionLifecycle(state)
@@ -309,6 +322,33 @@ class LiveExecutionIntegrationTest(unittest.TestCase):
         restored.apply_exit_response(restored_tp2, receipt)
         self.assertAlmostEqual(restored.state.current_position["units"], .003)
         self.assertEqual(restored.staged_tp_remaining(restored.state.current_position, "tp2"), 0)
+
+    def test_hedge_staged_take_profits_use_quantity_not_close_position(self):
+        state = make_state(live=True)
+        state.hedge_positions = {
+            "LONG": {
+                "direction": 1, "units": .01, "stop_loss": 59000,
+                "take_profit": 63000, "leverage": 3, "entry_price": 60000,
+                "staged_take_profits": {
+                    "tp1": 61000, "tp1_ratio": .4,
+                    "tp2": 62000, "tp2_ratio": .3,
+                },
+                "tp_stage_initial_units": .01, "tp_stage_filled": {},
+                "orders": [], "protection_revision": 0,
+            }
+        }
+        lifecycle = ExecutionLifecycle(state)
+
+        lifecycle._ensure_protection_for(state.hedge_positions["LONG"], "LONG")
+
+        calls = state.binance_api.place_order_live.call_args_list
+        self.assertEqual(len(calls), 4)  # stop, TP1, TP2, residual TP
+        self.assertTrue(calls[0].kwargs["close_position"])
+        self.assertFalse(calls[1].kwargs["close_position"])
+        self.assertFalse(calls[2].kwargs["close_position"])
+        self.assertFalse(calls[3].kwargs["close_position"])
+        self.assertAlmostEqual(calls[1].args[3], .004)
+        self.assertAlmostEqual(calls[2].args[3], .003)
 
     def test_generic_partial_close_does_not_consume_staged_tp_budget_and_grid_tags_survive(self):
         state = make_state()

@@ -125,6 +125,10 @@ class ReplayStorage:
         self.settings = {"is_live_enabled": False, "is_testnet": True, "active_exchange": "binance"}
         self.runtime = None
         self.trades = {}
+        self.mode = "paper"
+
+    def set_mode(self, mode: str) -> None:
+        self.mode = "live" if str(mode).lower() == "live" else "paper"
 
     def get_all_settings(self):
         return deepcopy(self.settings)

@@ -122,16 +122,23 @@ class OrderQueueManager:
                             ("trigger_price", trigger_price), ("callback_pct", callback_pct)):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                 return None, f"Invalid {name}"
-        if side.upper() not in ("BUY", "SELL") or margin <= 0 or leverage < 1 or int(leverage) != leverage:
+        side_clean = side.strip().upper() if isinstance(side, str) else ""
+        position_side_clean = position_side.strip().upper() if isinstance(position_side, str) else ""
+        order_type_clean = order_type.strip().upper() if isinstance(order_type, str) else ""
+        trigger_condition_clean = trigger_condition.strip().upper() if isinstance(trigger_condition, str) else ""
+        if side_clean not in ("BUY", "SELL") or margin <= 0 or leverage < 1 or int(leverage) != leverage:
             return None, "Invalid side/margin/leverage"
-        if position_side not in ("BOTH", "LONG", "SHORT"):
+        if position_side_clean not in ("BOTH", "LONG", "SHORT"):
             return None, "Invalid position side"
-        if (position_side == "LONG" and side.upper() != "BUY") or (position_side == "SHORT" and side.upper() != "SELL"):
+        if (position_side_clean == "LONG" and side_clean != "BUY") or (position_side_clean == "SHORT" and side_clean != "SELL"):
             return None, "Position side conflicts with order side"
-        direction = 1 if side.upper() == "BUY" else -1
-        order_type_clean = order_type.upper()
         if order_type_clean not in ("LIMIT", "POST_ONLY", "MARKET", "CONDITIONAL", "TRAILING_STOP", "TWAP", "TWAP_SLICE", "SCALE_RATIO"):
             return None, "Unsupported order type"
+        if trigger_condition_clean not in ("ABOVE", "BELOW"):
+            return None, "Invalid trigger condition"
+        if order_type_clean == "TRAILING_STOP" and not 0.1 <= callback_pct <= 10.0:
+            return None, "Trailing callback_pct must be between 0.1 and 10"
+        direction = 1 if side_clean == "BUY" else -1
         target_price = price if price > 0 else (best_ask if direction == 1 else best_bid)
         if not math.isfinite(target_price) or target_price <= 0:
             return None, "Invalid execution price"
@@ -154,16 +161,18 @@ class OrderQueueManager:
         # Chan DCA (SCALE_RATIO) cung huong bao ve Maker: moi chan thang deu phai nam ngoai spread,
         # vi chan ladder khop dang LIMIT van co the bi khop Taker neu dat cham spread.
         if order_type_clean in ("POST_ONLY", "SCALE_RATIO"):
-            guard_price = target_price if order_type_clean == "SCALE_RATIO" else price
+            # Use the resolved execution price for legacy callers that omit
+            # `price`; checking raw zero would bypass the maker-only guard.
+            guard_price = target_price
             if order_type_clean == "SCALE_RATIO":
                 # Chan thang DCA: BUY giam dan (chan 1 cao nhat), SELL tang dan (chan 3 cao nhat).
                 # Kiem tra chan xau nhat (gan spread nhat) de ca thang duoc bao ve Maker.
                 try:
-                    ladder_step = float((candidate_payload or {}).get("dca_ladder_step", 0.005))
+                    ladder_step = float((candidate_payload or {}).get("dca_ladder_step", 0.005)) if isinstance(candidate_payload, dict) else 0.005
                 except (ValueError, TypeError):
                     ladder_step = 0.005
-                if direction == -1:
-                    guard_price = target_price * (1 + 2 * max(0.0, ladder_step))
+                if not math.isfinite(ladder_step) or ladder_step < 0:
+                    return None, "Invalid scale ladder step"
             if direction == 1 and best_ask > 0 and guard_price >= best_ask:
                 return None, f"❌ BỊ TỪ CHỐI BỞI {order_type_clean}: Giá mua ${guard_price:,.2f} >= Best Ask ${best_ask:,.2f} (Lệnh sẽ bị khớp Taker 0.05%). Đã bảo vệ phí Maker cho bạn!"
             elif direction == -1 and best_bid > 0 and guard_price <= best_bid:
@@ -204,15 +213,15 @@ class OrderQueueManager:
                 return None, "Client order ID exceeds Binance 36-character limit"
             order = FuturesOrder(
                 order_id=self._next_id + index - 1, symbol=symbol, order_type="TWAP_SLICE" if is_twap else order_type_clean,
-                side=side.upper(), direction=direction, price=child_price,
+                side=side_clean, direction=direction, price=child_price,
                 margin=child_units * child_price / leverage, leverage=leverage, units=child_units, status="PENDING",
                 created_at=datetime.now().isoformat(), timeframe=timeframe, trigger_price=trigger_price,
-                trigger_condition=trigger_condition.upper(), callback_pct=callback_pct, peak_price=target_price,
+                trigger_condition=trigger_condition_clean, callback_pct=callback_pct, peak_price=target_price,
                 twap_total_slices=count if is_twap else 1, twap_interval_ticks=twap_interval_ticks,
                 scale_level=index, scale_ratio_pct=ratios[index - 1] * 100, stop_loss=child_sl, take_profit=child_tp,
                 note=note or (f"{order_type_clean} child {index}/{count}" if count > 1 else ""),
                 execution_group=group, client_order_id=child_client_id, group_type=kind,
-                position_side=position_side,
+                position_side=position_side_clean,
                 parent_intent_id=parent_id, child_index=index, due_at=due_at + (index - 1) * interval if is_twap else due_at,
                 candidate_payload=copy.deepcopy(candidate_payload or {}), decision_trace=copy.deepcopy(decision_trace or {}))
             created.append(order)
@@ -293,7 +302,10 @@ class OrderQueueManager:
                 return False
         except (TypeError, ValueError, OverflowError):
             return False
-        if qty < order.exchange_executed_quantity:
+        # Binance reports cumulative fills. Never accept a receipt larger than
+        # the quantity approved in the local intent, even if the response is
+        # malformed or comes from a mismatched order id.
+        if qty > order.units + 1e-9 or qty < order.exchange_executed_quantity:
             return False
         status = str(response.get("status", "NEW")).upper()
         if status not in {"NEW", "PARTIALLY_FILLED", "FILLED", "CANCELED", "EXPIRED", "REJECTED", "PENDING_TRIGGER"}:
@@ -393,18 +405,36 @@ class OrderQueueManager:
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
         leverage: Optional[int] = None,
-        callback_pct: Optional[float] = None
+        callback_pct: Optional[float] = None,
+        trigger_condition: Optional[str] = None,
+        position_side: Optional[str] = None,
     ) -> Tuple[bool, str]:
         """Modifies parameters of an active pending order."""
         for value in (price, units, margin, trigger_price, stop_loss, take_profit, leverage, callback_pct):
             if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0):
                 return False, "Invalid order update"
-        if side is not None and side.upper() not in ("BUY", "SELL"):
+        if side is not None and (not isinstance(side, str) or side.strip().upper() not in ("BUY", "SELL")):
             return False, "Invalid order side"
+        side_clean = side.strip().upper() if isinstance(side, str) else None
+        trigger_condition_clean = trigger_condition.strip().upper() if isinstance(trigger_condition, str) else None
+        position_side_clean = position_side.strip().upper() if isinstance(position_side, str) else None
+        if trigger_condition is not None and trigger_condition_clean not in ("ABOVE", "BELOW"):
+            return False, "Invalid trigger condition"
+        if position_side is not None and position_side_clean not in ("BOTH", "LONG", "SHORT"):
+            return False, "Invalid position side"
         if leverage is not None and (leverage < 1 or int(leverage) != leverage):
             return False, "Invalid order leverage"
         for o in self.orders:
             if o.order_id == order_id and o.status in ("PENDING", "ACTIVE") and not o.exchange_order_id and not o.exchange_status:
+                effective_side = side_clean or o.side
+                effective_position_side = position_side_clean or getattr(o, "position_side", "BOTH")
+                if ((effective_position_side == "LONG" and effective_side != "BUY") or
+                        (effective_position_side == "SHORT" and effective_side != "SELL")):
+                    return False, "Position side conflicts with order side"
+                effective_type = order_type.strip().upper() if isinstance(order_type, str) and order_type.strip() else o.order_type
+                effective_callback = callback_pct if callback_pct is not None else o.callback_pct
+                if effective_type == "TRAILING_STOP" and not 0.1 <= effective_callback <= 10.0:
+                    return False, "Trailing callback_pct must be between 0.1 and 10"
                 if price is not None and price > 0:
                     o.price = price
                 if leverage is not None and leverage > 0:
@@ -413,11 +443,13 @@ class OrderQueueManager:
                     o.timeframe = timeframe.strip().lower()
                 if order_type:
                     o.order_type = order_type.strip().upper()
-                if side:
-                    s_clean = side.strip().upper()
-                    if s_clean in ("BUY", "SELL"):
-                        o.side = s_clean
-                        o.direction = 1 if s_clean == "BUY" else -1
+                if side_clean:
+                    o.side = side_clean
+                    o.direction = 1 if side_clean == "BUY" else -1
+                if position_side_clean is not None:
+                    o.position_side = position_side_clean
+                if trigger_condition_clean is not None:
+                    o.trigger_condition = trigger_condition_clean
                 if trigger_price is not None and trigger_price > 0:
                     o.trigger_price = round(trigger_price, 2)
                 if stop_loss is not None:

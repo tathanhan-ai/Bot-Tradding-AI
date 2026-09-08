@@ -18,7 +18,21 @@ from typing import Any, Dict, Iterator, List, Optional, Union
 
 
 class PersistentStorageManager:
-    def __init__(self, db_path: Optional[Union[str, Path]] = None, json_backup_path: Optional[Union[str, Path]] = None, secret_provider: Optional[Any] = None):
+    # Hai chế độ paper/live có sổ sách TÁCH BIỆT: đổi chế độ là chuyển hẳn
+    # bộ dữ liệu (số dư, lệnh, bài học AI, mục tiêu tháng), không lẫn lộn.
+    # Paper giữ nguyên key cũ (tương thích dữ liệu hiện có); live dùng key
+    # có hậu tố _live. Key không thuộc 2 nhóm này (API, key sàn...) dùng chung.
+    LIVE_SUFFIX = "_live"
+    # Các key sổ sách theo chế độ (phải tách paper/live)
+    MODE_SCOPED_PREFIXES = (
+        "monthly_",          # mục tiêu tháng: target, profile, deficit, month, start_balance
+    )
+    MODE_SCOPED_KEYS = {
+        "execution_runtime",
+    }
+
+    def __init__(self, db_path: Optional[Union[str, Path]] = None, json_backup_path: Optional[Union[str, Path]] = None, secret_provider: Optional[Any] = None, mode: str = "paper"):
+        self.mode = "live" if str(mode).lower() == "live" else "paper"
         if db_path is None:
             base_dir = Path(__file__).resolve().parent
             db_path = base_dir / "bot_database.db"
@@ -45,10 +59,10 @@ class PersistentStorageManager:
     def _init_db(self):
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            # 1. Account State
+            # 1. Account State (id=1 paper, id=2 live — sổ sách tách biệt)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS account_state (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    id INTEGER PRIMARY KEY CHECK (id IN (1, 2)),
                     symbol TEXT DEFAULT 'BTCUSDT',
                     initial_balance REAL DEFAULT 1000.0,
                     current_balance REAL DEFAULT 1000.0,
@@ -63,7 +77,7 @@ class PersistentStorageManager:
                 )
             """)
 
-            # 2. Trades
+            # 2. Trades (cột mode: paper/live — lịch sử tách biệt)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,7 +94,8 @@ class PersistentStorageManager:
                     reason TEXT,
                     pnl REAL,
                     return_pct REAL,
-                    created_at TEXT
+                    created_at TEXT,
+                    mode TEXT DEFAULT 'paper'
                 )
             """)
 
@@ -99,7 +114,8 @@ class PersistentStorageManager:
                     delta_momentum TEXT,
                     smc_structure TEXT,
                     lesson_learned TEXT,
-                    recorded_at TEXT
+                    recorded_at TEXT,
+                    mode TEXT DEFAULT 'paper'
                 )
             """)
 
@@ -115,12 +131,23 @@ class PersistentStorageManager:
             for name in ("execution_id", "payload_json"):
                 if name not in trade_columns:
                     cursor.execute(f"ALTER TABLE trades ADD COLUMN {name} TEXT")
+            if "mode" not in trade_columns:
+                cursor.execute("ALTER TABLE trades ADD COLUMN mode TEXT DEFAULT 'paper'")
+            cursor.execute("UPDATE trades SET mode='paper' WHERE mode IS NULL OR mode=''")
+            mem_columns = {row[1] for row in cursor.execute("PRAGMA table_info(trade_memory_records)")}
+            if "mode" not in mem_columns:
+                cursor.execute("ALTER TABLE trade_memory_records ADD COLUMN mode TEXT DEFAULT 'paper'")
+            cursor.execute("UPDATE trade_memory_records SET mode='paper' WHERE mode IS NULL OR mode=''")
+            # Dữ liệu cũ không có mode -> thuộc về paper (id=1 giữ nguyên).
             cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS trades_execution_id ON trades(execution_id)")
             conn.commit()
 
     # -------------------------------------------------------------
     # Account State
     # -------------------------------------------------------------
+    def _mode_id(self) -> int:
+        return 2 if self.mode == "live" else 1
+
     def save_account_state(
         self,
         symbol: str,
@@ -144,7 +171,7 @@ class PersistentStorageManager:
                     id, symbol, initial_balance, current_balance, peak_balance,
                     total_fees, is_running, active_timeframe, leverage_mode,
                     manual_leverage, current_position, updated_at
-                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     symbol=excluded.symbol,
                     initial_balance=excluded.initial_balance,
@@ -158,7 +185,7 @@ class PersistentStorageManager:
                     current_position=excluded.current_position,
                     updated_at=excluded.updated_at
             """, (
-                symbol, initial_balance, current_balance, peak_balance,
+                self._mode_id(), symbol, initial_balance, current_balance, peak_balance,
                 total_fees, 1 if is_running else 0, active_timeframe,
                 leverage_mode, manual_leverage, pos_json, now_str
             ))
@@ -170,7 +197,7 @@ class PersistentStorageManager:
     def load_account_state(self) -> Optional[Dict[str, Any]]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM account_state WHERE id = 1")
+            cursor.execute("SELECT * FROM account_state WHERE id = ?", (self._mode_id(),))
             row = cursor.fetchone()
             if row:
                 pos = json.loads(row["current_position"]) if row["current_position"] else None
@@ -193,7 +220,7 @@ class PersistentStorageManager:
     # Trades Persistence
     # -------------------------------------------------------------
     @staticmethod
-    def _insert_trade(cursor: sqlite3.Cursor, trade: dict) -> int:
+    def _insert_trade(cursor: sqlite3.Cursor, trade: dict, mode: str = "paper") -> int:
         now_str = str(trade.get("created_at") or datetime.now().isoformat())
         execution_id = str(trade["execution_id"]) if trade.get("execution_id") else None
         exit_time = str(trade.get("closed_at") or trade.get("exit_time", ""))
@@ -207,8 +234,8 @@ class PersistentStorageManager:
             INSERT OR IGNORE INTO trades (
                 trade_id, symbol, timeframe, direction, entry_time,
                 entry_price, breakeven_price, exit_time, exit_price,
-                fee, reason, pnl, return_pct, created_at, execution_id, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                fee, reason, pnl, return_pct, created_at, execution_id, payload_json, mode
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             trade.get("id", trade.get("trade_id", 0)), trade.get("symbol", "BTCUSDT"),
             trade.get("timeframe", "15m"), trade.get("direction", "LONG"),
@@ -218,6 +245,7 @@ class PersistentStorageManager:
             str(trade.get("reason", "")), float(trade.get("pnl", 0.0)),
             float(trade.get("return_pct", 0.0)), now_str, execution_id,
             json.dumps(trade, ensure_ascii=False, allow_nan=False),
+            str(trade.get("mode", mode) or mode),
         ))
         if cursor.rowcount:
             return cursor.lastrowid
@@ -225,7 +253,7 @@ class PersistentStorageManager:
 
     def save_trade(self, trade: dict) -> int:
         with self._get_connection() as conn:
-            inserted_id = self._insert_trade(conn.cursor(), trade)
+            inserted_id = self._insert_trade(conn.cursor(), trade, self.mode)
 
         self._sync_to_json_backup()
         return inserted_id
@@ -238,11 +266,11 @@ class PersistentStorageManager:
             cursor = conn.cursor()
             for trade in payload.get("trades", []):
                 if trade.get("execution_id"):
-                    inserted += bool(self._insert_trade(cursor, trade))
+                    inserted += bool(self._insert_trade(cursor, trade, self.mode))
             cursor.execute("""
-                INSERT INTO user_settings (key, value, updated_at) VALUES ('execution_runtime', ?, ?)
+                INSERT INTO user_settings (key, value, updated_at) VALUES (?, ?, ?)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
-            """, (serialized, datetime.now().isoformat()))
+            """, (self._key("execution_runtime"), serialized, datetime.now().isoformat()))
         self._sync_to_json_backup()
         return inserted
 
@@ -255,8 +283,8 @@ class PersistentStorageManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT * FROM trades ORDER BY id DESC LIMIT ?
-            """, (limit,))
+                SELECT * FROM trades WHERE mode = ? ORDER BY id DESC LIMIT ?
+            """, (self.mode, limit,))
             rows = cursor.fetchall()
             for r in reversed(rows):
                 payload = json.loads(r["payload_json"]) if r["payload_json"] else {}
@@ -287,15 +315,15 @@ class PersistentStorageManager:
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT COALESCE(SUM(pnl), 0.0) FROM trades
-                    WHERE CASE
+                    WHERE mode = ? AND (CASE
                         WHEN date(substr(exit_time, 1, 10)) IS NOT NULL
                             THEN substr(exit_time, 1, 7)
                         WHEN exit_time GLOB '[0-9][0-9]-[0-9][0-9]*'
                              AND date(substr(created_at, 1, 10)) IS NOT NULL
                             THEN substr(created_at, 1, 4) || '-' || substr(exit_time, 1, 2)
                         ELSE substr(created_at, 1, 7)
-                    END = ?
-                """, (year_month,))
+                    END = ?)
+                """, (self.mode, year_month,))
                 res = cursor.fetchone()
                 return round(float(res[0]), 2) if res else 0.0
         except Exception as e:
@@ -326,12 +354,12 @@ class PersistentStorageManager:
                 INSERT INTO trade_memory_records (
                     trade_id, direction, entry_price, net_pnl, exit_reason,
                     rsi, vwap_status, absorption_signal, delta_momentum,
-                    smc_structure, lesson_learned, recorded_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    smc_structure, lesson_learned, recorded_at, mode
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 trade_id, direction, entry_price, net_pnl, exit_reason,
                 rsi, vwap_status, absorption_signal, delta_momentum,
-                smc_structure, lesson_learned, now_str
+                smc_structure, lesson_learned, now_str, self.mode
             ))
             conn.commit()
 
@@ -343,8 +371,8 @@ class PersistentStorageManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT * FROM trade_memory_records ORDER BY id DESC LIMIT ?
-            """, (limit,))
+                SELECT * FROM trade_memory_records WHERE mode = ? ORDER BY id DESC LIMIT ?
+            """, (self.mode, limit,))
             rows = cursor.fetchall()
             for r in reversed(rows):
                 records.append({
@@ -366,7 +394,23 @@ class PersistentStorageManager:
     # -------------------------------------------------------------
     # Settings & API Keys Persistence
     # -------------------------------------------------------------
+    @classmethod
+    def scoped_key(cls, key: str, mode: str) -> str:
+        """Key sổ sách theo chế độ: paper giữ nguyên, live thêm hậu tố _live."""
+        if str(mode).lower() != "live":
+            return key
+        if key in cls.MODE_SCOPED_KEYS or key.startswith(cls.MODE_SCOPED_PREFIXES):
+            return key + cls.LIVE_SUFFIX
+        return key
+
+    def _key(self, key: str) -> str:
+        return self.scoped_key(key, self.mode)
+
+    def set_mode(self, mode: str) -> None:
+        self.mode = "live" if str(mode).lower() == "live" else "paper"
+
     def save_setting(self, key: str, value: Any):
+        key = self._key(key)
         from security.secret_provider import get_secret_provider, make_credential_ref, is_secret_key
         if is_secret_key(key) and isinstance(value, str) and value.strip() and not value.startswith("keyring://"):
             try:
@@ -390,6 +434,7 @@ class PersistentStorageManager:
             conn.commit()
 
     def get_setting(self, key: str, default: Any = None, resolve_secrets: bool = True) -> Any:
+        key = self._key(key)
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT value FROM user_settings WHERE key = ?", (key,))
@@ -468,12 +513,22 @@ class PersistentStorageManager:
     # Database Reset & Purge
     # -------------------------------------------------------------
     def reset_database(self, initial_balance: float = 1000.0, symbol: str = "BTCUSDT"):
+        # Reset CHỈ chế độ hiện tại: paper reset không xóa sổ live và ngược lại.
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM trades")
-            cursor.execute("DELETE FROM trade_memory_records")
-            cursor.execute("DELETE FROM account_state")
-            cursor.execute("DELETE FROM user_settings WHERE key = 'execution_runtime'")
+            cursor.execute("DELETE FROM trades WHERE mode = ?", (self.mode,))
+            cursor.execute("DELETE FROM trade_memory_records WHERE mode = ?", (self.mode,))
+            cursor.execute("DELETE FROM account_state WHERE id = ?", (self._mode_id(),))
+            cursor.execute("DELETE FROM user_settings WHERE key = ?", (self._key("execution_runtime"),))
+            for prefix in self.MODE_SCOPED_PREFIXES:
+                if self.mode == "live":
+                    cursor.execute(
+                        "DELETE FROM user_settings WHERE key LIKE ? AND key LIKE ?",
+                        (prefix + "%", "%" + self.LIVE_SUFFIX))
+                else:
+                    cursor.execute(
+                        "DELETE FROM user_settings WHERE key LIKE ? AND key NOT LIKE ?",
+                        (prefix + "%", "%" + self.LIVE_SUFFIX))
             conn.commit()
 
         self.save_account_state(
@@ -509,6 +564,7 @@ class PersistentStorageManager:
 
             data = {
                 "backup_time": datetime.now().isoformat(),
+                "mode": self.mode,
                 "account_state": state,
                 "trades_count": len(trades),
                 "trades": trades[-20:],
@@ -524,9 +580,9 @@ class PersistentStorageManager:
     def get_storage_telemetry(self) -> Dict[str, Any]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM trades")
+            cursor.execute("SELECT COUNT(*) FROM trades WHERE mode = ?", (self.mode,))
             trades_cnt = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM trade_memory_records")
+            cursor.execute("SELECT COUNT(*) FROM trade_memory_records WHERE mode = ?", (self.mode,))
             mem_cnt = cursor.fetchone()[0]
 
         sqlite_size_kb = 0.0
@@ -577,6 +633,7 @@ class PersistentStorageManager:
         return {
             "version": "1.0",
             "app": "binance_futures_algo_desk",
+            "mode": self.mode,
             "exported_at": datetime.now().isoformat(),
             "account_state": account,
             "trades": trades,
@@ -611,32 +668,43 @@ class PersistentStorageManager:
             cursor = conn.cursor()
 
             # In overwrite mode, purge previous data for included sections
+            # (CHỈ chế độ hiện tại — không xóa sổ chế độ kia).
             if is_overwrite:
                 if "trades" in data:
-                    cursor.execute("DELETE FROM trades")
+                    cursor.execute("DELETE FROM trades WHERE mode = ?", (self.mode,))
                 if "trade_memory_records" in data or "ai_lessons" in data:
-                    cursor.execute("DELETE FROM trade_memory_records")
+                    cursor.execute("DELETE FROM trade_memory_records WHERE mode = ?", (self.mode,))
                 if "settings" in data or "user_settings" in data:
-                    cursor.execute("DELETE FROM user_settings")
+                    cursor.execute("DELETE FROM user_settings WHERE key = ?", (self._key("execution_runtime"),))
+                    for prefix in self.MODE_SCOPED_PREFIXES:
+                        if self.mode == "live":
+                            cursor.execute(
+                                "DELETE FROM user_settings WHERE key LIKE ? AND key LIKE ?",
+                                (prefix + "%", "%" + self.LIVE_SUFFIX))
+                        else:
+                            cursor.execute(
+                                "DELETE FROM user_settings WHERE key LIKE ? AND key NOT LIKE ?",
+                                (prefix + "%", "%" + self.LIVE_SUFFIX))
 
             # 1. Import Trades (deduplicate by trade_id or entry_time+exit_time if merge mode)
+            # Phạm vi CHỈ chế độ hiện tại — không chạm sổ chế độ kia.
             trades = data.get("trades", [])
             for t in trades:
                 tid = t.get("id") or t.get("trade_id")
                 exists = False
                 if not is_overwrite:
                     if tid:
-                        cursor.execute("SELECT id FROM trades WHERE trade_id = ?", (tid,))
+                        cursor.execute("SELECT id FROM trades WHERE trade_id = ? AND mode = ?", (tid, self.mode))
                         if cursor.fetchone():
                             exists = True
                     if not exists and t.get("entry_time") and t.get("exit_time"):
-                        cursor.execute("SELECT id FROM trades WHERE entry_time = ? AND exit_time = ?", 
-                                       (str(t.get("entry_time", "")), str(t.get("exit_time", ""))))
+                        cursor.execute("SELECT id FROM trades WHERE entry_time = ? AND exit_time = ? AND mode = ?",
+                                       (str(t.get("entry_time", "")), str(t.get("exit_time", "")), self.mode))
                         if cursor.fetchone():
                             exists = True
 
                 if is_overwrite or not exists:
-                    imported_trades += bool(self._insert_trade(cursor, t))
+                    imported_trades += bool(self._insert_trade(cursor, {**t, "mode": self.mode}, self.mode))
 
             # 2. Import Trade Memory Records
             memories = data.get("trade_memory_records") or data.get("ai_lessons") or []
@@ -645,8 +713,8 @@ class PersistentStorageManager:
                 recorded = m.get("recorded_at", "")
                 exists = False
                 if not is_overwrite:
-                    cursor.execute("SELECT id FROM trade_memory_records WHERE lesson_learned = ? OR (trade_id = ? AND recorded_at = ?)", 
-                                   (lesson, m.get("trade_id", 0), recorded))
+                    cursor.execute("SELECT id FROM trade_memory_records WHERE (lesson_learned = ? OR (trade_id = ? AND recorded_at = ?)) AND mode = ?",
+                                   (lesson, m.get("trade_id", 0), recorded, self.mode))
                     if cursor.fetchone():
                         exists = True
                 if is_overwrite or not exists:
@@ -654,8 +722,8 @@ class PersistentStorageManager:
                         INSERT INTO trade_memory_records (
                             trade_id, direction, entry_price, net_pnl, exit_reason,
                             rsi, vwap_status, absorption_signal, delta_momentum,
-                            smc_structure, lesson_learned, recorded_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            smc_structure, lesson_learned, recorded_at, mode
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         m.get("trade_id", 0),
                         m.get("direction", 1),
@@ -668,11 +736,13 @@ class PersistentStorageManager:
                         str(m.get("delta_momentum", "")),
                         str(m.get("smc_structure", "")),
                         lesson,
-                        recorded or datetime.now().isoformat()
+                        recorded or datetime.now().isoformat(),
+                        self.mode
                     ))
                     imported_memories += 1
 
-            # 3. Import Settings
+            # 3. Import Settings (chỉ key sổ sách theo mode mới map key; key dùng
+            # chung như API/fees giữ nguyên để không mất cấu hình sàn).
             settings = data.get("settings") or data.get("user_settings") or {}
             for k, v in settings.items():
                 val_str = json.dumps(v) if not isinstance(v, str) else v
@@ -680,7 +750,7 @@ class PersistentStorageManager:
                     INSERT INTO user_settings (key, value, updated_at)
                     VALUES (?, ?, ?)
                     ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
-                """, (k, val_str, datetime.now().isoformat()))
+                """, (self._key(k), val_str, datetime.now().isoformat()))
                 imported_settings += 1
 
             # 4. Optional: Account State

@@ -446,7 +446,21 @@ class ExecutionLifecycle:
             return
         pos["entry_price"] = pos["notional"] / pos["units"]
         pos["breakeven_price"] = s.fee_engine.calculate_breakeven_price(pos["entry_price"], pos["direction"])
-        pos["liq_price"] = s.risk_manager.calculate_liquidation_price(pos["entry_price"], pos["direction"], pos.get("leverage", 3))
+        try:
+            pos["liq_price"] = s.risk_manager.calculate_liquidation_price(
+                pos["entry_price"],
+                pos["direction"],
+                pos.get("leverage", 3),
+                notional_usdt=pos["notional"],
+            )
+        except TypeError as exc:
+            # Keep lightweight test doubles and older integrations compatible;
+            # the real risk manager always accepts the notional tier input.
+            if "notional_usdt" not in str(exc):
+                raise
+            pos["liq_price"] = s.risk_manager.calculate_liquidation_price(
+                pos["entry_price"], pos["direction"], pos.get("leverage", 3)
+            )
 
     def query_ref(self, intent):
         client = intent["client_order_id"]
@@ -463,7 +477,10 @@ class ExecutionLifecycle:
         intent["status"] = "SUBMIT_UNKNOWN"
         self.persist()
         position_side = intent.get("position_side", "BOTH")
-        native_close = position_side in ("LONG", "SHORT") and intent["order_type"] in ("STOP_MARKET", "TAKE_PROFIT_MARKET")
+        # Hedge-mode ``closePosition`` is an all-or-nothing exchange primitive.
+        # Protective staged take-profits carry a partial quantity, so they must
+        # stay quantity-based; only an explicitly marked full stop may use it.
+        native_close = bool(intent.get("close_position", False))
         ok, response = s.binance_api.place_order_live(
             s.symbol, intent["side"], intent["order_type"], intent["quantity"],
             stop_price=intent.get("trigger"), reduce_only=position_side == "BOTH", close_position=native_close,
@@ -522,7 +539,8 @@ class ExecutionLifecycle:
             if not ok:
                 break
             intent = dict(client_order_id=f"p-{uuid.uuid4().hex[:22]}", order_type=kind, side=side, quantity=values["quantity"], trigger=values["price"], status="CREATED", applied=0.0, quote_applied=0.0,
-                reason=f"{tp_stage.upper()} staged exit" if tp_stage else "Protective SL/TP", tp_stage=tp_stage, position_side=position_side)
+                reason=f"{tp_stage.upper()} staged exit" if tp_stage else "Protective SL/TP", tp_stage=tp_stage, position_side=position_side,
+                close_position=(kind == "STOP_MARKET" and quantity >= pos["units"] - 1e-10))
             self.protective.append(intent)
             if not self.send_reduce(intent):
                 break

@@ -42,6 +42,46 @@ class P0AuthAcceptanceTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/state").status_code, 401)
         self.assertEqual(self.client.get("/api/storage/telemetry").status_code, 401)
 
+    def test_anonymous_sensitive_reads_require_viewer(self):
+        for path in ("/api/klines", "/api/settings", "/api/action/get_ai_models",
+                     "/api/settings/vibe", "/api/action/get_vibe_config"):
+            self.assertEqual(self.client.get(path).status_code, 401, path)
+
+    def test_login_attempts_are_rate_limited(self):
+        with patch("ui.server.get_rate_limiter") as get_limiter:
+            get_limiter.return_value.is_allowed.return_value = False
+            res = self.client.post("/auth/login", json={"token": "invalid"})
+        self.assertEqual(res.status_code, 429)
+
+    def test_failed_live_activation_rolls_back_mode_flags(self):
+        from ui.server import state, toggle_trading_mode
+
+        old_exchange = state.active_exchange
+        old_testnet = state.binance_api.is_testnet
+        old_live = state.binance_api.is_live_enabled
+        old_mexc_live = state.mexc_api.is_live_enabled
+        old_confirmed = state.binance_api.mainnet_confirmed
+        try:
+            state.active_exchange = "binance"
+            state.binance_api.is_testnet = True
+            state.binance_api.is_live_enabled = False
+            state.mexc_api.is_live_enabled = False
+            state.binance_api.mainnet_confirmed = False
+            with patch.object(state.active_exchange_api, "test_connection",
+                              return_value={"success": True, "can_trade": True}), \
+                 patch.object(state, "sync_exchange_balance", side_effect=RuntimeError("sync failed")):
+                result = toggle_trading_mode({"live_enabled": True}, session=self.admin)
+            self.assertEqual(result["status"], "error")
+            self.assertFalse(state.binance_api.is_live_enabled)
+            self.assertFalse(state.mexc_api.is_live_enabled)
+            self.assertFalse(state.binance_api.mainnet_confirmed)
+        finally:
+            state.active_exchange = old_exchange
+            state.binance_api.is_testnet = old_testnet
+            state.binance_api.is_live_enabled = old_live
+            state.mexc_api.is_live_enabled = old_mexc_live
+            state.binance_api.mainnet_confirmed = old_confirmed
+
     def test_viewer_cannot_mutate(self):
         res = self.client.post("/api/action/place_custom_order", json={"side": "BUY"}, headers=self.H(self.viewer))
         self.assertEqual(res.status_code, 403)

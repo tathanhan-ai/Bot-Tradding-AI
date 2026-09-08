@@ -176,7 +176,12 @@ class FuturesRiskManager:
             risk_budget = units * stop_distance
 
         # 5. Check Liquidation Safety Buffer
-        liq_price = self.calculate_liquidation_price(entry_price, direction, used_leverage)
+        liq_price = self.calculate_liquidation_price(
+            entry_price,
+            direction,
+            used_leverage,
+            notional_usdt=notional_value,
+        )
         # Ensure Stop Loss is triggered BEFORE liquidation price with a safe gap
         buffer = entry_price * 0.005
         if direction == 1 and stop_loss <= liq_price + buffer:
