@@ -21,6 +21,7 @@ data/persistent_state.json
 *.sqlite
 data/*.jsonl
 data/.desk_tokens.json
+data/.keystore.enc
 data/*.backup*
 data/*.bak
 *.jsonl

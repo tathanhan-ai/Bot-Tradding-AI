@@ -216,6 +216,10 @@
         <button id="btn-toggle-bot" onclick="toggleBot()" class="px-2.5 py-1 rounded-md text-xs font-bold bg-amber-600 hover:bg-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-300 text-white shadow transition whitespace-nowrap">
           ⏸ <span data-i18n="btn_bot">BOT</span>
         </button>
+        <!-- Logout: chi dang xuat giao dien, bot nen van chay binh thuong -->
+        <button type="button" onclick="logoutDesk()" title="Thoát phiên đăng nhập (bot vẫn chạy nền)" class="px-2.5 py-1 rounded-md text-xs font-bold bg-[#141b2b] hover:bg-rose-950/60 text-gray-300 hover:text-rose-300 border border-gray-700 hover:border-rose-500 focus:outline-none focus:ring-1 focus:ring-rose-400 transition whitespace-nowrap cursor-pointer">
+          ⏻ <span>Thoát</span>
+        </button>
       </div>
     </div>
     </div>
@@ -2583,6 +2587,26 @@
               </div>
             </div>
 
+          </div>
+
+          <!-- 9ROUTER API KEY (luu local qua Settings, DB chi giu ref an toan) -->
+          <div class="bg-[#151c2c] p-4 rounded-xl border border-amber-800/60 space-y-3">
+            <div class="text-xs font-bold text-gray-300 uppercase flex items-center gap-1.5">
+              <span>🔑</span> <span>Khóa 9Router AI Gateway (Port 8039)</span>
+              <span id="ninekey-status-badge" class="ml-auto px-2 py-0.5 text-[10px] font-bold rounded bg-gray-900 text-gray-400 border border-gray-700 mono">Chưa kiểm tra</span>
+            </div>
+            <p class="text-[11px] text-gray-400 leading-relaxed">
+              Nhập key 9Router vào đây (chạy local nên không lo lộ). Key được lưu an toàn qua SecretProvider, DB chỉ giữ tham chiếu — không bao giờ hiện lại key thật.
+            </p>
+            <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+              <input id="ninekey-input" type="password" placeholder="sk-... dán key 9Router vào đây" autocomplete="off"
+                class="flex-1 bg-[#0c1017] border border-gray-700 rounded-lg p-2 text-xs text-white mono focus:border-amber-500 focus:outline-none" />
+              <button type="button" onclick="toggleNineKeyVisibility()" class="px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-bold rounded-lg transition cursor-pointer" title="Hiện/ẩn key">👁</button>
+              <button type="button" onclick="saveNineRouterKey()" id="btn-save-ninekey" class="px-4 py-2 bg-gradient-to-r from-amber-600 to-yellow-600 hover:from-amber-500 hover:to-yellow-500 text-black font-bold text-xs rounded-lg transition shadow flex items-center gap-1.5 cursor-pointer active:scale-95">
+                <span>🔑</span> <span>Lưu Key</span>
+              </button>
+            </div>
+            <div id="ninekey-save-status" class="text-xs mono text-gray-400"></div>
           </div>
 
           <!-- 4 Specialized Agents Model Selector Grid -->
@@ -6351,6 +6375,7 @@
 
       if (tab === 'vibe' && typeof loadVibeSettings === 'function') {
         loadVibeSettings();
+        if (typeof refreshNineKeyStatus === 'function') refreshNineKeyStatus();
       }
     }
 
@@ -9290,8 +9315,74 @@
       }
     }
 
-    async function runVibeDebateNow() {
-      const btn = document.getElementById('btn-run-vibe-debate');
+    // =========================================================================
+    // 9ROUTER API KEY (Settings local) + LOGOUT (bot van chay nen)
+    // =========================================================================
+    async function refreshNineKeyStatus() {
+      const badge = document.getElementById('ninekey-status-badge');
+      try {
+        const res = await fetch('/api/settings/ninerouter_key_status');
+        const data = await res.json();
+        if (data.status === 'ok' && badge) {
+          const ok = !!(data.has_settings_key || data.has_env_key || data.council_key_set);
+          badge.innerText = ok ? 'ĐÃ CÓ KEY ✅' : 'CHƯA CÓ KEY ⚠️';
+          badge.className = ok
+            ? 'ml-auto px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-950 text-emerald-400 border border-emerald-800 mono'
+            : 'ml-auto px-2 py-0.5 text-[10px] font-bold rounded bg-amber-950 text-amber-300 border border-amber-700 mono';
+        }
+      } catch (e) {
+        if (badge) badge.innerText = 'Không kiểm tra được';
+      }
+    }
+
+    function toggleNineKeyVisibility() {
+      const inp = document.getElementById('ninekey-input');
+      if (inp) inp.type = inp.type === 'password' ? 'text' : 'password';
+    }
+
+    async function saveNineRouterKey() {
+      const inp = document.getElementById('ninekey-input');
+      const statusEl = document.getElementById('ninekey-save-status');
+      const btn = document.getElementById('btn-save-ninekey');
+      const key = (inp?.value || '').trim();
+      if (!key) {
+        if (statusEl) { statusEl.innerText = '❌ Hãy dán key 9Router vào ô trước khi lưu.'; statusEl.className = 'text-xs mono text-rose-400 font-bold'; }
+        return;
+      }
+      if (btn) btn.disabled = true;
+      if (statusEl) { statusEl.innerText = 'Đang lưu key an toàn...'; statusEl.className = 'text-xs mono text-gray-400'; }
+      try {
+        const res = await fetch('/api/settings/save_ninerouter_key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ api_key: key })
+        });
+        const data = await res.json();
+        if (data.status === 'ok') {
+          if (statusEl) { statusEl.innerText = '✅ ' + (data.message || 'Đã lưu key!'); statusEl.className = 'text-xs mono text-emerald-400 font-bold'; }
+          if (inp) inp.value = '';
+          refreshNineKeyStatus();
+          if (typeof showToast === 'function') showToast('Đã lưu 9Router API key!');
+        } else {
+          if (statusEl) { statusEl.innerText = '❌ ' + (data.detail || 'Lỗi lưu key'); statusEl.className = 'text-xs mono text-rose-400 font-bold'; }
+        }
+      } catch (e) {
+        if (statusEl) { statusEl.innerText = '❌ Lỗi kết nối: ' + e.message; statusEl.className = 'text-xs mono text-rose-400 font-bold'; }
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function logoutDesk() {
+      // Chi dang xuat giao dien: xoa cookie + chuyen ve trang login.
+      // Bot (auto-cycle, WS engine, broadcast) chay doc lap tren server nen VAN CHAY BINH THUONG.
+      if (!confirm('Thoát phiên đăng nhập?\n\nBot vẫn chạy nền bình thường — đăng nhập lại bất cứ lúc nào.')) return;
+      try { if (wsClient) { try { wsClient.close(); } catch (e) {} } } catch (e) {}
+      try { await fetch('/auth/logout', { method: 'POST' }); } catch (e) {}
+      window.location.href = '/';
+    }
+
+    async function runVibeDebateNow() {      const btn = document.getElementById('btn-run-vibe-debate');
       const box = document.getElementById('vibe-test-result-box');
       const cards = document.getElementById('vibe-test-cards');
       const rat = document.getElementById('vibe-test-rationale');

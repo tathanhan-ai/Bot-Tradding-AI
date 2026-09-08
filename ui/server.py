@@ -2714,8 +2714,12 @@ async def websocket_endpoint(websocket: WebSocket):
     if not token:
         cookie_header = websocket.headers.get("cookie", "")
         for part in cookie_header.split(";"):
-            if part.strip().startswith("desk_token="):
-                token = part.strip()[len("desk_token="):]
+            pname = part.strip()
+            if pname.startswith("desk_token="):
+                token = pname[len("desk_token="):]
+                break
+            if pname.startswith("desk_session="):
+                token = pname[len("desk_session="):]
                 break
     auth_header = websocket.headers.get("Authorization")
     if not token and auth_header and auth_header.startswith("Bearer "):
@@ -2873,11 +2877,14 @@ async def auth_login(request: Request):
 
 @app.post("/auth/logout")
 async def auth_logout(request: Request):
-    token = request.cookies.get("desk_session")
-    if token:
-        get_auth_manager().revoke_token(token)
+    # Thoat chi xoa cookie trinh duyet; bot (auto-cycle, WS engine, broadcast)
+    # chay nen doc lap voi session nen VAN CHAY BINH THUONG sau khi logout.
+    # Chu y: desk token la mat khau lau dai (luu trong data/.desk_tokens.json)
+    # nen KHONG revoke o day - revoke se lam token vinh vien vo hieu va khoa
+    # luon lan dang nhap sau. Chi xoa cookie phia client.
     resp = HTMLResponse(content='<html><head><meta http-equiv="refresh" content="0;url=/"></head><body>Logged out</body></html>')
     resp.delete_cookie("desk_session")
+    resp.delete_cookie("desk_token")
     return resp
 
 

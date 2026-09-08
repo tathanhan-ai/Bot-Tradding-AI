@@ -24,7 +24,7 @@ class P0AuthAcceptanceTests(unittest.TestCase):
         res = self.client.get("/")
         self.assertEqual(res.status_code, 200)
         self.assertNotIn("window.__DESK_TOKEN__", res.text)
-        self.assertIn("Trading Desk Login", res.text)
+        self.assertIn("Binance Futures Quant Desk", res.text)
 
     def test_anonymous_mutations_return_401(self):
         for path, payload in [
@@ -73,13 +73,37 @@ class P0AuthAcceptanceTests(unittest.TestCase):
     def test_missing_key_does_not_approve_ai_entry(self):
         from strategy.vibe_swarm_council import VibeSwarmCouncil
         from strategy.ai_model_copilot import AIModelCopilot
-        with patch.dict("os.environ", {}, clear=False):
+        # Settings local co the da co key nguoi dung nhap truoc do -> mock ca 2 nguon
+        # de kiem chung hanh vi "thieu key thi khong co key trong memory".
+        with patch.dict("os.environ", {}, clear=False), \
+                patch("strategy.vibe_swarm_council.VibeSwarmCouncil._load_key_from_settings", return_value=None), \
+                patch("strategy.ninerouter_key.load_ninerouter_key", return_value=None):
             import os
             os.environ.pop("NINEROUTER_API_KEY", None)
             c = VibeSwarmCouncil(api_key=None)
             self.assertIsNone(c.api_key)
             cp = AIModelCopilot(api_key=None)
             self.assertIsNone(cp.api_key)
+
+
+    def test_logout_keeps_token_alive_for_next_login(self):
+        # Nut Thoat chi xoa cookie phia client; token lau dai phai con hieu luc
+        # de dang nhap lai, va bot nen (auto-cycle) khong phu thuoc session.
+        tok = self.auth.create_session("logout-admin", Role.ADMIN)
+        res = self.client.post("/auth/logout", cookies={"desk_session": tok})
+        self.assertEqual(res.status_code, 200)
+        self.assertIsNotNone(self.auth.authenticate_token(tok))
+        # Cookie da duoc xoa phia client (Max-Age=0 / rong)
+        set_cookie = res.headers.get("set-cookie", "")
+        self.assertIn("Max-Age=0", set_cookie)
+
+    def test_ninerouter_key_status_never_leaks_key(self):
+        res = self.client.get("/api/settings/ninerouter_key_status", headers=self.H(self.admin))
+        self.assertEqual(res.status_code, 200)
+        body = res.json()
+        self.assertNotIn("api_key", str(body).lower().replace("has_settings_key", "").replace("has_env_key", ""))
+        for k in ("has_env_key", "has_settings_key", "council_key_set", "copilot_key_set"):
+            self.assertIn(k, body)
 
 
 if __name__ == "__main__":

@@ -287,10 +287,13 @@ def get_token_from_request(request: Request) -> Optional[str]:
     query_token = request.query_params.get("token")
     if query_token:
         return query_token.strip()
-    # 4. Cookie 'desk_token'
+    # 4. Cookie 'desk_token' (cu) hoac 'desk_session' (login page moi)
     cookie_token = request.cookies.get("desk_token")
     if cookie_token:
         return cookie_token.strip()
+    session_cookie = request.cookies.get("desk_session")
+    if session_cookie:
+        return session_cookie.strip()
     return None
 
 
