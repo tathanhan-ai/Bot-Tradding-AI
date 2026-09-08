@@ -2771,12 +2771,18 @@ async def get_dashboard(request: Request):
 @app.post("/auth/login")
 async def auth_login(request: Request):
     # Login local: nhan token (tu Settings hoac bien moi truong), tao session cookie HttpOnly.
-    form = await request.form()
-    token = str(form.get("token", "") or "").strip()
+    # Doc JSON hoac urlencoded tho, khong dung request.form() de khoi can python-multipart.
+    token = ""
+    try:
+        body = await request.json()
+        token = str(body.get("token", "") or "").strip()
+    except Exception:
+        token = ""
     if not token:
         try:
-            body = await request.json()
-            token = str(body.get("token", "") or "").strip()
+            raw = (await request.body()).decode("utf-8", errors="ignore")
+            from urllib.parse import parse_qs
+            token = str(parse_qs(raw).get("token", [""])[0] or "").strip()
         except Exception:
             token = ""
     session = get_auth_manager().authenticate_token(token)
