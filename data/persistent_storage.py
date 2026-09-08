@@ -119,7 +119,32 @@ class PersistentStorageManager:
                 )
             """)
 
-            # 4. User Settings (Binance API keys, mode, VIP tier, etc.)
+            # Di chuyển bảng account_state cũ (CHECK id=1) sang schema mới (id 1/2).
+            try:
+                old_sql = (cursor.execute(
+                    "SELECT sql FROM sqlite_master WHERE name='account_state'").fetchone() or [None])[0] or ""
+                if "IN (1, 2)" not in old_sql and "IN (1,2)" not in old_sql:
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS account_state_new (
+                            id INTEGER PRIMARY KEY CHECK (id IN (1, 2)),
+                            symbol TEXT DEFAULT 'BTCUSDT',
+                            initial_balance REAL DEFAULT 1000.0,
+                            current_balance REAL DEFAULT 1000.0,
+                            peak_balance REAL DEFAULT 1000.0,
+                            total_fees REAL DEFAULT 0.0,
+                            is_running INTEGER DEFAULT 1,
+                            active_timeframe TEXT DEFAULT '15m',
+                            leverage_mode TEXT DEFAULT 'AI_AUTO',
+                            manual_leverage INTEGER DEFAULT 3,
+                            current_position TEXT,
+                            updated_at TEXT
+                        )
+                    """)
+                    cursor.execute("INSERT OR IGNORE INTO account_state_new SELECT * FROM account_state")
+                    cursor.execute("DROP TABLE account_state")
+                    cursor.execute("ALTER TABLE account_state_new RENAME TO account_state")
+            except Exception:
+                pass
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS user_settings (
                     key TEXT PRIMARY KEY,

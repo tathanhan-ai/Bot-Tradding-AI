@@ -383,6 +383,39 @@ class LiveTradingState:
             saved_peak = saved_state.get("peak_balance", self.current_balance)
             self.freqtrade_protections.max_drawdown_guard.peak_balance = saved_peak
             self.risk_manager.update_balance(self.current_balance)
+        elif self.storage.mode == "live":
+            # Sổ live lần đầu chưa có: khởi tạo với vốn = ví sàn nếu đã sync,
+            # không lấy baseline $5,000 của paper (gây PnL ảo -$4,900).
+            seed = 0.0
+            try:
+                seed = float(getattr(self, "exchange_wallet", 0.0) or 0.0)
+            except Exception:
+                seed = 0.0
+            if not seed or seed <= 0:
+                try:
+                    seed = float(self.current_balance or 0.0)
+                except Exception:
+                    seed = 0.0
+            if seed and seed > 0:
+                self.symbol = symbol
+                self.initial_balance = seed
+                self.current_balance = seed
+                self.total_fees = 0.0
+                self.freqtrade_protections.max_drawdown_guard.peak_balance = seed
+                self.risk_manager.update_balance(seed)
+                try:
+                    self.storage.save_account_state(
+                        symbol=symbol, initial_balance=seed, current_balance=seed,
+                        peak_balance=seed, total_fees=0.0, is_running=True,
+                        active_timeframe="15m", leverage_mode="AI_AUTO",
+                        manual_leverage=3, current_position=None,
+                    )
+                except Exception:
+                    pass
+            else:
+                self.symbol = symbol
+                self.initial_balance = balance
+                self.current_balance = balance
         else:
             self.symbol = symbol
             self.initial_balance = balance
@@ -682,9 +715,39 @@ class LiveTradingState:
         self.exchange_available = float(snap.get("available_balance", 0.0) or 0.0)
         self.exchange_balance_drift = round(drift, 4)
         self.exchange_sync_error = ""
-        # Sync vốn theo sàn; initial_balance giữ nguyên để PnL lịch sử không méo.
+        # Sync vốn theo sàn. Baseline PnL của sổ live = ví sàn tại thời điểm
+        # sync (không giữ initial_balance paper $5,000 gây PnL ảo -$4,900):
+        # - Sổ live chưa có baseline (<=0 hoặc vẫn là baseline paper trong khi
+        #   storage đang ở live): gán baseline = ví sàn -> PnL = 0.
+        # - Đã có baseline live: chỉ cập nhật số dư, PnL = wallet - baseline.
+        if self.storage.mode == "live":
+            try:
+                saved = self.storage.load_account_state()
+                saved_init = float((saved or {}).get("initial_balance", 0.0) or 0.0)
+            except Exception:
+                saved_init = 0.0
+            baseline = saved_init if saved_init > 0 else float(self.initial_balance or 0.0)
+            if baseline <= 0 or (self.initial_balance == 5000.0 and abs(wallet - 5000.0) > 1.0):
+                baseline = wallet
+            self.initial_balance = baseline
+            if saved_init <= 0:
+                try:
+                    self.storage.save_account_state(
+                        symbol=self.symbol, initial_balance=baseline, current_balance=wallet,
+                        peak_balance=max(baseline, wallet), total_fees=float(self.total_fees or 0.0),
+                        is_running=True, active_timeframe=getattr(self, "active_timeframe", "15m"),
+                        leverage_mode=getattr(self, "leverage_mode", "AI_AUTO"),
+                        manual_leverage=int(getattr(self, "manual_leverage", 3) or 3),
+                        current_position=self.current_position,
+                    )
+                except Exception:
+                    pass
         self.current_balance = wallet
         self.risk_manager.update_balance(wallet)
+        try:
+            self.persist_current_state()
+        except Exception:
+            pass
         if drift > 0.10:
             print(f"[BALANCE SYNC] ⚠️ Ví sàn ${wallet:,.2f} lệch {drift*100:.1f}% so với ledger — đã sync, chặn lệnh mới tới khi kiểm tra.", flush=True)
         else:
