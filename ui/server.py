@@ -3678,7 +3678,8 @@ async def switch_exchange(payload: dict, session: UserSession = Depends(require_
 @serialized_action
 def toggle_trading_mode(payload: dict, session: UserSession = Depends(require_role(Role.ADMIN))):
     if state.current_position or state.hedge_positions or state.order_manager.pending_orders or state.execution.entry_exit_barrier:
-        return {"status": "rejected", "reason": "Close/cancel exposure before switching execution environment"}
+        msg = "Đang có vị thế/lệnh chờ — hãy đóng & hủy hết trước khi đổi chế độ."
+        return {"status": "rejected", "reason": msg, "message": msg}
     live_enabled = payload.get("live_enabled", False)
     if not isinstance(live_enabled, bool):
         return {"status": "rejected", "reason": "live_enabled must be boolean"}

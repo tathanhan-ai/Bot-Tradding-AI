@@ -2953,6 +2953,32 @@
     </div>
   </div>
 
+  <!-- MODAL XÁC NHẬN BẬT LIVE 2 BƯỚC (thay confirm()/alert() trình duyệt) -->
+  <div id="modal-live-confirm" class="fixed inset-0 bg-black/80 z-50 hidden flex items-center justify-center p-4 backdrop-blur-sm">
+    <div class="bg-[#0f141c] border border-amber-700/60 rounded-xl max-w-md w-full p-5 shadow-2xl space-y-4">
+      <div class="flex justify-between items-center border-b border-gray-800 pb-3">
+        <span class="text-base font-bold text-white flex items-center gap-1.5">
+          <span id="live-confirm-icon">⚠️</span> <span id="live-confirm-title">Xác nhận bật Live</span>
+        </span>
+        <button onclick="closeLiveConfirmModal()" class="text-gray-400 hover:text-white text-lg font-bold">✕</button>
+      </div>
+      <div class="bg-amber-950/30 border border-amber-800/50 rounded-lg p-3 text-xs text-gray-200 leading-relaxed">
+        <div id="live-confirm-network" class="font-bold text-amber-300 mb-1">Binance Mainnet (Tiền Thật)</div>
+        <div id="live-confirm-desc">Bot sẽ đặt lệnh thật bằng tiền thật.</div>
+        <ul class="mt-2 space-y-1 text-[11px] text-gray-400">
+          <li id="live-confirm-step1-hint">• Bước 1/2: xác nhận bật chế độ giao dịch thật.</li>
+          <li id="live-confirm-step2-hint" class="hidden">• Bước 2/2: xác nhận TIỀN THẬT — lỗ là mất tiền thật.</li>
+        </ul>
+      </div>
+      <div id="live-confirm-error" class="hidden p-3 rounded-lg text-xs leading-relaxed border bg-rose-950/60 border-rose-600 text-rose-300"></div>
+      <div id="live-confirm-success" class="hidden p-3 rounded-lg text-xs leading-relaxed border bg-emerald-950/60 border-emerald-600 text-emerald-300"></div>
+      <div class="flex justify-end gap-2 pt-1">
+        <button onclick="closeLiveConfirmModal()" class="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-bold rounded-lg transition" data-i18n="btn_cancel">Hủy</button>
+        <button onclick="confirmLiveModalNext()" id="btn-live-confirm-next" class="px-4 py-2 bg-gradient-to-r from-amber-600 to-yellow-600 hover:from-amber-500 hover:to-yellow-500 text-black text-xs font-bold rounded-lg transition shadow">Tiếp tục →</button>
+      </div>
+    </div>
+  </div>
+
   <!-- MODAL CHỈNH SỬA LỆNH CHỜ KHỚP (PENDING ORDER MODAL) -->
   <div id="modal-edit-pending-order" class="fixed inset-0 bg-black/80 z-50 hidden flex items-center justify-center p-4 backdrop-blur-sm">
     <div class="bg-[#0f141c] border border-gray-700 rounded-xl max-w-lg w-full p-5 shadow-2xl space-y-4">
@@ -6812,48 +6838,166 @@
       }
     }
 
-    async function onModeRadioChanged(mode) {
-      const isLive = mode === 'live';
-      const isMainnet = (document.getElementById('setting-network')?.value || 'mainnet') !== 'testnet';
-      if (isLive) {
-        const conf = confirm(t('confirm_live_mode_warning'));
-        if (!conf) {
-          document.getElementById('mode-radio-demo').checked = true;
-          return;
-        }
-        // Mainnet tiền thật: xác nhận lần 2 riêng cho tiền thật trước khi gửi.
-        if (isMainnet) {
-          const conf2 = confirm(
-            currentLanguage === 'zh'
-              ? '⚠️ 。\nUSDT ——。\n\n'
-              : (currentLanguage === 'en'
-                ? '⚠️ Second confirmation: you selected Binance MAINNET (REAL MONEY).\nThe bot will place orders with real USDT — losses are real losses.\n\nStart live with real funds?'
-                : '⚠️ Xác nhận lần 2: bạn đang chọn Binance MAINNET (TIỀN THẬT).\nBot sẽ đặt lệnh bằng USDT thật — lỗ là mất tiền thật.\n\nChắc chắn bật live tiền thật?')
-          );
-          if (!conf2) {
-            document.getElementById('mode-radio-demo').checked = true;
-            return;
-          }
-        }
-      }
+    // Modal xac nhan bat Live 2 buoc (thay confirm()/alert() trinh duyet).
+    // Fix loi "undefined": moi text deu co fallback VI, moi response deu doc
+    // ca message/reason/detail, khong bao gio hien undefined.
+    let liveConfirmState = { step: 1, isMainnet: true };
 
+    function liveConfirmText(key, fallback) {
+      try {
+        const v = t(key);
+        if (typeof v === 'string' && v.trim() && v !== key) return v;
+      } catch (e) {}
+      return fallback;
+    }
+
+    function liveConfirmMsg(data, fallback) {
+      if (!data || typeof data !== 'object') return fallback;
+      const keys = ['message', 'reason', 'detail', 'error', 'msg'];
+      for (let i = 0; i < keys.length; i++) {
+        const v = data[keys[i]];
+        if (typeof v === 'string' && v.trim() && v !== 'undefined') return v;
+      }
+      return fallback;
+    }
+
+    function resetLiveRadioToDemo() {
+      const demo = document.getElementById('mode-radio-demo');
+      if (demo) demo.checked = true;
+      const live = document.getElementById('mode-radio-live');
+      if (live) live.checked = false;
+    }
+
+    function hideLiveConfirmMsg() {
+      const e = document.getElementById('live-confirm-error');
+      const s = document.getElementById('live-confirm-success');
+      if (e) { e.classList.add('hidden'); e.innerText = ''; }
+      if (s) { s.classList.add('hidden'); s.innerText = ''; }
+    }
+
+    function showLiveConfirmError(msg) {
+      const e = document.getElementById('live-confirm-error');
+      const s = document.getElementById('live-confirm-success');
+      if (s) s.classList.add('hidden');
+      if (e) {
+        e.innerText = '[FAIL] ' + (msg || liveConfirmText('live_confirm_unknown_error', 'Co loi xay ra, vui long thu lai.'));
+        e.classList.remove('hidden');
+      }
+    }
+
+    function showLiveConfirmSuccess(msg) {
+      const e = document.getElementById('live-confirm-error');
+      const s = document.getElementById('live-confirm-success');
+      if (e) e.classList.add('hidden');
+      if (s) { s.innerText = '[OK] ' + msg; s.classList.remove('hidden'); }
+    }
+
+    function openLiveConfirmModal() {
+      const netVal = document.getElementById('setting-network')?.value || 'mainnet';
+      const isMainnet = netVal !== 'testnet';
+      liveConfirmState = { step: 1, isMainnet: isMainnet };
+      const netEl = document.getElementById('live-confirm-network');
+      const descEl = document.getElementById('live-confirm-desc');
+      const s1 = document.getElementById('live-confirm-step1-hint');
+      const s2 = document.getElementById('live-confirm-step2-hint');
+      const btn = document.getElementById('btn-live-confirm-next');
+      if (netEl) {
+        netEl.innerText = isMainnet
+          ? liveConfirmText('live_confirm_net_mainnet', 'Binance Mainnet (Tien That)')
+          : liveConfirmText('live_confirm_net_testnet', 'Binance Testnet (Tien Ao Sandbox)');
+      }
+      if (descEl) descEl.innerText = liveConfirmText('confirm_live_mode_warning',
+        'Ban dang chuan bi kich hoat che do GIAO DICH THAT. He thong se dat lenh that va tru tien vi cua ban. Ban co chac chan muon kich hoat khong?');
+      if (s1) s1.classList.remove('hidden');
+      if (s2) s2.classList.add('hidden');
+      if (btn) btn.innerHTML = isMainnet
+        ? liveConfirmText('live_confirm_next_mainnet', 'Tiep tuc (con buoc xac nhan tien that)')
+        : liveConfirmText('live_confirm_next', 'Bat Live Testnet');
+      hideLiveConfirmMsg();
+      const m = document.getElementById('modal-live-confirm');
+      if (m) m.classList.remove('hidden');
+    }
+
+    function closeLiveConfirmModal() {
+      const m = document.getElementById('modal-live-confirm');
+      if (m) m.classList.add('hidden');
+      resetLiveRadioToDemo();
+      hideLiveConfirmMsg();
+      liveConfirmState = { step: 1, isMainnet: true };
+    }
+
+    async function confirmLiveModalNext() {
+      const btn = document.getElementById('btn-live-confirm-next');
+      if (liveConfirmState.isMainnet && liveConfirmState.step === 1) {
+        liveConfirmState.step = 2;
+        const descEl = document.getElementById('live-confirm-desc');
+        const s2 = document.getElementById('live-confirm-step2-hint');
+        if (descEl) descEl.innerText = liveConfirmText('live_confirm_step2_desc',
+          'Ban dang chon Binance MAINNET (TIEN THAT). Bot se dat lenh bang USDT that - lo la mat tien that. Chac chan bat live tien that?');
+        if (s2) s2.classList.remove('hidden');
+        if (btn) btn.innerHTML = liveConfirmText('live_confirm_go_live', 'Bat Live Tien That');
+        return;
+      }
+      if (btn) { btn.disabled = true; btn.innerText = '...'; }
+      hideLiveConfirmMsg();
       try {
         const res = await fetch('/api/settings/toggle_mode', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ live_enabled: isLive, confirm_mainnet: isLive && isMainnet })
+          body: JSON.stringify({ live_enabled: true, confirm_mainnet: liveConfirmState.isMainnet })
         });
-        const data = await res.json();
-        if (data.status === 'error') {
-          alert((currentLanguage === 'vi' ? 'LỖI KÍCH HOẠT LIVE:\n' : (currentLanguage === 'zh' ? '开启实盘错误:\n' : 'LIVE ACTIVATION ERROR:\n')) + data.message);
-          document.getElementById('mode-radio-demo').checked = true;
+        let data = {};
+        try { data = await res.json(); } catch (e) { data = {}; }
+        if (data.status === 'ok') {
+          showLiveConfirmSuccess(liveConfirmMsg(data,
+            liveConfirmText('live_confirm_ok', 'Da bat che do Live thanh cong!')));
+          setTimeout(() => {
+            const m = document.getElementById('modal-live-confirm');
+            if (m) m.classList.add('hidden');
+            hideLiveConfirmMsg();
+          }, 1600);
         } else {
-          alert(data.message);
+          showLiveConfirmError(liveConfirmMsg(data,
+            liveConfirmText('live_confirm_failed', 'Khong bat duoc Live. Vui long kiem tra API key, quyen Futures va so du.')));
+          resetLiveRadioToDemo();
         }
-        fetchStateRest();
       } catch (e) {
-        alert((currentLanguage === 'vi' ? 'Lỗi chuyển chế độ: ' : (currentLanguage === 'zh' ? '切换模式错误: ' : 'Mode toggle error: ')) + e.message);
+        showLiveConfirmError((e && e.message ? e.message : '') ||
+          liveConfirmText('live_confirm_conn_error', 'Loi ket noi toi bot, vui long thu lai.'));
+        resetLiveRadioToDemo();
+      } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = liveConfirmText('live_confirm_retry', 'Thu lai'); }
+        if (typeof fetchStateRest === 'function') { try { fetchStateRest(); } catch (e2) {} }
       }
+    }
+
+    async function onModeRadioChanged(mode) {
+      const isLive = mode === 'live';
+      if (!isLive) {
+        try {
+          const res = await fetch('/api/settings/toggle_mode', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ live_enabled: false })
+          });
+          let data = {};
+          try { data = await res.json(); } catch (e) { data = {}; }
+          if (data.status !== 'ok') {
+            openLiveConfirmModal();
+            showLiveConfirmError(liveConfirmMsg(data,
+              liveConfirmText('live_confirm_off_failed', 'Khong tat duoc Live, vui long thu lai.')));
+            return;
+          }
+        } catch (e) {
+          openLiveConfirmModal();
+          showLiveConfirmError((e && e.message ? e.message : '') ||
+            liveConfirmText('live_confirm_conn_error', 'Loi ket noi toi bot, vui long thu lai.'));
+          return;
+        }
+        if (typeof fetchStateRest === 'function') { try { fetchStateRest(); } catch (e2) {} }
+        return;
+      }
+      openLiveConfirmModal();
     }
 
     async function applyFeeSettingsAction() {
@@ -7596,6 +7740,8 @@
         btn_test_conn_label: "⚡ Kiểm Tra Kết Nối & Đọc Số Dư Thực",
         btn_test_mexc_label: "⚡ Kiểm Tra Kết Nối MEXC & Số Dư",
         confirm_live_mode_warning: "CẢNH BÁO AN TOÀN VỐN:\nBạn đang chuẩn bị kích hoạt chế độ GIAO DỊCH THẬT (LIVE FUTURES).\nHệ thống sẽ đặt lệnh thật trên sàn và trừ tiền trong ví thực tế của bạn.\n\nBạn có chắc chắn muốn kích hoạt không?",
+        live_confirm_net_mainnet: "Binance Mainnet (Tiền Thật)",
+        live_confirm_net_testnet: "Binance Testnet (Tiền Ảo Sandbox)",
         btn_syncing_fees: "Đang đồng bộ...",
         alert_sync_fees_success: "Đã đồng bộ biểu phí thực từ tài khoản",
         alert_reset_data_success: "Đã xóa và reset dữ liệu thành công!",
@@ -8252,6 +8398,8 @@
         btn_test_conn_label: "⚡ Test Connection & Read Live Balance",
         btn_test_mexc_label: "⚡ Test MEXC Connection & Live Balance",
         confirm_live_mode_warning: "CAPITAL SAFETY WARNING:\nYou are about to activate LIVE FUTURES trading mode.\nThe system will place real orders and debit funds from your real exchange wallet.\n\nAre you sure you want to proceed?",
+        live_confirm_net_mainnet: "Binance Mainnet (REAL MONEY)",
+        live_confirm_net_testnet: "Binance Testnet (Sandbox Money)",
         btn_syncing_fees: "Syncing...",
         alert_sync_fees_success: "Successfully synced live fee tier from account",
         alert_reset_data_success: "Successfully reset database and trade memory!",
@@ -8905,6 +9053,8 @@
         btn_test_conn_label: "⚡ 测试连接并读取真实资产余额",
         btn_test_mexc_label: "⚡ 测试 MEXC 连接并读取资产",
         confirm_live_mode_warning: "资金安全警示:\n您即将开启【真实盘实盘交易 (LIVE FUTURES)】模式。\n系统将在交易所真实下单并从您的实盘账户划扣资金。\n\n您确定要开启实盘交易吗？",
+        live_confirm_net_mainnet: "Binance (USDT)",
+        live_confirm_net_testnet: "Binance (Sandbox)",
         btn_syncing_fees: "正在同步...",
         alert_sync_fees_success: "已成功从账户同步真实手续费率",
         alert_reset_data_success: "数据已成功重置！",
