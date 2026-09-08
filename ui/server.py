@@ -381,7 +381,18 @@ class LiveTradingState:
             self.manual_leverage = saved_state.get("manual_leverage", 3)
             self.current_position = saved_state.get("current_position")
             saved_peak = saved_state.get("peak_balance", self.current_balance)
+            # Đỉnh drawdown THEO SỔ MODE HIỆN TẠI (không mang đỉnh $5,000 paper
+            # sang sổ live $99 gây khóa oan 98%). Kẹp đỉnh trong [số dư, ...]
+            # để không bao giờ tính drawdown ảo từ đỉnh chế độ cũ.
+            try:
+                saved_peak = float(saved_peak or self.current_balance)
+            except Exception:
+                saved_peak = float(self.current_balance or 0.0)
+            if saved_peak < float(self.current_balance or 0.0):
+                saved_peak = float(self.current_balance or 0.0)
             self.freqtrade_protections.max_drawdown_guard.peak_balance = saved_peak
+            self.freqtrade_protections.max_drawdown_guard.locked_until = 0.0
+            self.freqtrade_protections.max_drawdown_guard.lock_reason = ""
             self.risk_manager.update_balance(self.current_balance)
         elif self.storage.mode == "live":
             # Sổ live lần đầu chưa có: khởi tạo với vốn = ví sàn nếu đã sync,
@@ -694,6 +705,12 @@ class LiveTradingState:
         """
         if not (self.active_exchange == "binance" and self.binance_api.is_live_enabled):
             return
+        # Sync vốn live bắt buộc chạy trên sổ live (tránh đè sổ paper).
+        try:
+            if getattr(getattr(self, "storage", None), "mode", "paper") != "live":
+                self.storage.set_mode("live")
+        except Exception:
+            pass
         now = time.time()
         if not force and now - getattr(self, "_last_exchange_sync", 0.0) < 30.0:
             return
@@ -744,6 +761,16 @@ class LiveTradingState:
                     pass
         self.current_balance = wallet
         self.risk_manager.update_balance(wallet)
+        # Đỉnh drawdown không bao giờ vượt ví thực tế: nếu đỉnh cũ (paper)
+        # cao hơn ví live thì hạ về ví, xóa khóa oan từ đỉnh cũ.
+        try:
+            guard = self.freqtrade_protections.max_drawdown_guard
+            if float(guard.peak_balance or 0.0) > wallet:
+                guard.peak_balance = wallet
+                guard.locked_until = 0.0
+                guard.lock_reason = ""
+        except Exception:
+            pass
         try:
             self.persist_current_state()
         except Exception:
@@ -2329,6 +2356,14 @@ class LiveTradingState:
 
     def persist_current_state(self):
         # Runtime is authoritative after restart; legacy account row is a UI/export view.
+        # Chốt chặn mode: storage.mode phải khớp cờ live (tránh sync vốn live
+        # persist đè lên sổ paper khi mode RAM bị lệch).
+        try:
+            want = "live" if bool(getattr(getattr(self, "binance_api", None), "is_live_enabled", False)) else "paper"
+            if getattr(getattr(self, "storage", None), "mode", "paper") != want:
+                self.storage.set_mode(want)
+        except Exception:
+            pass
         if hasattr(self, "execution"):
             self.execution.persist()
         self.storage.save_account_state(

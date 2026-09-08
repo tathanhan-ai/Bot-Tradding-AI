@@ -6608,7 +6608,8 @@
           updateMonthlyGovernorUI(data.monthly_target);
         }
         if (data.capital_allocation) {
-          updateCapitalAllocationUI(data.capital_allocation, state.active_timeframe, data.monthly_target);
+          const activeTf = (typeof latestFullState !== 'undefined' && latestFullState) ? latestFullState.active_timeframe : '15m';
+          updateCapitalAllocationUI(data.capital_allocation, activeTf, data.monthly_target);
         }
         fetchStateRest();
       } catch (e) {
