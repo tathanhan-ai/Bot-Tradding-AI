@@ -930,7 +930,8 @@
           <!-- User Instruction Natural Language Input -->
           <div class="mt-3 pt-2.5 border-t border-gray-800/80 flex flex-col sm:flex-row items-center gap-2">
             <div class="relative flex-1 w-full">
-              <input id="copilot-user-input" type="text" placeholder="Nhập chỉ thị riêng cho Mô hình AI (ví dụ: 'Hôm nay chỉ đánh theo sóng Ngày 1D', 'Cẩn thận tin tức CPI lúc 19:30')..." class="w-full bg-[#121722] border border-purple-700/50 rounded-lg px-3 py-1.5 text-xs text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-400 transition" />
+              <input id="copilot-user-input" type="text" oninput="saveCopilotDraft(this.value)" placeholder="Nhập chỉ thị riêng cho Mô hình AI (ví dụ: 'Hôm nay chỉ đánh theo sóng Ngày 1D', 'Cẩn thận tin tức CPI lúc 19:30')..." class="w-full bg-[#121722] border border-purple-700/50 rounded-lg px-3 py-1.5 text-xs text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-400 transition" />
+              <div id="copilot-instruction-saved" class="text-[10px] text-purple-300/80 mt-1"></div>
             </div>
             <button onclick="sendAiCopilotInstruction()" class="w-full sm:w-auto px-3.5 py-1.5 bg-gradient-to-r from-purple-700 to-indigo-700 hover:from-purple-600 hover:to-indigo-600 text-white font-bold text-xs rounded-lg shadow transition flex items-center justify-center gap-1.5 whitespace-nowrap">
               <span>🧠</span> <span>Gửi Chỉ Thị & Suy Luận</span>
@@ -4863,6 +4864,9 @@
           if (userInput && cp.user_instruction && !userInput.matches(':focus') && !userInput.value) {
             userInput.value = cp.user_instruction;
           }
+          if (typeof restoreCopilotInstruction === 'function') {
+            restoreCopilotInstruction(cp.user_instruction || '');
+          }
         }
         const decisionBadge = document.getElementById('copilot-decision-badge');
         if (decisionBadge) {
@@ -5769,11 +5773,15 @@
       const btn = event ? event.target : null;
       const originalText = btn ? btn.innerHTML : '';
       if (btn) btn.innerHTML = '<span>⏳</span> <span>Đang suy luận & lưu DB...</span>';
+      // Giữ bản nháp ngay cả khi gửi lỗi mạng — AI không bao giờ mất chỉ thị.
+      try { localStorage.setItem('copilot_instruction_draft', instruction); } catch (e) {}
       try {
         const res = await fetch('/api/action/ai_copilot_reason?instruction=' + encodeURIComponent(instruction), { method: 'POST' });
         const d = await res.json();
         // Persist instruction to SQLite
         await fetch('/api/action/set_ai_copilot_instruction?instruction=' + encodeURIComponent(instruction), { method: 'POST' });
+        try { localStorage.removeItem('copilot_instruction_draft'); } catch (e) {}
+        renderSavedCopilotInstruction(instruction);
         showToast('✅ Đã lưu chỉ thị người dùng & cập nhật suy luận AI Copilot');
         fetchStateRest();
       } catch (e) {
@@ -5781,6 +5789,32 @@
       } finally {
         if (btn) btn.innerHTML = originalText;
       }
+    }
+
+    // Bản nháp chỉ thị: gõ tới đâu lưu tới đó, tải lại trang vẫn còn.
+    function saveCopilotDraft(value) {
+      try { localStorage.setItem('copilot_instruction_draft', value || ''); } catch (e) {}
+    }
+
+    function renderSavedCopilotInstruction(instruction) {
+      const el = document.getElementById('copilot-instruction-saved');
+      if (!el) return;
+      const text = (instruction || '').trim();
+      el.innerText = text ? ('Đã lưu chỉ thị: "' + text + '"') : '';
+    }
+
+    // Khôi phục ô chỉ thị khi mở trang: ưu tiên chỉ thị đã lưu trên server,
+    // nếu chưa có thì lấy bản nháp đang gõ dở.
+    function restoreCopilotInstruction(serverInstruction) {
+      const input = document.getElementById('copilot-user-input');
+      if (!input) return;
+      const saved = (serverInstruction || '').trim();
+      let draft = '';
+      try { draft = localStorage.getItem('copilot_instruction_draft') || ''; } catch (e) {}
+      if (!input.value) {
+        input.value = saved || draft;
+      }
+      renderSavedCopilotInstruction(saved);
     }
 
     async function changeCopilotModel(modelName) {
