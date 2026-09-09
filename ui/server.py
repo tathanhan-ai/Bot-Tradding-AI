@@ -1570,6 +1570,14 @@ class LiveTradingState:
                 if (is_defensive or is_counter_prop) and getattr(verdict, "approved_votes", 0) >= 2:
                     pass
                 else:
+                    try:
+                        votes_txt = " | ".join(
+                            f"{v.agent_id}:{v.vote}({v.confidence}%) {str(v.thesis)[:120]}"
+                            for v in (verdict.votes or []))
+                        print(f"[COUNCIL DIAG] {order.order_id} {order.order_type} Dir={order.direction} "
+                              f"votes={getattr(verdict, 'approved_votes', 0)}/4 :: {votes_txt}", flush=True)
+                    except Exception:
+                        pass
                     return StageOutcome.veto(verdict.council_rationale, **details)
             governor = self.monthly_governor.evaluate(self.current_balance, self.trades)
             if governor.enabled and hasattr(verdict, "confidence") and verdict.confidence < governor.min_ai_confidence:
@@ -1646,7 +1654,12 @@ class LiveTradingState:
             if held == 0.0 and abs(contracts) <= 0 and abs(carver.optimal_contracts) >= 0.001 and (carver.optimal_contracts * order.direction > 0):
                 contracts = carver.optimal_contracts
             if (carver.rebalance_action == "HOLD" and held != 0.0) or abs(contracts) <= 0:
-                return StageOutcome.veto("Carver inertia buffer says HOLD", carver=asdict(carver))
+                return StageOutcome.veto(
+                    f"Carver inertia buffer says HOLD "
+                    f"(raw {getattr(carver, 'raw_forecast', 0.0):+.2f}/capped {getattr(carver, 'capped_forecast', 0.0):+.2f}, "
+                    f"target {getattr(carver, 'optimal_contracts', 0.0):+.4f}, exec {contracts:+.4f}, "
+                    f"cash_target ${getattr(carver, 'daily_cash_vol_target', 0.0):,.2f}, held {held:+.4f})",
+                    carver=asdict(carver))
             if position and order.source == "auto" and contracts * position["direction"] < 0:
                 quantity = min(position["units"], math.floor(abs(contracts) / .001) * .001)
                 if quantity <= 0:
