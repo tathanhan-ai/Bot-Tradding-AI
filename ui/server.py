@@ -2050,7 +2050,26 @@ class LiveTradingState:
                 self.ai_copilot_verdict = copilot
                 self.ai_copilot_last_response_at = time.time()
                 if getattr(copilot, "gateway_connected", False) and getattr(copilot, "decision", "") == "VETO":
-                    decision.trace.add("Copilot", StageOutcome.veto(copilot.thought_process))
+                    # Lennh tham do probation von nho (Maker, wave_misaligned) da
+                    # duoc cac cong cung chap nhan: Copilot chi con tinh tu van,
+                    # khong duoc phu quyet cung (neu khong, AI doc chi thi song
+                    # theo nghia chat se chan vinh vien moi lenh lech song).
+                    try:
+                        _meta = getattr(candidate, "metadata", {}) or {}
+                        _is_probation_probe = bool(_meta.get("probation")) and bool(
+                            _meta.get("wave_misaligned")) and candidate.order_type in (
+                                "POST_ONLY", "LIMIT", "SCALE_RATIO")
+                    except Exception:
+                        _is_probation_probe = False
+                    if _is_probation_probe:
+                        decision.trace.add(
+                            "Copilot",
+                            StageOutcome.pass_(
+                                "Copilot phan doi (tu van, da ghi nhan) nhung lenh probation Maker von nho "
+                                "duoc mien quy tac cung chieu song nghiem ngat",
+                                copilot_objection=str(getattr(copilot, "thought_process", ""))[:300]))
+                    else:
+                        decision.trace.add("Copilot", StageOutcome.veto(copilot.thought_process))
                 else:
                     decision.trace.add("Copilot", StageOutcome.pass_("Copilot advisory reviewed; Stage 1-5 approval preserved"))
             else:
