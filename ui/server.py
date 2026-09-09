@@ -1262,10 +1262,22 @@ class LiveTradingState:
                 vwap_val = float(getattr(verdict, "vwap_fair_price", 0.0) or 0.0)
                 vwap_dist = abs(_snapshot.price - vwap_val) if vwap_val > 0 else 0.0
                 can_balance_grid = (vwap_val <= 0) or (vwap_dist <= atr * 0.75)
+                # Von nho (< $300) khong du suc nuoi luoi GRID toi thieu
+                # (4 chan x 0.001 BTC ~ $316 notional o BTC $79k): bo qua GRID,
+                # roi xuong nhanh directional Maker probation phia duoi.
+                grid_affordable = True
+                try:
+                    from risk.small_account import grid_affordable as _grid_ok, GRID_MIN_BALANCE
+                    grid_affordable = float(self.current_balance) >= GRID_MIN_BALANCE and bool(
+                        _grid_ok(float(self.current_balance), float(_snapshot.price),
+                                 int(self.get_effective_leverage())))
+                except Exception:
+                    grid_affordable = True
 
                 if (
                     is_grid_specific
                     and can_balance_grid
+                    and grid_affordable
                     and not getattr(self, "is_grid_active", False)
                     and not getattr(self, "current_position", None)
                     and not getattr(self, "hedge_positions", {})
@@ -1720,7 +1732,13 @@ class LiveTradingState:
                     return StageOutcome.veto("invalid Copilot margin adjustment")
             if order.metadata.get("probation"):
                 stop_distance = abs(order.entry_price - order.stop_loss)
-                probation_quantity = (self.current_balance * order.metadata["risk_cap_pct"]) / risk_per_unit if stop_distance > 0 else 0.0
+                risk_cap = float(order.metadata.get("risk_cap_pct", 0.0010) or 0.0010)
+                probation_quantity = (self.current_balance * risk_cap) / risk_per_unit if stop_distance > 0 else 0.0
+                # Probation la tran cung von nho (0.10%/0.25%): so voi moi quantity
+                # truoc do, ke ca tactical_qty tu tang nghien cuu. Khong co dong nay
+                # thi co probation chi de trang tri — lenh van di size thuong roi chet
+                # o tang gui san (khong du notional toi thieu).
+                quantity = min(quantity, probation_quantity)
             spec = get_symbol_spec(order.symbol, order.entry_price)
             min_step = spec["step_size"]
             dca_min = spec["dca_min_qty"]
@@ -1732,6 +1750,25 @@ class LiveTradingState:
                     quantity = dca_min
                 else:
                     order.order_type = "LIMIT"
+            # Von nho + probation: tran risk 0.10% x $99 = $0.10 -> quantity lam
+            # tron ve 0 -> veto vinh vien o buoc tiep theo. Nang len buoc toi
+            # thieu san (0.001 BTC) khi ky quy toi thieu vua trong 35% von;
+            # chi veto cung khi von qua nho khong nuoi noi ca lenh toi thieu.
+            if order.metadata.get("probation"):
+                floored = math.floor((quantity + 1e-12) / min_step) * min_step
+                if floored <= 0 < quantity:
+                    try:
+                        from risk.small_account import probation_floor_quantity
+                        floored, is_floor, floor_veto = probation_floor_quantity(
+                            quantity, float(order.entry_price), int(proposal.leverage),
+                            float(remaining_margin), float(self.current_balance), float(min_step))
+                        if floor_veto:
+                            return StageOutcome.veto(floor_veto)
+                        if is_floor:
+                            order.metadata["min_size_floor"] = True
+                        quantity = floored
+                    except Exception:
+                        pass
             quantity = math.floor((quantity + 1e-12) / min_step) * min_step
             if quantity <= 0:
                 return StageOutcome.veto(f"final risk clamp below {order.symbol} minimum step")

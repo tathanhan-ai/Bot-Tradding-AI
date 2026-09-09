@@ -946,7 +946,12 @@ class AIOrderResearcher:
                 alt.direction = _dir
                 alt.entry_price = round(best_bid if _dir == 1 else best_ask, 1)
                 alt.leverage = min(4, max(1, int(getattr(alt, "leverage", 3) or 3)))
-                alt.margin = round(min(600.0, max(300.0, current_balance * 0.10)), 0)
+                try:
+                    from risk.small_account import counter_margin
+                    alt.margin = counter_margin(current_balance, float(alt.entry_price or current_price),
+                                                int(alt.leverage), 300.0, 0.10, 600.0)
+                except Exception:
+                    alt.margin = round(min(600.0, max(300.0, current_balance * 0.10)), 0)
                 alt.quantity = round(alt.margin * alt.leverage / max(1.0, alt.entry_price), 4)
                 alt.metadata["requested_margin"] = alt.margin
                 alt.metadata["requested_quantity"] = alt.quantity
@@ -975,7 +980,12 @@ class AIOrderResearcher:
                 alt.direction = orig_dir
                 alt.entry_price = round(best_bid if orig_dir == 1 else best_ask, 1)
                 alt.leverage = min(4, max(1, int(getattr(alt, "leverage", 3) or 3)))
-                alt.margin = round(min(600.0, max(300.0, current_balance * 0.10)), 0)
+                try:
+                    from risk.small_account import counter_margin
+                    alt.margin = counter_margin(current_balance, float(alt.entry_price or current_price),
+                                                int(alt.leverage), 300.0, 0.10, 600.0)
+                except Exception:
+                    alt.margin = round(min(600.0, max(300.0, current_balance * 0.10)), 0)
                 alt.quantity = round(alt.margin * alt.leverage / max(1.0, alt.entry_price), 4)
                 alt.metadata["requested_margin"] = alt.margin
                 alt.metadata["requested_quantity"] = alt.quantity
@@ -1027,7 +1037,12 @@ class AIOrderResearcher:
                 return None
 
             alt.leverage = min(4, max(1, alt.leverage))
-            alt.margin = round(min(750.0, max(350.0, current_balance * 0.12)), 0)
+            try:
+                from risk.small_account import counter_margin
+                alt.margin = counter_margin(current_balance, float(alt.entry_price or current_price),
+                                            int(alt.leverage), 350.0, 0.12, 750.0)
+            except Exception:
+                alt.margin = round(min(750.0, max(350.0, current_balance * 0.12)), 0)
             alt.quantity = round(alt.margin * alt.leverage / max(1.0, alt.entry_price), 4)
             alt.metadata["requested_margin"] = alt.margin
             alt.metadata["requested_quantity"] = alt.quantity
@@ -1041,7 +1056,12 @@ class AIOrderResearcher:
         elif is_sizing_critique:
             alt.order_type = "SCALE_RATIO"
             alt.leverage = 3
-            alt.margin = round(min(500.0, max(250.0, current_balance * 0.08)), 0)
+            try:
+                from risk.small_account import counter_margin
+                alt.margin = counter_margin(current_balance, float(alt.entry_price or current_price),
+                                            3, 250.0, 0.08, 500.0)
+            except Exception:
+                alt.margin = round(min(500.0, max(250.0, current_balance * 0.08)), 0)
             alt.quantity = round(alt.margin * alt.leverage / max(1.0, alt.entry_price), 4)
             alt.metadata["requested_margin"] = alt.margin
             alt.metadata["requested_quantity"] = alt.quantity
@@ -1061,7 +1081,12 @@ class AIOrderResearcher:
         elif alt.direction == -1:
             alt.stop_loss = max(alt.stop_loss, round(alt.entry_price + min_sl_dist, 1))
         alt.leverage = min(4, alt.leverage)
-        alt.margin = round(min(600.0, max(300.0, current_balance * 0.10)), 0)
+        try:
+            from risk.small_account import counter_margin
+            alt.margin = counter_margin(current_balance, float(alt.entry_price or current_price),
+                                        int(alt.leverage), 300.0, 0.10, 600.0)
+        except Exception:
+            alt.margin = round(min(600.0, max(300.0, current_balance * 0.10)), 0)
         alt.quantity = round(alt.margin * alt.leverage / max(1.0, alt.entry_price), 4)
         alt.metadata["requested_margin"] = alt.margin
         alt.metadata["requested_quantity"] = alt.quantity

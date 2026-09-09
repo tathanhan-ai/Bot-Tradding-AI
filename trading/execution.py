@@ -380,18 +380,36 @@ class ExecutionLifecycle:
         available = max(0, notional_cap - open_notional - reserved_notional)
         capped_quantity = min(values["quantity"], available / max(order.price, s.live_price))
         metadata = (order.candidate_payload or {}).get("metadata", {})
+        # Von nho: tang nghien cuu da nang probation len buoc toi thieu san
+        # (co min_size_floor). Tang gui khong duoc cat nho hon buoc do nua —
+        # neu khong lenh nao cung chet o normalize "quantity below minQty".
+        min_floor = bool(metadata.get("min_size_floor"))
+        floor_step = 0.0
+        try:
+            floor_step = float((values or {}).get("step_size", 0.0) or 0.0)
+        except Exception:
+            floor_step = 0.0
         risk_pct = .0025 if metadata.get("probation") else (cro.risk_per_trade_pct / 100 if cro else .015)
         fee_fn = getattr(s.fee_engine, "unit_risk_with_fees", None)
         if callable(fee_fn):
             unit_risk = fee_fn(order.price, abs(order.price - order.stop_loss))
         else:
             unit_risk = abs(order.price - order.stop_loss) + order.price * 2.0 * 0.0005
-        capped_quantity = min(capped_quantity, wallet * risk_pct / unit_risk)
+        risk_cap_qty = wallet * risk_pct / unit_risk if unit_risk > 0 else 0.0
+        if min_floor and floor_step > 0 and risk_cap_qty < float(values.get("quantity", 0.0) or 0.0):
+            # Giu nguyen lenh toi thieu san: ky quy nang san (~$16 o BTC $79k,
+            # lev 5x) chi chiem ~16% vi $99, van trong han muc 35%.
+            capped_quantity = min(capped_quantity, float(values["quantity"]))
+        else:
+            capped_quantity = min(capped_quantity, risk_cap_qty)
         if capped_quantity < values["quantity"]:
             ok, values = s.binance_api.normalize_order_values(order.symbol, capped_quantity, values.get("price"), order_type=kind, reference_price=s.live_price)
             if not ok:
                 order.status = "REJECTED"
-                self.trace(order.parent_intent_id, "Execution / Exposure", "VETO", "No exchange-valid quantity inside aggregate notional cap")
+                detail = values.get("msg", values) if isinstance(values, dict) else values
+                self.trace(order.parent_intent_id, "Execution / Exposure", "VETO",
+                           f"Tang gui cat size con {capped_quantity:.4f} nhung san tu choi: {detail}. "
+                           f"(von ${wallet:,.2f}, risk_pct {risk_pct*100:.2f}%, unit_risk ${unit_risk:,.1f})")
                 self.persist()
                 return
         order.units = values["quantity"]
