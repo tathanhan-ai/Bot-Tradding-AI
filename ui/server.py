@@ -1309,6 +1309,16 @@ class LiveTradingState:
 
         def alpha_regime_gate(order: CandidateOrder, _snapshot: MarketSnapshot) -> StageOutcome:
             matrix = self.octobot_consensus
+            # Tinh song 1D/15m SOM o day (cong Wave chay sau): neu khong,
+            # weak-combo probation mai mai khong thay wave_alignment vi
+            # metadata chi duoc gan o cong Wave phia sau.
+            if "wave_alignment" not in order.metadata:
+                try:
+                    from strategy.wave_alignment import compute_wave_alignment as _wave_align
+                    order.metadata["wave_alignment"] = _wave_align(
+                        getattr(_snapshot, "frames", {}) or {})
+                except Exception:
+                    pass
             if order.order_type == "GRID" and order.source in ("manual-grid", "auto-grid", "auto"):
                 verdict = self.ai_verdict
                 atr = float(self.indicators.get("atr") or _snapshot.price * .008)

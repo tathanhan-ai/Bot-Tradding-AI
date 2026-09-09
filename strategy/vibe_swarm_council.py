@@ -340,6 +340,7 @@ class VibeSwarmCouncil:
                 "tactical_formation": tactical_formation,
                 "user_instruction": instr_txt,
                 "wave_alignment": wave_ctx,
+                "wave_guidance": (wave_note + "Quant: probation/Maker von nho duoc MIEN quy tac cung chieu song; chi REJECT khi Alpha cuc am hoac OctoBot nguoc manh.").strip(),
             },
             "risk": {
                 "order": order,
@@ -358,6 +359,7 @@ class VibeSwarmCouncil:
                 "fee_tier": fee_tier,
                 "user_instruction": instr_txt,
                 "wave_alignment": wave_ctx,
+                "wave_guidance": (wave_note + "Execution: lenh probation/Maker von nho duoc MIEN quy tac cung chieu; chi REJECT khi microstructure nguy hiem.").strip(),
             },
         }
 
