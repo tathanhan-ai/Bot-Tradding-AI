@@ -4664,7 +4664,7 @@
                 <td class="p-2 ${isBuy ? 'text-emerald-400' : 'text-rose-400'} font-bold">${isBuy ? 'LONG' : 'SHORT'}</td>
                 <td class="p-2 font-bold text-white mono">$${o.price.toLocaleString('en-US', {minimumFractionDigits: 1})}</td>
                 <td class="p-2 text-gray-300 mono">${Number(o.units).toFixed(3)}</td>
-                <td class="p-2 text-gray-300 mono">$${Number(o.margin).toFixed(2)} (${o.leverage}x)</td>
+                <td class="p-2 text-gray-300 mono" title="Gia tri vi the (notional): $${(Number(o.units) * Number(o.price)).toFixed(2)} = ${Number(o.units).toFixed(3)} x $${Number(o.price).toLocaleString('en-US', {minimumFractionDigits: 1})} | Ky quy (margin) = notional / ${o.leverage}x">$${Number(o.margin).toFixed(2)} (${o.leverage}x)</td>
                 <td class="p-2 mono ${distColor}">${isCanceled ? '--' : `${dist > 0 ? '+' : ''}${dist}%`}</td>
                 <td class="p-2 text-left max-w-[220px]"><span class="text-[10px] text-gray-300 font-sans break-words block" title="${(o.entry_reason || o.note || 'Lệnh đã qua đủ cổng kiểm duyệt').replace(/"/g, '&quot;')}">📝 ${(o.entry_reason || o.note || 'Lệnh đã qua đủ cổng kiểm duyệt')}</span>${isCanceled && o.cancel_reason ? `<span class="text-[10px] text-rose-300 font-sans break-words block" title="${String(o.cancel_reason).replace(/"/g, '&quot;')}">🧹 ${o.cancel_reason}</span>` : ''}</td>
                 <td class="p-2 text-gray-300 mono">${o.created_at}</td>
