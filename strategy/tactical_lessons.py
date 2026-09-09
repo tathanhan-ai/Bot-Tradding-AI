@@ -21,6 +21,7 @@ class TacticalLessonVerdict:
     direction_bias: int          # 1 = chi LONG, -1 = chi SHORT, 0 = cam ca 2 huong
     penalty: float               # 0.0 - 1.0 (giam size theo muc do vi pham)
     rationale: str
+    suggested_type: str = ""     # P2: loai lenh de xuat ha cap (VD POST_ONLY) thay vi veto han
 
 
 class HurstRegimeFilter:
@@ -33,11 +34,14 @@ class HurstRegimeFilter:
     def evaluate(self, hurst: float, proposed_type: str = "") -> TacticalLessonVerdict:
         hurst = float(hurst or 0.50)
         if hurst < self.mr_threshold:
-            # Mean-reverting manh: cam MARKET/TRAILING (duoi trend), chi cho Maker/DCA/Grid
+            # Mean-reverting manh: HA CAP MARKET/TRAILING/TWAP ve POST_ONLY Maker
+            # thay vi veto han (P2) — giu bai hoc cam duoi trend Taker nhung mo
+            # duong lenh Maker gia re co probation 0.10% o tang caller.
             if proposed_type in ("MARKET", "TRAILING_STOP", "TWAP"):
                 return TacticalLessonVerdict(
-                    lesson="HURST_FILTER", allowed=False, direction_bias=0, penalty=1.0,
-                    rationale=f"🛡️ [HURST={hurst:.2f} MEAN-REVERTING] Cam lenh duoi trend {proposed_type}; chi cho Maker/DCA/Grid bat dao chieu.")
+                    lesson="HURST_FILTER", allowed=True, direction_bias=0, penalty=0.5,
+                    rationale=f"[HURST={hurst:.2f} MEAN-REVERTING] Ha cap {proposed_type} ve POST_ONLY Maker probation (cam duoi trend Taker, mo cua Maker gia re).",
+                    suggested_type="POST_ONLY")
             return TacticalLessonVerdict(
                 lesson="HURST_FILTER", allowed=True, direction_bias=0, penalty=0.0,
                 rationale=f"Hurst {hurst:.2f} mean-reverting: uu tien mean-reversion, size giam 30%.")
@@ -126,10 +130,12 @@ class TacticalLessonsEngine:
         ]
         blocked = [v for v in verdicts if not v.allowed]
         penalty = max([v.penalty for v in verdicts] or [0.0])
+        suggested = next((v.suggested_type for v in verdicts if getattr(v, "suggested_type", "")), "")
         return {
             "allowed": len(blocked) == 0,
             "penalty": penalty,
             "blocked_lessons": [v.lesson for v in blocked],
             "rationale": " | ".join(v.rationale for v in verdicts),
             "verdicts": verdicts,
+            "suggested_type": suggested,
         }

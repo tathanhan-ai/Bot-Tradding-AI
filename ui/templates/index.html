@@ -1044,6 +1044,7 @@
           </div>
 
           <div id="pipeline-summary" class="text-xs text-amber-300">Chưa có quyết định được kiểm chứng.</div>
+          <div id="pipeline-veto-ledger" class="mono text-[10px] text-gray-400">So veto theo cong: --</div>
 
           <div class="bg-[#121722] p-2.5 rounded-lg border border-cyan-900/70 space-y-2">
             <div class="flex items-center justify-between text-xs">
@@ -4708,7 +4709,24 @@
         const sizing = document.getElementById('pipeline-sizing');
         if (sizing && candidate) {
           const raw = candidate.metadata?.raw_carver_contracts;
-          sizing.innerText = `Carver raw ${raw ?? '--'} • final ${candidate.quantity ?? 0} BTC • margin $${candidate.margin ?? 0} • ${candidate.leverage ?? 0}x • exchange ${candidate.metadata?.exchange_order_id || '--'}`;
+          const wv = candidate.metadata?.wave_alignment || {};
+          const arr = v => v === 1 ? 'TANG' : (v === -1 ? 'GIAM' : '?');
+          const waveTxt = (wv.wave_1d || wv.wave_15m) ? ` • song 1D ${arr(wv.wave_1d)}/15m ${arr(wv.wave_15m)}${candidate.metadata?.wave_misaligned ? ' (lech song-probation)' : ' (dong thuan)'}` : '';
+          const streak = pipe.veto_streak || {};
+          const streakKeys = Object.keys(streak);
+          const streakTxt = streakKeys.length ? ` • veto lien tiep: ` + streakKeys.slice(0,3).map(k => `${k} x${streak[k].count||0}`).join(', ') : '';
+          sizing.innerText = `Carver raw ${raw ?? '--'} • final ${candidate.quantity ?? 0} BTC • margin $${candidate.margin ?? 0} • ${candidate.leverage ?? 0}x • exchange ${candidate.metadata?.exchange_order_id || '--'}` + waveTxt + streakTxt;
+          sizing.title = 'Dong thuan = cung chieu song 1D/15m; lech song = chi tham do probation von nho 0.10%';
+        }
+        const ledgerBox = document.getElementById('pipeline-veto-ledger');
+        if (ledgerBox) {
+          const ledger = pipe.veto_ledger || {};
+          const keys = Object.keys(ledger);
+          if (!keys.length) { ledgerBox.innerText = 'So veto theo cong: -- (chua co veto 24h)'; }
+          else {
+            keys.sort((a,b) => (ledger[b].count_24h||0) - (ledger[a].count_24h||0));
+            ledgerBox.innerText = 'So veto theo cong (24h): ' + keys.slice(0,5).map(k => `${k} x${ledger[k].count_24h||0} (${(ledger[k].last_reason_vi||'').slice(0,80)})`).join(' | ');
+          }
         }
         const traceBox = document.getElementById('pipeline-trace');
         const traceKey = JSON.stringify([pipe.last_trace, pipe.execution_intents]);

@@ -852,6 +852,26 @@ class AIOrderResearcher:
         alt.order_id = f"rev-{alt.order_id[-18:]}"
         alt.metadata["is_counter_proposal"] = True
         alt.metadata["renegotiation_basis"] = f"{veto_stage}: {veto_reason}"
+        # P5: Phuong an 2 ghi ro song + Hurst de cong wave tai danh gia lai
+        # khong veto oan. Ke thua probation/hurst_downgraded tu Phuong an 1
+        # (neu co) va ep probation khi Hurst thap + Maker directional.
+        try:
+            orig_meta = getattr(original_candidate, "metadata", {}) or {}
+            wave = dict(orig_meta.get("wave_alignment", {}) or {})
+            if wave:
+                alt.metadata["wave_alignment"] = wave
+            hurst_val = float((indicators or {}).get("hurst", 0.50) or 0.50)
+            alt.metadata["hurst_at_veto"] = round(hurst_val, 3)
+            for flag in ("probation", "hurst_downgraded", "octo_weak_conflict",
+                         "alpha_weak_conflict", "wave_misaligned"):
+                if orig_meta.get(flag) and flag not in alt.metadata:
+                    alt.metadata[flag] = orig_meta.get(flag)
+            if (hurst_val < 0.45 and alt.order_type in ("POST_ONLY", "LIMIT", "SCALE_RATIO")
+                    and int(getattr(alt, "direction", 0) or 0) in (-1, 1)):
+                alt.metadata["probation"] = True
+                alt.metadata["risk_cap_pct"] = 0.0010
+        except Exception:
+            pass
 
         reason_lower = (veto_reason or "").lower()
         council_objections = getattr(council_verdict, "rejection_categories", {}) if council_verdict else {}
@@ -913,6 +933,32 @@ class AIOrderResearcher:
         )
 
         if is_macro_critique:
+            # P5: Hurst thap + ranging -> mac dinh Phuong an 2 la POST_ONLY Maker
+            # probation (khong xoay sang GRID de tranh flip-flop loai lenh nhu log
+            # live). Chi doi sang GRID khi ranging + gan VWAP co tin hieu moi that su.
+            try:
+                _hurst = float((indicators or {}).get("hurst", 0.50) or 0.50)
+            except Exception:
+                _hurst = 0.50
+            if _hurst < 0.45 and int(getattr(original_candidate, "direction", 0) or 0) in (-1, 1):
+                _dir = int(getattr(original_candidate, "direction", 0) or 0)
+                alt.order_type = "POST_ONLY"
+                alt.direction = _dir
+                alt.entry_price = round(best_bid if _dir == 1 else best_ask, 1)
+                alt.leverage = min(4, max(1, int(getattr(alt, "leverage", 3) or 3)))
+                alt.margin = round(min(600.0, max(300.0, current_balance * 0.10)), 0)
+                alt.quantity = round(alt.margin * alt.leverage / max(1.0, alt.entry_price), 4)
+                alt.metadata["requested_margin"] = alt.margin
+                alt.metadata["requested_quantity"] = alt.quantity
+                alt.metadata["probation"] = True
+                alt.metadata["risk_cap_pct"] = 0.0010
+                alt.metadata.update({
+                    "tactical_formation": "DEFENSIVE_SNIPER",
+                    "fee_tier": "MAKER (0.02%)",
+                    "suggested_type": "POST_ONLY",
+                    "negotiation_solution": f"Hurst {_hurst:.2f} thap: Phuong an 2 POST_ONLY Maker probation 0.10% (khong xoay GRID)"
+                })
+                return alt
             # Chi doi sang GRID khi co tin hieu moi thuc su (sweep moi / VPIN doc / CVD dao chieu),
             # khong doi chi vi phan loai macro_critique (tranh xoay loai lenh nhu log live).
             orig_type = getattr(original_candidate, "order_type", "POST_ONLY")

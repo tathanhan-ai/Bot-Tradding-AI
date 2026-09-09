@@ -165,6 +165,8 @@ class VibeSwarmCouncil:
         contexts = self._role_contexts(
             current_price, indicators, ai_verdict, ensemble_result, order_research,
             alpha_zoo_metrics, visual_hft_metrics, jesse_metrics, octobot_metrics,
+            user_instruction=user_instruction,
+            wave_alignment=(getattr(candidate, "metadata", {}) or {}).get("wave_alignment", {}),
         )
         if candidate:
             proposal = {key: getattr(candidate, key) for key in ("order_id", "symbol", "direction", "order_type", "entry_price", "stop_loss", "take_profit", "leverage", "quantity")}
@@ -278,6 +280,8 @@ class VibeSwarmCouncil:
         visual_hft_metrics: Any,
         jesse_metrics: Any,
         octobot_metrics: Any,
+        user_instruction: str = "",
+        wave_alignment: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         tactical_formation = getattr(order_research, "tactical_formation", "DEFENSIVE_SNIPER") if order_research else "DEFENSIVE_SNIPER"
         staged_exits = getattr(order_research, "staged_exits", []) if order_research else []
@@ -300,6 +304,20 @@ class VibeSwarmCouncil:
         }
         def serialise(value: Any) -> Dict[str, Any]:
             return asdict(value) if value and hasattr(value, "__dataclass_fields__") else {}
+        # P4: Council phai thay chi thi song + user_instruction (truoc day
+        # evaluate_council nhan user_instruction nhung KHONG dung).
+        wave_ctx = dict(wave_alignment or {})
+        instr_txt = str(user_instruction or "")[:500]
+        wave_note = ""
+        try:
+            w1 = int(wave_ctx.get("wave_1d", 0) or 0)
+            w15 = int(wave_ctx.get("wave_15m", 0) or 0)
+            arrow = lambda v: "TANG" if v == 1 else ("GIAM" if v == -1 else "CHUA RO")
+            wave_note = f"Song 1D {arrow(w1)} / 15m {arrow(w15)}. "
+            if w1 != 0 and w15 != 0 and w15 != w1:
+                wave_note += "CANH BAO lech song: chi APPROVE lenh Maker/probation von nho. "
+        except Exception:
+            wave_note = ""
         return {
             "macro": {
                 "price": current_price,
@@ -309,6 +327,9 @@ class VibeSwarmCouncil:
                 "octobot": {"state": getattr(octobot_metrics, "consensus_state", "UNKNOWN"), "direction": getattr(octobot_metrics, "recommended_direction", 0)},
                 "tactical_formation": tactical_formation,
                 "proposed_side": order["side"],
+                "user_instruction": instr_txt,
+                "wave_alignment": wave_ctx,
+                "wave_guidance": (wave_note + "Khi lech song, thesis phai nhac toi song 1D/15m va chi APPROVE Maker/probation.").strip(),
             },
             "quant": {
                 "price": current_price,
@@ -317,6 +338,8 @@ class VibeSwarmCouncil:
                 "order_flow": {"vpin": getattr(visual_hft_metrics, "vpin", None), "lob_imbalance_20": getattr(visual_hft_metrics, "lob_imbalance_20", None)},
                 "proposed_side": order["side"],
                 "tactical_formation": tactical_formation,
+                "user_instruction": instr_txt,
+                "wave_alignment": wave_ctx,
             },
             "risk": {
                 "order": order,
@@ -324,12 +347,17 @@ class VibeSwarmCouncil:
                 "risk_status": {"consecutive_losses": getattr(jesse_metrics, "current_consecutive_losses", 0), "expectancy": getattr(jesse_metrics, "expectancy_usdt", 0.0)},
                 "tactical_formation": tactical_formation,
                 "sleeve_allocation": sleeve_allocation,
+                "user_instruction": instr_txt,
+                "wave_alignment": wave_ctx,
+                "wave_guidance": (wave_note + "Risk: lech song thi bat buoc probation von nho.").strip(),
             },
             "execution": {
                 "order": order,
                 "microstructure": {"vpin": getattr(visual_hft_metrics, "vpin", None), "resilience": getattr(visual_hft_metrics, "market_resilience_pct", None), "lob_imbalance_20": getattr(visual_hft_metrics, "lob_imbalance_20", None)},
                 "carver": getattr(order_research, "carver_output", {}),
                 "fee_tier": fee_tier,
+                "user_instruction": instr_txt,
+                "wave_alignment": wave_ctx,
             },
         }
 

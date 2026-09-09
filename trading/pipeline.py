@@ -330,7 +330,7 @@ def candle_end(open_time, timeframe):
 
 def resample_closed_candles(frame: pd.DataFrame, timeframe: str, now: float) -> pd.DataFrame:
     """Aggregate contiguous closed 1m OHLCV; incomplete buckets never enter alpha."""
-    rule = {"1M": "MS", "1w": "W-MON"}.get(timeframe, timeframe.replace("m", "min"))
+    rule = {"1M": "MS", "1w": "W-MON", "1d": "1D"}.get(timeframe, timeframe.replace("m", "min"))
     grouped = frame.resample(rule, label="left", closed="left")
     result = grouped.agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum", "quote_volume": "sum"})
     counts = grouped["close"].count()

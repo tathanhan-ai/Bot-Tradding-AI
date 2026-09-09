@@ -343,6 +343,9 @@ class LiveTradingState:
         # Nen dispatcher khi cung loai lenh bi veto lien tiep (VD 3x SCALE_RATIO bi memory veto):
         # key = (order_type, direction) -> {count, last_veto_ts}
         self.veto_streak: Dict[str, Dict[str, float]] = {}
+        # So theo doi veto theo tung cong (P0 quan sat, khong doi logic):
+        # stage -> {count_24h, last_reason_vi, last_cycle_key, last_ts}
+        self.veto_ledger: Dict[str, Dict[str, Any]] = {}
         self._load_mode_ledger(symbol=symbol, balance=balance)
 
     def _load_mode_ledger(self, symbol: str = "BTCUSDT", balance: float = 5000.0) -> None:
@@ -1395,17 +1398,61 @@ class LiveTradingState:
                 return StageOutcome.veto(reason)
 
             # Strict veto only if there is an active strong opposing trend
+            # P3: bias OctoBot YEU (not tradable / |score|<0.15 / RANGE-DIP) +
+            # lenh Maker -> ha cap probation 0.10% thay vi veto han.
+            # VETO cung chi khi tradable+|score|>=0.25 hoac STRONG nguoc huong.
+            weak_bias = False
+            try:
+                weak_bias = bool(
+                    (matrix is not None and not matrix.is_tradable)
+                    or abs(float(getattr(matrix, "matrix_score", 0.0) or 0.0)) < 0.15
+                    or (self.octobot_setup is not None
+                        and getattr(self.octobot_setup, "mode_name", "") in ("RANGE_TRADING", "DIP_ANALYSER"))
+                )
+            except Exception:
+                weak_bias = False
+            is_maker_kind = order_kind in ("POST_ONLY", "LIMIT", "SCALE_RATIO")
+            strong_opposite = bool(
+                matrix and matrix.consensus_state in ("STRONG_BULLISH", "STRONG_BEARISH")
+                and matrix.recommended_direction == -order.direction)
             if matrix and matrix.is_tradable and matrix.recommended_direction and matrix.recommended_direction != order.direction:
+                if weak_bias and is_maker_kind and not strong_opposite:
+                    order.metadata["octo_weak_conflict"] = True
+                    order.metadata["probation"] = True
+                    order.metadata["risk_cap_pct"] = 0.0010
+                    return StageOutcome.pass_(
+                        "OctoBot bias yeu nguoc huong nhe: ha cap Maker probation 0.10% thay vi veto",
+                        probation=True, risk_cap_pct=0.0010)
                 return StageOutcome.veto("OctoBot direction conflicts with candidate")
 
             setup = self.octobot_setup
-            if setup and setup.mode_name not in ("RANGE_TRADING", "DIP_ANALYSER") and setup.direction != order.direction:
+            setup_conflict = bool(setup and setup.mode_name not in ("RANGE_TRADING", "DIP_ANALYSER") and setup.direction != order.direction)
+            if setup_conflict:
+                setup_weak = bool(
+                    weak_bias or getattr(setup, "mode_name", "") in ("RANGE_TRADING", "DIP_ANALYSER"))
+                if setup_weak and is_maker_kind and not strong_opposite:
+                    order.metadata["octo_weak_conflict"] = True
+                    order.metadata["probation"] = True
+                    order.metadata["risk_cap_pct"] = 0.0010
+                    return StageOutcome.pass_(
+                        "OctoBot setup lech nhe (RANGE/DIP): ha cap Maker probation 0.10% thay vi veto",
+                        probation=True, risk_cap_pct=0.0010)
                 return StageOutcome.veto("OctoBot trade setup conflicts with candidate")
 
             # Allow mean-reversion accumulation at structural bounds unless there is an extreme directional cascade.
             # CONDITIONAL/TWAP khop nhu Taker nen dung nguong chat -18 nhu MARKET/TRAILING (khong duoc huong -32 cua Maker).
+            # P3b: Alpha nguoc nhe (-32..-20) + Maker -> probation thay vi veto;
+            # Alpha am manh (<=-32 Maker / <=-18 Taker) van veto cung.
             alpha_thresh = -32.0 if order_kind in ("POST_ONLY", "LIMIT", "SCALE_RATIO") or (order_kind not in ("MARKET", "TRAILING_STOP", "CONDITIONAL", "TWAP") and getattr(self.ai_verdict, "regime", "") in ("RANGING_SIDEWAY", "SIDEWAY_GRID", "CHOPPY")) else -18.0
-            if alpha.composite_alpha_score * order.direction <= alpha_thresh:
+            alpha_conflict = float(alpha.composite_alpha_score * order.direction)
+            if alpha_conflict <= alpha_thresh:
+                if is_maker_kind and alpha_conflict > -45.0 and not strong_opposite:
+                    order.metadata["alpha_weak_conflict"] = True
+                    order.metadata["probation"] = True
+                    order.metadata["risk_cap_pct"] = 0.0010
+                    return StageOutcome.pass_(
+                        f"Alpha Zoo nguoc nhe ({alpha.composite_alpha_score:+.1f}): ha cap Maker probation 0.10% thay vi veto",
+                        probation=True, risk_cap_pct=0.0010)
                 return StageOutcome.veto(f"Alpha Zoo conflicts ({alpha.composite_alpha_score:+.1f})")
 
             # Alpha gate goi lai sau khi huong da ro; sizing Stage 4 se kiem hurdle 4x roundtrip ky hon
@@ -1464,6 +1511,7 @@ class LiveTradingState:
                 order_research=research, alpha_zoo_metrics=self.vibe_alpha_zoo.get_latest_metrics(),
                 visual_hft_metrics=_snapshot.context["hft"], jesse_metrics=self.jesse_engine.compute_metrics(),
                 octobot_metrics=self.octobot_consensus, current_position=self.current_position,
+                user_instruction=getattr(self.ai_copilot, "user_instruction", "") or "",
                 candidate=order, snapshot=_snapshot,
             )
             if not verdict.available and getattr(self.vibe_swarm, "enabled", True):
@@ -1477,6 +1525,7 @@ class LiveTradingState:
                     order_research=research, alpha_zoo_metrics=self.vibe_alpha_zoo.get_latest_metrics(),
                     visual_hft_metrics=_snapshot.context["hft"], jesse_metrics=self.jesse_engine.compute_metrics(),
                     octobot_metrics=self.octobot_consensus, current_position=self.current_position,
+                    user_instruction=getattr(self.ai_copilot, "user_instruction", "") or "",
                     candidate=order, snapshot=_snapshot,
                 )
             details = {"council_votes": [asdict(vote) for vote in verdict.votes], "order_id": order.order_id, "snapshot_id": _snapshot.snapshot_id}
@@ -1767,6 +1816,30 @@ class LiveTradingState:
                 "snapshot_id": _snapshot.snapshot_id, "captured_at": _snapshot.captured_at,
             })
 
+        def wave_alignment_gate(order: CandidateOrder, _snapshot: MarketSnapshot) -> StageOutcome:
+            # P1: deterministic hoa chi thi song 1D/15m (strategy/wave_alignment.py).
+            # Chi thi Copilot dang chu truoc day chi do LLM tu dien giai — nay thanh
+            # quy tac cung: nguoc han song 1D -> VETO; 15m lech song -> probation
+            # 0.10%. Mien GRID/reduce_only nhu cong bai hoc.
+            try:
+                from strategy.wave_alignment import (
+                    compute_wave_alignment, evaluate_wave_gate, parse_wave_instruction,
+                )
+                instr = parse_wave_instruction(getattr(self.ai_copilot, "user_instruction", "") or "")
+                align = compute_wave_alignment(getattr(_snapshot, "frames", {}) or {})
+                res = evaluate_wave_gate(order.direction, instr, align,
+                                         order.order_type, order.source, order.metadata)
+                for key, value in (res.get("updates") or {}).items():
+                    order.metadata[key] = value
+                if res.get("verdict") == "VETO":
+                    return StageOutcome.veto(str(res.get("reason", "Chi thi song: cam nguoc song 1D")))
+                if res.get("updates", {}).get("probation"):
+                    return StageOutcome.pass_(str(res.get("reason", "Chi thi song: probation")),
+                                              probation=True, risk_cap_pct=0.0010)
+                return StageOutcome.pass_(str(res.get("reason", "Chi thi song: qua") or "Chi thi song: qua")[:200])
+            except Exception as exc:
+                return StageOutcome.pass_("Wave gate bo qua (loi ky thuat): %s" % type(exc).__name__)
+
         def tactical_lessons_gate(order: CandidateOrder, _snapshot: MarketSnapshot) -> StageOutcome:
             # 3 bai hoc duc ket tu 60 lenh that (strategy/tactical_lessons.py):
             # HURST_FILTER (cam duoi trend khi mean-reverting), SMC_ALIGN (cam nguoc cau truc),
@@ -1789,6 +1862,27 @@ class LiveTradingState:
                     notional = abs(order.entry_price) * 0.01
                 res = engine.evaluate(hurst, smc_struct, order.direction, order.order_type,
                                       exp_reward, notional, smc_bias, has_sweep)
+                # P2: Hurst thap + lenh Taker -> ha cap ve POST_ONLY Maker probation
+                # thay vi veto han. CHI ap dung khi SMC/FEE khong chan (giu bai hoc
+                # xuong mau: SMC nguoc cau truc va FEE van veto cung).
+                # Luu y: Hurst filter moi tra allowed=True + suggested POST_ONLY nen
+                # blocked chi phan anh SMC/FEE — ha cap khi blocked rong.
+                suggested = str(res.get("suggested_type", "") or "").upper()
+                blocked = list(res.get("blocked_lessons", []) or [])
+                if (suggested == "POST_ONLY" and not blocked
+                        and order.order_type in ("MARKET", "TRAILING_STOP", "TWAP")):
+                    try:
+                        px = _snapshot.bids[0][0] if order.direction == 1 else _snapshot.asks[0][0]
+                    except Exception:
+                        px = order.entry_price
+                    order.order_type = "POST_ONLY"
+                    order.entry_price = float(px or order.entry_price)
+                    order.metadata["hurst_downgraded"] = True
+                    order.metadata["probation"] = True
+                    order.metadata["risk_cap_pct"] = 0.0010
+                    return StageOutcome.pass_(
+                        "Song Hurst thap: ha cap %s ve POST_ONLY Maker probation 0.10%% (cam duoi trend Taker)" % res["rationale"][:160],
+                        probation=True, risk_cap_pct=0.0010)
                 if not res["allowed"]:
                     return StageOutcome.veto("Tac chien bai hoc: " + res["rationale"])
                 if res["penalty"] >= 0.5:
@@ -1801,6 +1895,7 @@ class LiveTradingState:
         decision = SevenStagePipeline(
             defense_gates=[("Freqtrade", freqtrade_gate), ("VisualHFT", visual_hft_gate), ("Jesse", jesse_gate)],
             stage2_gates=[("Deterministic Guard", deterministic_gate), ("OctoBot + Alpha Zoo", alpha_regime_gate),
+                          ("Wave Alignment", wave_alignment_gate),
                           ("Tactical Lessons", tactical_lessons_gate)],
             council=council_gate,
             sizing=sizing_gate,
@@ -1852,7 +1947,55 @@ class LiveTradingState:
             return self.evaluate_candidate_pipeline(decision.candidate, research, trace=decision.trace)
         self.last_decision_trace = decision.trace
         self.last_candidate = decision.candidate
+        try:
+            self._record_veto_ledger(decision.trace, candidate)
+        except Exception:
+            pass
         return decision
+
+    def _record_veto_ledger(self, trace, candidate=None) -> None:
+        # P0 quan sat: dem veto theo tung cong, giu ly do tieng Viet chu ky moi
+        # nhat. Reset khi co PASS (lenh qua) de thay phan bo veto truoc/sau sua.
+        import time as _time
+        now = _time.time()
+        entries = list(getattr(trace, "entries", []) or [])
+        vetoes = [e for e in entries if getattr(e, "verdict", "") == "VETO"]
+        cycle_key = ""
+        try:
+            meta = getattr(candidate, "metadata", {}) or {}
+            cycle_key = f"{getattr(candidate, 'order_type', '')}:{getattr(candidate, 'direction', '')}"
+        except Exception:
+            cycle_key = ""
+        if not vetoes:
+            # Co PASS trong chu ky (hoac khong veto): reset dem de thay
+            # phan bo moi sau sua.
+            try:
+                if getattr(trace, "vetoed", False) is False:
+                    self.veto_ledger = {}
+            except Exception:
+                pass
+            return
+        ledger = getattr(self, "veto_ledger", None)
+        if not isinstance(ledger, dict):
+            ledger = {}
+            self.veto_ledger = ledger
+        for entry in vetoes:
+            stage = str(getattr(entry, "stage", "Unknown"))
+            reason = str(getattr(entry, "reason", "") or "")[:300]
+            prev = ledger.get(stage) or {}
+            # Dem trong 24h gan nhat: reset neu lan cuoi cach qua 24h.
+            count = int(prev.get("count_24h", 0) or 0)
+            if now - float(prev.get("last_ts", 0.0) or 0.0) > 24 * 3600:
+                count = 0
+            ledger[stage] = {"count_24h": count + 1, "last_reason_vi": reason,
+                             "last_cycle_key": cycle_key, "last_ts": now}
+        try:
+            top = sorted(ledger.items(), key=lambda kv: kv[1].get("count_24h", 0), reverse=True)[:3]
+            summary = " | ".join(f"{st} x{info.get('count_24h', 0)}" for st, info in top)
+            first_reason = str((vetoes[0].reason if hasattr(vetoes[0], "reason") else "") or "")[:160]
+            print(f"[VETO LEDGER] {summary} || Moi nhat: {vetoes[0].stage if hasattr(vetoes[0], 'stage') else '?'}: {first_reason}", flush=True)
+        except Exception:
+            pass
 
     def _apply_copilot_adjustment(self, candidate: CandidateOrder) -> bool:
         """Accept only a fresh, connected Copilot reduction, then force a full recheck."""
@@ -2189,6 +2332,7 @@ class LiveTradingState:
                         jesse_metrics=getattr(self.jesse_engine, "compute_metrics", lambda: {})() if hasattr(self, "jesse_engine") else {},
                         octobot_metrics=getattr(self, "octobot_consensus", None),
                         current_position=getattr(self, "current_position", None),
+                        user_instruction=getattr(self.ai_copilot, "user_instruction", "") or "",
                         candidate=cand,
                         snapshot=self.build_market_snapshot() if hasattr(self, "build_market_snapshot") else None,
                     )
@@ -2813,6 +2957,8 @@ class LiveTradingState:
                     "entries": [asdict(entry) for entry in self.last_decision_trace.entries],
                 } if self.last_decision_trace else None,
                 "candidate": asdict(self.last_candidate) if self.last_candidate else None,
+                "veto_ledger": deepcopy(getattr(self, "veto_ledger", {}) or {}),
+                "veto_streak": deepcopy(getattr(self, "veto_streak", {}) or {}),
             },
             "storage": self.storage.get_storage_telemetry(),
             "inventory_skew": {

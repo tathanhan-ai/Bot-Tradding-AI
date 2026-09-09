@@ -110,6 +110,27 @@ class ExecutionLifecycle:
                     parts.append(f"tin cậy {float(conf):.0f}%")
                 except Exception:
                     pass
+            # P6: ghi nhan trang thai song 1D/15m vao ly do (de nguoi dung thay
+            # lenh co thuan chi thi song khong ma khong phai mo trace).
+            try:
+                meta = getattr(candidate, "metadata", {}) or {}
+                wave = meta.get("wave_alignment", {}) or {}
+                w1 = int(wave.get("wave_1d", 0) or 0)
+                w15 = int(wave.get("wave_15m", 0) or 0)
+                if w1 or w15:
+                    arrow = lambda v: "tăng" if v == 1 else ("giảm" if v == -1 else "?")
+                    tag = f"sóng 1D {arrow(w1)}/15m {arrow(w15)}"
+                    tag += " lệch sóng-probation" if meta.get("wave_misaligned") else " đồng thuận"
+                    parts.append(tag)
+                for flag in ("hurst_downgraded", "octo_weak_conflict", "alpha_weak_conflict"):
+                    if meta.get(flag):
+                        label = {"hurst_downgraded": "Hurst hạ cấp Maker",
+                                 "octo_weak_conflict": "OctoBot yếu-probation",
+                                 "alpha_weak_conflict": "Alpha yếu-probation"}[flag]
+                        parts.append(label)
+                        break
+            except Exception:
+                pass
         except Exception:
             pass
         for entry in (trace_entries or [])[-6:]:
@@ -271,7 +292,8 @@ class ExecutionLifecycle:
                         for _, position in self.all_positions())
         reserved_risk = sum(max(0, o.units - o.exchange_executed_quantity) * abs(o.price - o.stop_loss) for o in pending if o.status in s.order_manager.OPEN_STATUSES)
         if open_risk + reserved_risk + order.units * abs(price - order.stop_loss) > s.current_balance * s.risk_config.max_account_risk_pct:
-            return "Aggregate risk exceeds account envelope"
+            # P6: gan prefix cong de truy vet diem nghen tang khop trong so veto.
+            return "[EntryGuard/Risk] Aggregate risk exceeds account envelope"
         if not is_grid and not getattr(order, "candidate_payload", {}).get("metadata", {}).get("reduce_only"):
             # Chốt phân bổ vốn ở tầng khớp cuối: số dư có thể đã trôi kể từ
             # lúc pipeline duyệt. Chỉ từ chối (không tự bóp lệnh ở đây) để
@@ -298,9 +320,9 @@ class ExecutionLifecycle:
                         reserve_ratio_override=(gov.reserve_ratio_recommended if (gov is not None and getattr(gov, "enabled", False)) else None),
                     )
                     if not alloc.allowed:
-                        return f"Ngăn vốn {alloc.horizon} đã hết hạn mức tại lúc khớp ({alloc.rationale})"
+                        return f"[EntryGuard/Alloc] Ngăn vốn {alloc.horizon} đã hết hạn mức tại lúc khớp ({alloc.rationale})"
                     if alloc.is_throttled and alloc.allocated_margin + 1e-9 < float(getattr(order, "margin", 0.0) or 0.0):
-                        return (f"Ngăn vốn {alloc.horizon} chỉ còn ${alloc.allocated_margin:.1f} "
+                        return (f"[EntryGuard/Alloc] Ngăn vốn {alloc.horizon} chỉ còn ${alloc.allocated_margin:.1f} "
                                 f"nhưng lệnh cần ${float(getattr(order, 'margin', 0.0) or 0.0):.1f} — từ chối để tính lại size")
             except Exception:
                 pass
