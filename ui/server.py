@@ -2216,7 +2216,7 @@ class LiveTradingState:
                     if o.group_type == "GRID":
                         continue
                     if int(o.leverage) > int(gov_cap_now) and o.status in ("PENDING", "ACTIVE"):
-                        self.order_manager.cancel_order(o.order_id)
+                        self.order_manager.cancel_order(o.order_id, f"Đòn bẩy {o.leverage}x vượt trần {gov_cap_now}x — hủy để đặt lại")
                         print(f"[LEV SYNC] 🔄 Huy pending #{o.order_id} lev {o.leverage}x (vuot tran {gov_cap_now}x) de dat lai", flush=True)
                 except Exception:
                     pass
@@ -2235,7 +2235,7 @@ class LiveTradingState:
                 if o.order_type in ("POST_ONLY", "LIMIT", "SCALE_RATIO") and price_drift > 0.008:
                     stale_orders.append(o)
             for stale in stale_orders:
-                self.order_manager.cancel_order(stale.order_id)
+                self.order_manager.cancel_order(stale.order_id, "Lệnh chờ lệch giá quá 0.8% — hủy để đặt lại theo giá mới")
             if any(o.group_type != "GRID" for o in self.order_manager.pending_orders):
                 return
 

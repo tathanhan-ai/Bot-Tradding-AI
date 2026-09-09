@@ -1487,6 +1487,7 @@
                 <span class="text-gray-600">|</span>
                 <span id="pos-ai-status" class="text-amber-300" data-i18n="pos_lbl_ai_monitoring">🤖 AI Đang Giám Sát</span>
               </div>
+              <div id="pos-entry-reason" class="text-[11px] text-gray-300 font-sans leading-relaxed pt-1" title="Lý do AI vào vị thế này"></div>
               <div class="flex items-center gap-2 flex-wrap">
                 <button onclick="openManualTpSlModal()" class="px-2.5 py-1 bg-amber-600/25 hover:bg-amber-600/40 text-amber-300 border border-amber-500/50 rounded font-bold text-xs transition flex items-center gap-1 shadow">
                   <span>✏️</span> <span data-i18n="btn_pos_edit_tpsl">Sửa TP / SL</span>
@@ -1530,6 +1531,7 @@
                       <th class="p-2.5" data-i18n="th_margin">Ký Quỹ</th>
                       <th class="p-2.5" data-i18n="th_leverage">Đòn Bẩy</th>
                       <th class="p-2.5" data-i18n="th_pnl_roe">PnL Chưa Chốt (ROE %)</th>
+                      <th class="p-2.5" data-i18n="th_entry_reason">Lý do vào</th>
                       <th class="p-2.5" data-i18n="th_time">Thời Gian Vào</th>
                       <th class="p-2.5 text-center" data-i18n="th_actions">Thao Tác</th>
                     </tr>
@@ -1557,13 +1559,14 @@
                   <th class="p-2" data-i18n="th_pend_size">Khối lượng</th>
                   <th class="p-2" data-i18n="th_pend_margin">Ký quỹ</th>
                   <th class="p-2" data-i18n="th_pend_distance">Khoảng cách</th>
+                  <th class="p-2" data-i18n="th_pend_reason">Lý do</th>
                   <th class="p-2" data-i18n="th_pend_time">Thời gian</th>
                   <th class="p-2 text-center" data-i18n="th_pend_actions">Hành động</th>
                 </tr>
               </thead>
               <tbody id="pending-orders-body" class="divide-y divide-gray-800/60 mono">
                 <tr>
-                  <td colspan="10" class="p-3 text-center text-gray-500 font-sans" data-i18n="no_pending_orders">Chưa có lệnh Limit nào đang chờ.</td>
+                  <td colspan="11" class="p-3 text-center text-gray-500 font-sans" data-i18n="no_pending_orders">Chưa có lệnh Limit nào đang chờ.</td>
                 </tr>
               </tbody>
             </table>
@@ -4662,13 +4665,14 @@
                 <td class="p-2 text-gray-300 mono">${o.units}</td>
                 <td class="p-2 text-gray-300 mono">$${o.margin} (${o.leverage}x)</td>
                 <td class="p-2 mono ${distColor}">${isCanceled ? '--' : `${dist > 0 ? '+' : ''}${dist}%`}</td>
+                <td class="p-2 text-left max-w-[220px]"><span class="text-[10px] text-gray-300 font-sans break-words block" title="${(o.entry_reason || o.note || 'Lệnh đã qua đủ cổng kiểm duyệt').replace(/"/g, '&quot;')}">📝 ${(o.entry_reason || o.note || 'Lệnh đã qua đủ cổng kiểm duyệt')}</span>${isCanceled && o.cancel_reason ? `<span class="text-[10px] text-rose-300 font-sans break-words block" title="${String(o.cancel_reason).replace(/"/g, '&quot;')}">🧹 ${o.cancel_reason}</span>` : ''}</td>
                 <td class="p-2 text-gray-300 mono">${o.created_at}</td>
                 <td class="p-2 text-center">${actionCell}</td>
               </tr>
             `;
           }).join('');
         } else {
-          pendingTbody.innerHTML = `<tr><td colspan="10" class="p-3 text-center text-gray-500 font-sans">${t('no_pending_orders')}</td></tr>`;
+          pendingTbody.innerHTML = `<tr><td colspan="11" class="p-3 text-center text-gray-500 font-sans">${t('no_pending_orders')}</td></tr>`;
         }
       }
 
@@ -5100,6 +5104,12 @@
         document.getElementById('pos-liq').innerText = `$${pos.liq_price.toLocaleString('en-US', {minimumFractionDigits: 2})}`;
         document.getElementById('pos-trailing').innerText = pos.trailing_status || t('pos_lbl_no_trailing');
         document.getElementById('pos-ai-status').innerText = pos.ai_action_status || t('pos_lbl_ai_monitoring');
+        const posReasonEl = document.getElementById('pos-entry-reason');
+        if (posReasonEl) {
+          const reason = pos.entry_reason || 'Lệnh đã qua đủ cổng kiểm duyệt';
+          posReasonEl.innerText = '📝 Lý do vào lệnh: ' + reason;
+          posReasonEl.title = reason;
+        }
 
         // Sub-orders constituent table rendering
         const orders = pos.orders || [];
@@ -5107,7 +5117,7 @@
         const posOrdersBody = document.getElementById('pos-orders-body');
         if (posOrdersBody) {
           if (orders.length === 0) {
-            posOrdersBody.innerHTML = `<tr><td colspan="11" class="p-6 text-center text-gray-500 font-sans">${t('no_orders_in_pos')}</td></tr>`;
+            posOrdersBody.innerHTML = `<tr><td colspan="12" class="p-6 text-center text-gray-500 font-sans">${t('no_orders_in_pos')}</td></tr>`;
           } else {
             posOrdersBody.innerHTML = orders.map(ord => {
               const isOrdLong = ord.direction === 1 || ord.side === 'LONG' || ord.side === 'BUY';
@@ -5141,6 +5151,7 @@
                   <td class="p-2.5 font-bold ${pnlColor}">
                     ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${roe >= 0 ? '+' : ''}${roe.toFixed(2)}%)<br><span class="text-[10px] text-gray-400 font-normal" title="Net thuc nhan sau phi">net ${netSlice >= 0 ? '+' : ''}$${netSlice.toFixed(2)}</span>
                   </td>
+                  <td class="p-2.5 text-left max-w-[200px]"><span class="text-[10px] text-gray-300 font-sans break-words block" title="${String(ord.entry_reason || pos.entry_reason || 'Lệnh đã qua đủ cổng kiểm duyệt').replace(/"/g, '&quot;')}">📝 ${ord.entry_reason || pos.entry_reason || 'Lệnh đã qua đủ cổng kiểm duyệt'}</span></td>
                   <td class="p-2.5 text-gray-400 text-[11px] mono whitespace-nowrap" title="${ord.entry_time || ''}">${timeDisplay}</td>
                   <td class="p-2.5 text-center">
                     <div class="flex items-center justify-center gap-1.5">
@@ -7427,6 +7438,7 @@
         th_margin: "Ký Quỹ",
         th_leverage: "Đòn Bẩy",
         th_pnl_roe: "PnL Chưa Chốt (ROE %)",
+        th_entry_reason: "Lý do vào",
         th_time: "Thời Gian Vào",
         th_actions: "Thao Tác",
         no_orders_in_pos: "Chưa có lệnh nào trong vị thế.",
@@ -7439,6 +7451,7 @@
         th_pend_price: "Giá Đặt",
         th_pend_size: "Khối lượng",
         th_pend_margin: "Ký quỹ",
+        th_pend_reason: "Lý do",
         th_pend_distance: "Khoảng cách",
         th_pend_time: "Thời gian",
         th_pend_actions: "Hành động",
@@ -8088,6 +8101,7 @@
         th_size: "Size",
         th_margin: "Margin",
         th_leverage: "Leverage",
+        th_entry_reason: "Entry reason",
         th_pnl_roe: "Unrealized PnL (ROE %)",
         th_time: "Entry Time",
         th_actions: "Actions",
@@ -8101,6 +8115,7 @@
         th_pend_price: "Order Price",
         th_pend_size: "Size",
         th_pend_margin: "Margin",
+        th_pend_reason: "Reason",
         th_pend_distance: "Distance",
         th_pend_time: "Time",
         th_pend_actions: "Actions",
@@ -8745,6 +8760,7 @@
         th_entry: "开仓价格",
         th_size: "数量",
         th_margin: "保证金",
+        th_entry_reason: "入场理由",
         th_pnl_roe: "未实现盈亏 (ROE %)",
         th_time: "开仓时间",
         th_actions: "操作",
@@ -8758,6 +8774,7 @@
         th_pend_price: "委托价",
         th_pend_size: "数量",
         th_pend_margin: "保证金",
+        th_pend_reason: "理由",
         th_pend_distance: "价差距离",
         th_pend_time: "委托时间",
         th_pend_actions: "操作",

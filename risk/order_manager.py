@@ -56,6 +56,7 @@ class FuturesOrder:
     stop_loss: float = 0.0
     take_profit: float = 0.0
     note: str = ""
+    entry_reason: str = ""
     cancel_reason: str = ""
     cancelled_at: str = ""
     age_ticks: int = 0
@@ -101,6 +102,7 @@ class OrderQueueManager:
         stop_loss: float = 0.0,
         take_profit: float = 0.0,
         note: str = "",
+        entry_reason: str = "",
         best_bid: float = 0.0,
         best_ask: float = 0.0,
         timeframe: str = "15m",
@@ -220,6 +222,7 @@ class OrderQueueManager:
                 twap_total_slices=count if is_twap else 1, twap_interval_ticks=twap_interval_ticks,
                 scale_level=index, scale_ratio_pct=ratios[index - 1] * 100, stop_loss=child_sl, take_profit=child_tp,
                 note=note or (f"{order_type_clean} child {index}/{count}" if count > 1 else ""),
+                entry_reason=str(entry_reason or "")[:500],
                 execution_group=group, client_order_id=child_client_id, group_type=kind,
                 position_side=position_side_clean,
                 parent_intent_id=parent_id, child_index=index, due_at=due_at + (index - 1) * interval if is_twap else due_at,
@@ -385,10 +388,15 @@ class OrderQueueManager:
                 return True
         return False
 
-    def cancel_order(self, order_id: int) -> bool:
+    def cancel_order(self, order_id: int, reason: str = "") -> bool:
+        # Mọi đường hủy đều phải có lý do (hiển thị ở bảng lệnh chờ).
         for o in self.orders:
             if o.order_id == order_id and o.status in ("PENDING", "ACTIVE") and not o.exchange_order_id and not o.exchange_status:
                 o.status = "CANCELED"
+                o.cancel_reason = str(reason or "Người dùng/bot hủy lệnh chờ")[:500]
+                o.cancelled_at = datetime.now().strftime("%H:%M:%S")
+                if not o.note:
+                    o.note = o.cancel_reason
                 return True
         return False
 
@@ -696,6 +704,7 @@ class OrderQueueManager:
                 "scale_level": o.scale_level if o.order_type == "SCALE_RATIO" else "--",
                 "scale_ratio": f"{o.scale_ratio_pct}%" if o.order_type == "SCALE_RATIO" else "--",
                 "note": o.note,
+                "entry_reason": getattr(o, "entry_reason", "") or o.note,
                 "cancel_reason": getattr(o, "cancel_reason", None),
                 "age_ticks": getattr(o, "age_ticks", 0),
                 "timeframe": getattr(o, "timeframe", "15m"),
@@ -732,6 +741,7 @@ class OrderQueueManager:
                 "scale_level": "--",
                 "scale_ratio": "--",
                 "note": getattr(o, "cancel_reason", "AI Hủy: Mất vị thế phù hợp"),
+                "entry_reason": getattr(o, "entry_reason", "") or o.note,
                 "cancel_reason": getattr(o, "cancel_reason", "AI Hủy: Mất vị thế phù hợp"),
                 "age_ticks": getattr(o, "age_ticks", 0),
                 "timeframe": getattr(o, "timeframe", "15m")

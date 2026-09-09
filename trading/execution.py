@@ -91,6 +91,41 @@ class ExecutionLifecycle:
             yield "BOTH", current
         yield from getattr(self.state, "hedge_positions", {}).items()
 
+    @staticmethod
+    def summarize_entry_reason(candidate, trace_entries) -> str:
+        # Tóm tắt lý do vào lệnh cho bảng lệnh chờ/vị thế (tối đa ~200 ký tự).
+        parts = []
+        try:
+            direction = "LONG" if getattr(candidate, "direction", 0) == 1 else ("SHORT" if getattr(candidate, "direction", 0) == -1 else "")
+            kind = str(getattr(candidate, "order_type", "") or "")
+            conf = getattr(candidate, "confidence", 0) or 0
+            regime = str(getattr(candidate, "regime", "") or "")
+            head = " ".join(p for p in (direction, kind) if p).strip()
+            if head:
+                parts.append(head)
+            if regime:
+                parts.append(f"chế độ {regime}")
+            if conf:
+                try:
+                    parts.append(f"tin cậy {float(conf):.0f}%")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        for entry in (trace_entries or [])[-6:]:
+            try:
+                stage = str(entry.get("stage", "") if isinstance(entry, dict) else getattr(entry, "stage", ""))
+                verdict = str(entry.get("verdict", "") if isinstance(entry, dict) else getattr(entry, "verdict", ""))
+                reason = str(entry.get("reason", "") if isinstance(entry, dict) else getattr(entry, "reason", ""))
+                if verdict == "PASS" and reason and ("ouncil" in stage or "ctoBot" in stage or "pha Zoo" in stage or "arver" in stage or "isk" in stage):
+                    short = reason.strip().split("\n")[0][:120]
+                    if short and short not in parts:
+                        parts.append(short)
+            except Exception:
+                continue
+        text = " | ".join(p for p in parts if p).strip()
+        return text[:500] if text else "Lệnh đã qua đủ cổng kiểm duyệt"
+
     def queue(self, candidate, research=None, execution_group=""):
         s = self.state
         if candidate.quantity <= 0 or not s.last_decision_trace or s.last_decision_trace.vetoed:
@@ -106,6 +141,7 @@ class ExecutionLifecycle:
             order_type=kind, symbol=candidate.symbol, side="BUY" if candidate.direction == 1 else "SELL",
             price=candidate.entry_price, margin=candidate.margin, leverage=candidate.leverage,
             quantity=candidate.quantity, stop_loss=candidate.stop_loss, take_profit=candidate.take_profit,
+            entry_reason=self.summarize_entry_reason(candidate, self.traces[candidate.order_id]),
             trigger_price=meta.get("trigger_price", getattr(research, "optimal_trigger_price", 0)),
             trigger_condition=meta.get("trigger_condition", getattr(research, "optimal_trigger_cond", "ABOVE")),
             callback_pct=meta.get("callback_pct", getattr(research, "optimal_callback_pct", 0.8)),
@@ -154,7 +190,7 @@ class ExecutionLifecycle:
             )
             if order is None:
                 for prior in created:
-                    s.order_manager.cancel_order(prior.order_id)
+                    s.order_manager.cancel_order(prior.order_id, f"Rollback lưới GRID: {reason}")
                 self.trace(candidate.order_id, "Execution / Grid", "VETO", reason)
                 self.persist()
                 return {"status": "blocked", "reason": reason}
@@ -236,13 +272,45 @@ class ExecutionLifecycle:
         reserved_risk = sum(max(0, o.units - o.exchange_executed_quantity) * abs(o.price - o.stop_loss) for o in pending if o.status in s.order_manager.OPEN_STATUSES)
         if open_risk + reserved_risk + order.units * abs(price - order.stop_loss) > s.current_balance * s.risk_config.max_account_risk_pct:
             return "Aggregate risk exceeds account envelope"
+        if not is_grid and not getattr(order, "candidate_payload", {}).get("metadata", {}).get("reduce_only"):
+            # Chốt phân bổ vốn ở tầng khớp cuối: số dư có thể đã trôi kể từ
+            # lúc pipeline duyệt. Chỉ từ chối (không tự bóp lệnh ở đây) để
+            # tầng nghiên cứu tính lại size cho đúng.
+            try:
+                allocator = getattr(s, "capital_allocator", None)
+                if allocator is not None:
+                    meta = getattr(order, "candidate_payload", {}).get("metadata", {}) or {}
+                    horizon = meta.get("horizon") or allocator.get_horizon(
+                        meta.get("timeframe", getattr(order, "timeframe", "15m")))
+                    gov = None
+                    try:
+                        gov = s.monthly_governor.evaluate(s.current_balance, s.trades)
+                    except Exception:
+                        gov = None
+                    positions_now = [pos for _, pos in self.all_positions()]
+                    alloc = allocator.evaluate_allocation(
+                        horizon=horizon,
+                        requested_margin=float(getattr(order, "margin", 0.0) or 0.0),
+                        total_equity=float(s.current_balance or 0.0),
+                        active_positions=positions_now,
+                        pending_orders=[o for o in pending if o.status in s.order_manager.OPEN_STATUSES],
+                        min_trade_margin=10.0 if meta.get("probation") else 30.0,
+                        reserve_ratio_override=(gov.reserve_ratio_recommended if (gov is not None and getattr(gov, "enabled", False)) else None),
+                    )
+                    if not alloc.allowed:
+                        return f"Ngăn vốn {alloc.horizon} đã hết hạn mức tại lúc khớp ({alloc.rationale})"
+                    if alloc.is_throttled and alloc.allocated_margin + 1e-9 < float(getattr(order, "margin", 0.0) or 0.0):
+                        return (f"Ngăn vốn {alloc.horizon} chỉ còn ${alloc.allocated_margin:.1f} "
+                                f"nhưng lệnh cần ${float(getattr(order, 'margin', 0.0) or 0.0):.1f} — từ chối để tính lại size")
+            except Exception:
+                pass
         return ""
 
     def submit(self, order):
         s = self.state
         reason = self.entry_guard(order)
         if reason:
-            s.order_manager.cancel_order(order.order_id)
+            s.order_manager.cancel_order(order.order_id, f"Tầng khớp từ chối: {reason}")
             self.trace(order.parent_intent_id, "Execution / Revalidation", "VETO", reason)
             self.persist()
             return
@@ -391,6 +459,12 @@ class ExecutionLifecycle:
         s.current_balance -= fee
         s.total_fees += fee
         payload = order.candidate_payload or {}
+        slice_reason = str(getattr(order, "entry_reason", "") or "")[:500]
+        if not slice_reason:
+            try:
+                slice_reason = self.summarize_entry_reason(order, self.traces.get(order.parent_intent_id, []))
+            except Exception:
+                slice_reason = "Lệnh đã qua đủ cổng kiểm duyệt"
         item = {
             "slice_id": f"{order.client_order_id}:{order.applied_quantity + quantity:.8f}",
             "order_id": order.order_id, "client_order_id": order.client_order_id,
@@ -401,6 +475,7 @@ class ExecutionLifecycle:
             "margin": quantity * price / order.leverage, "leverage": order.leverage, "entry_fee": fee,
             "timeframe": order.timeframe, "entry_time": datetime.now(timezone.utc).isoformat(),
             "open_timestamp": time.time(), "entry_context": payload.get("metadata", {}).get("entry_context", {}),
+            "entry_reason": slice_reason,
             "unrealized_pnl": 0.0, "roe_pct": 0.0, "fee_estimated": True,
         }
         if not pos:
@@ -411,6 +486,7 @@ class ExecutionLifecycle:
                 "timeframe": order.timeframe, "is_manual_tpsl": False, "partial_tp_done": False,
                 "trailing_status": "Protected execution", "unrealized_pnl": 0.0, "net_upnl": 0.0,
                 "leverage": order.leverage, "protection_revision": 0,
+                "entry_reason": slice_reason,
                 # initial_margin co dinh de ROE chuan Binance = UPNL / initial margin
                 "initial_margin": quantity * price / order.leverage,
                 "staged_take_profits": payload.get("staged_take_profits", {}),
@@ -576,7 +652,7 @@ class ExecutionLifecycle:
             if order.symbol != s.symbol:
                 continue
             if order.status in ("PENDING", "ACTIVE") and not order.exchange_order_id and not order.exchange_status:
-                s.order_manager.cancel_order(order.order_id)
+                s.order_manager.cancel_order(order.order_id, reason)
             elif order.status in s.order_manager.OPEN_STATUSES:
                 order.status = "CANCEL_REQUESTED"
             order.cancel_reason = reason
@@ -916,8 +992,9 @@ class ExecutionLifecycle:
             for intent in self.exits:
                 self.apply_after_close_protection(intent)
             for order in list(s.order_manager.due_orders()):
-                if self.entry_guard(order):
-                    s.order_manager.cancel_order(order.order_id)
+                guard_reason = self.entry_guard(order)
+                if guard_reason:
+                    s.order_manager.cancel_order(order.order_id, f"Lệnh chờ hết hiệu lực: {guard_reason}")
             for order in s.order_manager.match_orders(s.live_price, s.fee_engine.bid_price, s.fee_engine.ask_price):
                 self.apply_response(order, {"orderId": f"paper:{order.order_id}", "status": "FILLED",
                     "executedQty": order.units, "avgPrice": order.price})
