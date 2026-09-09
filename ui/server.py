@@ -466,13 +466,10 @@ class LiveTradingState:
             target_enabled = str(self.storage.get_setting("monthly_target_enabled", True)).lower() in ("true", "1", "yes", "on")
             compensate_def = str(self.storage.get_setting("monthly_compensate_deficit", True)).lower() in ("true", "1", "yes", "on")
             profile = str(self.storage.get_setting("monthly_target_profile", "growth"))
-            self.monthly_governor.update_config(None, target_enabled, compensate_def, profile=profile)
-            if target_pct and profile not in self.monthly_governor.PROFILES:
-                self.monthly_governor.base_target_pct = target_pct
-                try:
-                    self.storage.save_setting("monthly_target_pct", target_pct)
-                except Exception:
-                    pass
+            # target_pct (so custom VD 20%) thang profile base (VD growth=10%):
+            # truyen ca hai — update_config ap profile truoc roi giu so custom,
+            # neu khong moi lan nap so 20% deu nhay ve 10%.
+            self.monthly_governor.update_config(target_pct, target_enabled, compensate_def, profile=profile)
         except Exception:
             pass
 
@@ -2180,6 +2177,20 @@ class LiveTradingState:
         target = next((o for o in self.order_manager.pending_orders if o.order_id == order_id), None)
         if not target or not target.candidate_payload:
             return {"status": "rejected", "reason": "Pending candidate not found"}
+        # Khop ngay lenh cho CO SAN (nut VAO LENH): gui thang lenh goc len san,
+        # khong tao candidate moi. Tao moi vua cham (phai duyet pipeline lai)
+        # vua de tao dup khi cancel goc thua cuoc dua voi khop lenh.
+        if execute_now and not changes:
+            if target.exchange_order_id or target.exchange_status:
+                return {"status": "rejected",
+                        "reason": "Lệnh đã gửi lên sàn, theo dõi trạng thái khớp thay vì gửi lại"}
+            self.execution.tick()
+            self.execution.submit(target)
+            if target.status in ("SUBMIT_PENDING", "SUBMIT_UNKNOWN"):
+                return {"status": "ok", "order_id": target.order_id,
+                        "client_order_id": target.client_order_id}
+            return {"status": "rejected",
+                    "reason": getattr(target, "cancel_reason", "") or target.status or "Không gửi được lệnh chờ lên sàn"}
         candidate = CandidateOrder(**deepcopy(target.candidate_payload))
         candidate.order_id = f"replace-{uuid.uuid4().hex[:24]}"
         candidate.source = "manual-replace"

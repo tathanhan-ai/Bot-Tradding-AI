@@ -46,6 +46,17 @@ class GovernorProfileTests(unittest.TestCase):
                 st = gov.evaluate(5000.0, [])
                 self.assertLessEqual(st.size_multiplier, 1.0)
 
+    def test_custom_target_survives_profile_reload(self):
+        # Loi that: user luu 20% xong mo lai nhay ve 10% (profile base ghi de).
+        gov = MonthlyTargetGovernor(storage=None)
+        gov.update_config(20.0, True, True, profile="growth")
+        self.assertAlmostEqual(gov.base_target_pct, 20.0)
+        gov2 = MonthlyTargetGovernor(storage=None)
+        gov2.update_config(20.0, True, True, profile="growth")
+        self.assertAlmostEqual(gov2.base_target_pct, 20.0)
+        st = gov2.evaluate(5000.0, [])
+        self.assertAlmostEqual(st.base_target_pct, 20.0)
+
 
 if __name__ == "__main__":
     unittest.main()

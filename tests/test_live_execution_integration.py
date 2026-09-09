@@ -129,6 +129,29 @@ class LiveExecutionIntegrationTest(unittest.TestCase):
         self.assertNotEqual(state.current_position["protective_order_ids"], first_ids)
         self.assertTrue(lifecycle.protective[1]["cancel_requested"])
 
+    def test_oneway_stop_sends_close_position_without_reduce_only(self):
+        # Loi lenh #65: STOP full-vi-the gui kem reduceOnly -> san tu choi
+        # (-2 closePosition khong duoc dung cung reduceOnly) -> dap SL/TP
+        # that bai -> dong ca vi the + dung blocker.
+        state = make_state(live=True)
+        lifecycle = ExecutionLifecycle(state)
+        entry(state, lifecycle)
+        sent = []
+
+        def fake_place(symbol, side, order_type, quantity, **kw):
+            sent.append({"order_type": order_type, "quantity": quantity, **kw})
+            return True, {"orderId": f"p-{len(sent)}", "status": "NEW",
+                          "executedQty": "0", "avgPrice": "0"}
+
+        state.binance_api.place_order_live.side_effect = fake_place
+        state.current_position["protective_order_ids"] = []
+        state.current_position.pop("protected_signature", None)
+        lifecycle.ensure_protection()
+        stops = [c for c in sent if c["order_type"] == "STOP_MARKET"]
+        self.assertTrue(stops)
+        self.assertTrue(stops[0].get("close_position"))
+        self.assertNotIn("reduceOnly", {k for k in stops[0] if "reduce" in k.lower()})
+
     def test_exit_receipts_reject_nonfinite_and_replayed_updates(self):
         state = make_state()
         lifecycle = ExecutionLifecycle(state)
@@ -390,6 +413,26 @@ class LiveExecutionIntegrationTest(unittest.TestCase):
         self.assertTrue(restored_state.freqtrade_protections.cooldown_guard.is_locked()[0])
         self.assertTrue(restored_state.freqtrade_protections.stoploss_guard.is_locked()[0])
         self.assertTrue(restored_state.freqtrade_protections.max_drawdown_guard.is_locked()[0])
+
+    def test_restore_keeps_only_current_mode_trades(self):
+        # Runtime cu tron paper+live: restore o live chi nhan lenh live,
+        # header khong hien THANG 39.1% (64 lenh) cua paper nua.
+        state = make_state(live=True)
+        state.storage.mode = "live"
+        lifecycle = ExecutionLifecycle(state)
+        state.storage.save_execution_runtime({
+            "version": 2, "balance": 99.0, "total_fees": 0.0,
+            "position": None, "hedge_positions": {}, "queue": {"version": 1, "next_id": 1, "orders": []},
+            "protective": [], "exits": [], "traces": {},
+            "trades": [
+                {"id": 1, "execution_id": "paper:1", "pnl": 5.0, "mode": "paper"},
+                {"id": 65, "execution_id": "live:65", "pnl": -0.06, "mode": "live"},
+            ],
+            "processed_execution_ids": [], "feedback_pending": False,
+            "entry_exit_barrier": "", "memory_records": [], "blocker": "",
+        })
+        lifecycle.restore()
+        self.assertEqual([x["id"] for x in state.trades], [65])
 
     def test_stale_protective_blocker_clears_when_no_position(self):
         # Dot dap SL/TP that bai (vi du dot lenh 449) de lai blocker ket,

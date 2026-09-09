@@ -43,7 +43,16 @@ class ExecutionLifecycle:
         self.feedback_pending = bool(saved.get("feedback_pending", False))
         self.entry_exit_barrier = saved.get("entry_exit_barrier", "")
         s.trade_memory.memory_records = [TradeContextProfile(**record) for record in saved.get("memory_records", [])][-s.trade_memory.max_records:]
-        s.trades = saved.get("trades", s.trades)
+        # Chi nhan trades dung mode hien tai: runtime cu co the tron paper+live
+        # (VD runtime live chua 64 lenh paper + 1 lenh live) -> header hien
+        # THANG:39.1% (64 lenh) cua paper trong khi dang o live.
+        mode_now = str(getattr(getattr(s, "storage", None), "mode", "paper") or "paper")
+        saved_trades = saved.get("trades", s.trades)
+        if isinstance(saved_trades, list):
+            s.trades = [t for t in saved_trades
+                        if str((t or {}).get("mode", mode_now) or mode_now) == mode_now]
+        else:
+            s.trades = saved_trades
         s.execution_blocker = saved.get("blocker", "")
         # Restore the ledger balance first: a UTC day rollover must start from it,
         # not from the constructor's configured initial balance.
@@ -635,9 +644,12 @@ class ExecutionLifecycle:
         # Protective staged take-profits carry a partial quantity, so they must
         # stay quantity-based; only an explicitly marked full stop may use it.
         native_close = bool(intent.get("close_position", False))
+        # STOP full-vi-the dung closePosition thi KHONG gui kem reduceOnly:
+        # san tu choi cap nay (lenh #65 chet oan vi loi nay, keo theo dong
+        # ca vi the + dung blocker).
         ok, response = s.binance_api.place_order_live(
             s.symbol, intent["side"], intent["order_type"], intent["quantity"],
-            stop_price=intent.get("trigger"), reduce_only=position_side == "BOTH", close_position=native_close,
+            stop_price=intent.get("trigger"), reduce_only=(position_side == "BOTH" and not native_close), close_position=native_close,
             position_side=position_side, client_order_id=intent["client_order_id"],
         )
         if ok:
@@ -919,6 +931,7 @@ class ExecutionLifecycle:
                 id=max([t["id"] for t in s.trades] or [0]) + 1,
                 execution_id=f"{execution_id}:{combined_slice_id}",
                 symbol=s.symbol,
+                mode=str(getattr(getattr(s, "storage", None), "mode", "paper") or "paper"),
                 timeframe=timeframe,
                 direction="LONG" if pos["direction"] == 1 else "SHORT",
                 entry_time=earliest_entry_time or datetime.now(timezone.utc).isoformat(),

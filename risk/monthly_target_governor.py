@@ -146,6 +146,15 @@ class MonthlyTargetGovernor:
                 self.profile_name = val_profile
                 self.base_target_pct = float(self.PROFILES[val_profile]["base_target_pct"])
 
+            # Muc tieu so nguoi dung nhap (VD 20%) thang profile base (VD growth=10%):
+            # giu so custom sau khi ap profile, neu khong moi lan nap lai
+            # 20% deu nhay ve 10%.
+            try:
+                if val_target is not None:
+                    self.base_target_pct = max(1.0, min(100.0, float(val_target)))
+            except Exception:
+                pass
+
             val_month = self.storage.get_setting("monthly_governor_month")
             val_start_bal = self.storage.get_setting("monthly_start_balance")
             val_deficit = self.storage.get_setting("monthly_carried_deficit")
