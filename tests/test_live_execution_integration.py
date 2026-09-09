@@ -391,6 +391,32 @@ class LiveExecutionIntegrationTest(unittest.TestCase):
         self.assertTrue(restored_state.freqtrade_protections.stoploss_guard.is_locked()[0])
         self.assertTrue(restored_state.freqtrade_protections.max_drawdown_guard.is_locked()[0])
 
+    def test_stale_protective_blocker_clears_when_no_position(self):
+        # Dot dap SL/TP that bai (vi du dot lenh 449) de lai blocker ket,
+        # moi lenh moi veto vinh vien o Stage 1 du san da sach. Nay tu don
+        # khi khong con vi the nao de bao ve.
+        state = make_state(live=True)
+        lifecycle = ExecutionLifecycle(state)
+        state.execution_blocker = "Protective setup failed; reducing tracked Testnet exposure"
+        state.current_position = None
+        state.hedge_positions = {}
+        lifecycle.ensure_protection()
+        self.assertEqual(state.execution_blocker, "")
+
+    def test_protective_blocker_kept_when_exits_pending(self):
+        # Exits con do (chua FILLED/CANCELED/EXPIRED/REJECTED) thi
+        # ensure_protection return som — blocker giu nguyen, khong don oan.
+        state = make_state(live=True)
+        lifecycle = ExecutionLifecycle(state)
+        state.execution_blocker = "Protective setup failed; reducing tracked Testnet exposure"
+        state.current_position = None
+        state.hedge_positions = {}
+        lifecycle.exits.append({"client_order_id": "exit-pending", "status": "NEW",
+                                "applied": 0, "quote_applied": 0, "reason": "test"})
+        lifecycle.ensure_protection()
+        self.assertEqual(state.execution_blocker,
+                         "Protective setup failed; reducing tracked Testnet exposure")
+
     def test_restart_new_utc_day_resets_daily_baseline_to_durable_balance(self):
         state = make_state()
         state.risk_manager = FuturesRiskManager(RiskConfig(initial_balance=10000))

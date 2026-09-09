@@ -653,7 +653,16 @@ class ExecutionLifecycle:
         s = self.state
         if not self.live or any(e.get("status") not in ("FILLED", "CANCELED", "EXPIRED", "REJECTED") for e in self.exits):
             return
-        for position_side, pos in list(self.all_positions()):
+        positions = list(self.all_positions())
+        if not positions:
+            # Khong con vi the de bao ve: blocker ket tu dot dap SL/TP truoc
+            # (vi du dot lenh 449) phai tu don, neu khong moi lenh moi deu
+            # veto vinh vien o Stage 1 du san da sach.
+            if getattr(s, "execution_blocker", "") == "Protective setup failed; reducing tracked Testnet exposure":
+                s.execution_blocker = ""
+                self.persist()
+            return
+        for position_side, pos in positions:
             self._ensure_protection_for(pos, position_side)
 
     def _ensure_protection_for(self, pos, position_side):
