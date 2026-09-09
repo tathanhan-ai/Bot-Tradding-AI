@@ -174,6 +174,44 @@ class ExecutionLifecycle:
             client_order_id=candidate.order_id, candidate_payload=asdict(candidate),
             decision_trace=self.traces[candidate.order_id],
         )
+        # Gia Maker cham spread (thi truong chay giua chung pipeline duyet va
+        # tang dat lenh): lui 1 tick ve phia Maker roi dat lai, thay vi rot han.
+        # Chi ap dung 1 lan cho lenh don (khong ap cho SCALE ladder nhieu chan).
+        if first is None and kind in ("POST_ONLY", "LIMIT") and isinstance(reason, str) and "BỊ TỪ CHỐI BỞI" in reason:
+            try:
+                tick = 0.1
+                px = float(candidate.entry_price or 0.0)
+                if candidate.direction == 1:
+                    ask = float(s.fee_engine.ask_price or 0.0)
+                    if ask > 0 and px >= ask:
+                        candidate.entry_price = round(ask - tick, 1)
+                else:
+                    bid = float(s.fee_engine.bid_price or 0.0)
+                    if bid > 0 and px <= bid:
+                        candidate.entry_price = round(bid + tick, 1)
+                if float(candidate.entry_price or 0.0) != float(px or 0.0):
+                    first, reason = s.order_manager.place_order(
+                        order_type=kind, symbol=candidate.symbol,
+                        side="BUY" if candidate.direction == 1 else "SELL",
+                        price=candidate.entry_price, margin=candidate.margin, leverage=candidate.leverage,
+                        quantity=candidate.quantity, stop_loss=candidate.stop_loss, take_profit=candidate.take_profit,
+                        entry_reason=self.summarize_entry_reason(candidate, self.traces[candidate.order_id]),
+                        trigger_price=meta.get("trigger_price", getattr(research, "optimal_trigger_price", 0)),
+                        trigger_condition=meta.get("trigger_condition", getattr(research, "optimal_trigger_cond", "ABOVE")),
+                        callback_pct=meta.get("callback_pct", getattr(research, "optimal_callback_pct", 0.8)),
+                        twap_slices=meta.get("twap_slices", getattr(research, "optimal_twap_slices", 5)),
+                        twap_interval_seconds=meta.get("twap_interval_seconds", 6),
+                        timeframe=meta.get("timeframe", getattr(candidate, "timeframe", s.active_timeframe)),
+                        best_bid=s.fee_engine.bid_price, best_ask=s.fee_engine.ask_price,
+                        execution_group=execution_group or candidate.order_id, group_type=meta.get("group_type", ""),
+                        client_order_id=candidate.order_id, candidate_payload=asdict(candidate),
+                        decision_trace=self.traces[candidate.order_id],
+                    )
+                    if first is not None:
+                        self.trace(candidate.order_id, "Execution / Maker nudge",
+                                   "PASS", f"Lui 1 tick ve Maker ({px} -> {candidate.entry_price}) de tranh khop Taker")
+            except Exception:
+                pass
         if first is None:
             self.trace(candidate.order_id, "Execution", "VETO", reason)
             self.persist()
