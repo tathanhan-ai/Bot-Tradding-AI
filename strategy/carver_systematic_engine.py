@@ -393,13 +393,44 @@ class CarverSystematicEngine:
         optimal_margin = round(notional_value / lev, 2)
 
         # 7. Turnover & Cost Control (Buffer Bands)
-        action, exec_contracts, b_lower, b_upper, b_width = self.buffer_manager.evaluate_buffer(
-            target_contracts=final_contracts,
-            current_contracts=current_position_contracts,
-            contract_step=contract_step,
-            current_price=current_price,
-            min_notional=350.0
-        )
+        # Von nho ($100): target Carver (~0.0003 BTC) duoi buoc toi thieu san
+        # 0.001 -> buffer tra HOLD vinh vien, khong bao gio mo duoc lenh dau.
+        # Mo cua toi thieu: mo vi the MOI theo huong forecast (tu 0 len 1 buoc
+        # san) khi ky quy toi thieu vua trong 35% von. Giu HOLD cho moi
+        # truong hop rebalance/giam vi the (tranh fee churn nhu thiet ke goc).
+        fresh_min_open = None
+        step_now = float(contract_step or 0.001)
+        if (abs(current_position_contracts) < step_now
+                and abs(final_contracts) < step_now
+                and abs(capped_fc) >= 1.0
+                and current_price > 0 and capital_usdt > 0):
+            try:
+                from risk.small_account import min_viable_margin, MARGIN_HEADROOM
+                need = min_viable_margin(float(current_price), int(max(1, effective_leverage)),
+                                         float(contract_step or 0.001))
+                if 0 < need <= float(capital_usdt) * MARGIN_HEADROOM:
+                    step = float(contract_step or 0.001)
+                    direction = 1.0 if capped_fc > 0 else -1.0
+                    fresh_min_open = (direction * step, step)
+            except Exception:
+                fresh_min_open = None
+        if fresh_min_open is not None:
+            fresh_target, step = fresh_min_open
+            action = 'BUY' if fresh_target > 0 else 'SELL'
+            exec_contracts = fresh_target
+            b_lower, b_upper, b_width = -step, step, step * 2.0
+            final_contracts = fresh_target
+            notional_value = abs(final_contracts) * current_price
+            lev = max(1, effective_leverage)
+            optimal_margin = round(notional_value / lev, 2)
+        else:
+            action, exec_contracts, b_lower, b_upper, b_width = self.buffer_manager.evaluate_buffer(
+                target_contracts=final_contracts,
+                current_contracts=current_position_contracts,
+                contract_step=contract_step,
+                current_price=current_price,
+                min_notional=350.0
+            )
 
         fee_saved = 0.0
         drift = abs(final_contracts - current_position_contracts)

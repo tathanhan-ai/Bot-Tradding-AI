@@ -1366,6 +1366,23 @@ class LiveTradingState:
                                     and matrix.recommended_direction == -order.direction)
                 alpha_against = float(alpha.composite_alpha_score or 0.0) * order.direction <= -20.0
                 if octo_against or alpha_against:
+                    # Thoat that co chai 1D-vs-15m: PF qua khu cua combo 15m-LONG
+                    # khong duoc ghi de song 1D hien tai. Khi song 1D ung ho
+                    # huong lenh + lenh Maker -> ha ve probation thay vi veto.
+                    wave = (order.metadata.get("wave_alignment", {}) or {})
+                    try:
+                        w1 = int(wave.get("wave_1d", 0) or 0)
+                    except Exception:
+                        w1 = 0
+                    maker = order_kind in ("POST_ONLY", "LIMIT", "SCALE_RATIO")
+                    if w1 != 0 and order.direction == w1 and maker and not octo_against:
+                        order.metadata["weak_combo_probation"] = True
+                        order.metadata["probation"] = True
+                        order.metadata["risk_cap_pct"] = 0.0010
+                        return StageOutcome.pass_(
+                            f"Combo {order_tf.upper()}-{'LONG' if order.direction == 1 else 'SHORT'} PF<1 nhung thuan song 1D: "
+                            f"cho Maker probation 0.10% (Alpha {float(alpha.composite_alpha_score or 0.0):+.1f})",
+                            probation=True, risk_cap_pct=0.0010)
                     return StageOutcome.veto(
                         f"Weak attributed combo {order_tf.upper()}-{'LONG' if order.direction == 1 else 'SHORT'} "
                         f"(PF<1 tren du lieu that) + tin hieu nguoc chieu (OctoBot nguoc: {octo_against}, "
@@ -1921,6 +1938,27 @@ class LiveTradingState:
                         "Song Hurst thap: ha cap %s ve POST_ONLY Maker probation 0.10%% (cam duoi trend Taker)" % res["rationale"][:160],
                         probation=True, risk_cap_pct=0.0010)
                 if not res["allowed"]:
+                    # Thoat that co chai 1D-vs-15m: song 1D ung ho huong lenh
+                    # (cong Wave da cho qua) nhung SMC khung nho nguoc -> khong
+                    # veto cung ma cho tham do Maker probation von nho. Bai hoc
+                    # martingale van duoc ton trong: chi mo cua khi lenh Maker
+                    # (POST_ONLY/LIMIT/SCALE_RATIO), Taker van veto cung.
+                    blocked = list(res.get("blocked_lessons", []) or [])
+                    wave = (order.metadata.get("wave_alignment", {}) or {})
+                    try:
+                        w1 = int(wave.get("wave_1d", 0) or 0)
+                    except Exception:
+                        w1 = 0
+                    smc_only = blocked == ["SMC_ALIGN"]
+                    wave_ok = w1 != 0 and order.direction == w1
+                    maker = order.order_type in ("POST_ONLY", "LIMIT", "SCALE_RATIO")
+                    if smc_only and wave_ok and maker:
+                        order.metadata["smc_wave_override"] = True
+                        order.metadata["probation"] = True
+                        order.metadata["risk_cap_pct"] = 0.0010
+                        return StageOutcome.pass_(
+                            "SMC khung nho nguoc nhung thuan song 1D: cho LONG/SHORT Maker probation 0.10% thay vi veto cung",
+                            probation=True, risk_cap_pct=0.0010)
                     return StageOutcome.veto("Tac chien bai hoc: " + res["rationale"])
                 if res["penalty"] >= 0.5:
                     return StageOutcome.pass_("Tac chien bai hoc: giam size (penalty %.1f)" % res["penalty"],
