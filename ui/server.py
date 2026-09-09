@@ -1663,6 +1663,22 @@ class LiveTradingState:
             # When opening a fresh position with 0 inventory, target optimal_contracts is the initial order
             if held == 0.0 and abs(contracts) <= 0 and abs(carver.optimal_contracts) >= 0.001 and (carver.optimal_contracts * order.direction > 0):
                 contracts = carver.optimal_contracts
+            # Song 1D la xu huong chu dao theo chi thi user: lenh MO MOI theo
+            # song 1D (Maker probation von nho) duoc mien veto Carver-nguoc-
+            # huong ngan han. Carver van veto rebalance khi da co vi the, va
+            # moi quantity phia duoi (probation floor/sleeve/entry guard) van
+            # kep chat nhu cu.
+            if abs(contracts) <= 0 and held == 0.0 and order.direction in (-1, 1):
+                try:
+                    _wave = (order.metadata.get("wave_alignment", {}) or {})
+                    _w1 = int(_wave.get("wave_1d", 0) or 0)
+                    _maker = order.order_type in ("POST_ONLY", "LIMIT", "SCALE_RATIO")
+                    _prob = bool(order.metadata.get("probation"))
+                    if _w1 != 0 and order.direction == _w1 and _maker and _prob:
+                        contracts = 0.001 * order.direction
+                        order.metadata["wave_override_carver"] = True
+                except Exception:
+                    pass
             if (carver.rebalance_action == "HOLD" and held != 0.0) or abs(contracts) <= 0:
                 return StageOutcome.veto(
                     f"Carver inertia buffer says HOLD "
