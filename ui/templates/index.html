@@ -6153,6 +6153,7 @@
       } catch (e) {
         showNotifyModal('err', 'Lỗi kết nối', 'Lỗi kết nối khi khớp lệnh: ' + (e && e.message ? e.message : e));
       }
+    }
 
     function loadOrderToForm(orderId) {
       const orders = (latestFullState && latestFullState.pending_orders) ? latestFullState.pending_orders : [];
