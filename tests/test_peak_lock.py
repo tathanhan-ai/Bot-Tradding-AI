@@ -48,21 +48,22 @@ class PeakLockTests(unittest.TestCase):
         return base
 
     def test_below_lock1_holds(self):
-        action, _ = peak_action(self.pos(), 78000.0 * (1 + LOCK_1_PCT - 0.0005))
+        action, _ = peak_action(self.pos(), 78000.0 * (1 + LOCK_1_PCT - 0.0002))
         self.assertEqual(action, "hold")
 
-    def test_lock1_at_030(self):
+    def test_lock1_at_015(self):
         action, info = peak_action(self.pos(), 78000.0 * (1 + LOCK_1_PCT))
         self.assertEqual(action, "lock1")
         self.assertAlmostEqual(info["ratio"], 0.30)
 
     def test_lock1_fires_once(self):
-        p = self.pos(peak_flags={"lock1": True}, peak_lock_price=78250.0)
-        action, _ = peak_action(p, 78250.0)
+        # Da chot lock1 o 78117 (+0.15%): dung yen o do thi giu, khong chot lai.
+        p = self.pos(peak_flags={"lock1": True}, peak_lock_price=78117.0)
+        action, _ = peak_action(p, 78117.0)
         self.assertEqual(action, "hold")
 
-    def test_lock2_at_050(self):
-        p = self.pos(peak_flags={"lock1": True}, peak_lock_price=78300.0)
+    def test_lock2_at_030(self):
+        p = self.pos(peak_flags={"lock1": True}, peak_lock_price=78150.0)
         action, info = peak_action(p, 78000.0 * (1 + LOCK_2_PCT))
         self.assertEqual(action, "lock2")
         self.assertAlmostEqual(info["ratio"], 0.30)
@@ -70,7 +71,7 @@ class PeakLockTests(unittest.TestCase):
     def test_giveback_exits_rest(self):
         peak = 78000.0 * (1 + LOCK_2_PCT)
         p = self.pos(peak_flags={"lock1": True, "lock2": True}, peak_lock_price=peak)
-        action, info = peak_action(p, peak * (1 - GIVEBACK_PCT - 0.0005))
+        action, info = peak_action(p, peak * (1 - GIVEBACK_PCT - 0.0002))
         self.assertEqual(action, "giveback_exit")
 
     def test_small_pullback_holds(self):
@@ -86,8 +87,9 @@ class PeakLockTests(unittest.TestCase):
 
     def test_levels_math(self):
         lv = peak_levels(78000.0, 1)
-        self.assertAlmostEqual(lv["lock1"], 78000.0 * 1.003, places=1)
-        self.assertAlmostEqual(lv["lock2_sl"], 78000.0 * 1.0025, places=1)
+        self.assertAlmostEqual(lv["lock1"], 78000.0 * 1.0015, places=1)
+        self.assertAlmostEqual(lv["lock2"], 78000.0 * 1.003, places=1)
+        self.assertAlmostEqual(lv["lock2_sl"], 78000.0 * 1.0015, places=1)
 
 
 if __name__ == "__main__":

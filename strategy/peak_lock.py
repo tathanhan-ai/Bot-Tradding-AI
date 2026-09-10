@@ -12,21 +12,22 @@ tren $1.43 dinh co the). Nguyen nhan kep:
 Quy tac moi (giu fail-closed, chi mo cua co kiem soat):
 - Don bay = f(ATR%): ATR cang thap don bay cang cao (toi da 10x), ATR cao
   ha ve 3x. Luon giu thanh ly cach SL toi thieu 3x khoang SL.
-- Chot lai 3 tang theo % dinh (khong doi TP goc):
-  + Dat +0.30% (net sau phi): chot 30%, doi SL ve entry (risk-free).
-  + Dat +0.50%: chot them 30% (tong 60%), doi SL len +0.25%.
-  + Tut ve duoi dinh 0.25% (giveback): chot not phan con lai.
+- Chot lai 3 tang theo % dinh (khong doi TP goc) — moc siet theo bien
+  dong that 15m (~0.15-0.20%/nhip, lenh #73 cao nhat chi +0.20%):
+  + Dat +0.15% (net sau phi): chot 30%, doi SL ve entry (risk-free).
+  + Dat +0.30%: chot them 30% (tong 60%), doi SL len +0.15%.
+  + Tut ve duoi dinh 0.15% (giveback): chot not phan con lai.
 - Moi moc chi kich 1 lan; gia chua cham moc thi giu SL goc.
 """
 import math
 from typing import Any, Dict, Optional, Tuple
 
-LOCK_1_PCT = 0.0030
+LOCK_1_PCT = 0.0015
 LOCK_1_RATIO = 0.30
-LOCK_2_PCT = 0.0050
+LOCK_2_PCT = 0.0030
 LOCK_2_RATIO = 0.30
-LOCK_2_SL_PCT = 0.0025
-GIVEBACK_PCT = 0.0025
+LOCK_2_SL_PCT = 0.0015
+GIVEBACK_PCT = 0.0015
 
 FEE_ROUNDTRIP_PCT = 0.0007
 
