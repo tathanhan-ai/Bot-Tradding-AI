@@ -3763,6 +3763,18 @@ def cancel_order(order_id: int, session: UserSession = Depends(require_role(Role
     return {"status": "cancelled" if state.execution.cancel(target) else "cancel_pending", "order_id": order_id}
 
 
+@app.post("/api/action/cancel_protective_order")
+@serialized_action
+def cancel_protective_order(client_order_id: str = "", session: UserSession = Depends(require_role(Role.OPERATOR))):
+    """Huy SL/TP bao ve tren san bang tay (VD p-aa8a...). Bot tao thi user
+    van phai huy duoc — khong co chuyen 'san giu' ma khong co nut."""
+    if not client_order_id:
+        raise HTTPException(status_code=400, detail="Thiếu client_order_id của lệnh SL/TP")
+    ok, message = state.execution.cancel_protective(client_order_id, "Người dùng hủy tay trên UI")
+    return {"status": "ok" if ok else "rejected", "message": message,
+            "client_order_id": client_order_id}
+
+
 @app.post("/api/action/update_pending_order")
 @serialized_action
 def update_pending_order(

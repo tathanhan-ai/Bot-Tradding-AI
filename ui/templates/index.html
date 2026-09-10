@@ -4605,7 +4605,11 @@
       const pendingTbody = document.getElementById('pending-orders-body');
       const pendingCount = document.getElementById('pending-orders-count');
       const orders = data.pending_orders || [];
-      const activeCount = orders.filter(o => o.status !== 'CANCELED').length;
+      // SL/TP bao ve tren san cung dem vao tong lenh cho (truoc day chi dem
+      // lenh local nen san co 2 lenh ma he thong hien 0).
+      const liveProts = ((data.pipeline || {}).protective_orders || []).filter(p =>
+        ['NEW', 'PARTIALLY_FILLED', 'PENDING_TRIGGER'].includes(p.status));
+      const activeCount = orders.filter(o => o.status !== 'CANCELED').length + liveProts.length;
       if (pendingCount) pendingCount.innerText = `${activeCount} ${t('pending_orders_count_suffix')}`;
 
       if (pendingTbody) {
@@ -4703,7 +4707,9 @@
                   <td class="p-2 mono text-gray-400">${distP > 0 ? '+' : ''}${distP}%</td>
                   <td class="p-2 text-left max-w-[220px]"><span class="text-[10px] text-gray-300 font-sans break-words block">🛡️ SL/TP bảo vệ trên sàn Binance (${p.status})</span></td>
                   <td class="p-2 text-gray-500 mono">--</td>
-                  <td class="p-2 text-center"><span class="text-[10px] text-gray-500">sàn giữ</span></td>
+                  <td class="p-2 text-center">
+                    <button onclick="cancelProtectiveOrder('${p.client_order_id || ''}')" class="px-2 py-1 rounded bg-rose-950 text-rose-300 border border-rose-800 hover:bg-rose-900 text-[10px] font-bold transition shrink-0 cursor-pointer" title="Hủy SL/TP này trên sàn Binance">✕ HỦY</button>
+                  </td>
                 </tr>`;
               }).join('');
             }
@@ -6227,6 +6233,27 @@
       if (ok) {
         await fetch(`/api/action/cancel_order?order_id=${orderId}`, { method: 'POST' });
         fetchStateRest();
+      }
+    }
+
+    async function cancelProtectiveOrder(clientOrderId) {
+      if (!clientOrderId) return;
+      const ok = await showConfirmModal('Hủy SL/TP trên sàn',
+        'Bạn có chắc muốn HỦY lệnh bảo vệ ' + clientOrderId + ' trên sàn Binance? ' +
+        'Vị thế sẽ KHÔNG còn bảo vệ ở phía đó — cân nhắc dựng lại sau.',
+        'Hủy trên sàn');
+      if (!ok) return;
+      try {
+        const res = await fetch(`/api/action/cancel_protective_order?client_order_id=${encodeURIComponent(clientOrderId)}`, { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'ok') {
+          showNotifyModal('ok', 'Đã hủy', data.message || ('Đã hủy ' + clientOrderId + ' trên sàn.'));
+        } else {
+          showNotifyModal('err', 'Chưa hủy được', (data.message || data.reason || 'Sàn chưa xác nhận.') + ' Vị thế vẫn còn phía bảo vệ kia.');
+        }
+        fetchStateRest();
+      } catch (e) {
+        showNotifyModal('err', 'Lỗi kết nối', 'Lỗi kết nối khi hủy SL/TP: ' + (e && e.message ? e.message : e));
       }
     }
 

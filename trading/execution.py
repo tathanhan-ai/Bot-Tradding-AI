@@ -1155,6 +1155,40 @@ class ExecutionLifecycle:
                 return True
         return False
 
+    def cancel_protective(self, client_order_id: str, reason: str = "Người dùng hủy tay") -> tuple:
+        """Huy SL/TP bao ve tren san theo client_order_id (VD p-aa8a...).
+        Tra (ok, message). Huy that tren san + cap nhat local."""
+        s = self.state
+        target = next((p for p in self.protective
+                       if str(p.get("client_order_id", "")) == str(client_order_id)), None)
+        if target is None:
+            return False, "Không tìm thấy lệnh SL/TP bảo vệ"
+        if target.get("status") in ("FILLED", "CANCELED", "EXPIRED", "REJECTED"):
+            return False, f"Lệnh đã {target.get('status')}, không cần hủy"
+        if not self.live:
+            target["status"] = "CANCELED"
+            target["cancel_reason"] = reason
+            self.persist()
+            return True, "Đã hủy SL/TP (paper)"
+        ref = self.query_ref(target)
+        ok, response = s.binance_api.cancel_order(s.symbol, **ref)
+        if not ok:
+            ok, response = s.binance_api.query_order(s.symbol, **ref)
+        if ok and isinstance(response, dict):
+            status = str(response.get("status", "")).upper()
+            if status in ("CANCELED", "EXPIRED", "REJECTED"):
+                target["status"] = status
+                target["cancel_reason"] = reason
+                self.persist()
+                return True, f"Đã hủy {target.get('order_type')} trên sàn"
+            # Van NEW/PENDING_TRIGGER nghia la lenh van song -> bao that
+            self.persist()
+            return False, f"Sàn báo {status}, lệnh vẫn còn — thử lại"
+        target["status"] = "CANCEL_REQUESTED"
+        target["cancel_reason"] = reason
+        self.persist()
+        return False, "Sàn chưa xác nhận — đã đánh dấu, reconcile sẽ dọn"
+
     def verify_startup_inventory(self):
         if self.startup_reconciled:
             return True

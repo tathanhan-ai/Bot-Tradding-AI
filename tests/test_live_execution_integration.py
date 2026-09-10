@@ -495,6 +495,24 @@ class LiveExecutionIntegrationTest(unittest.TestCase):
         lifecycle.tick()
         self.assertFalse(lifecycle.protective[0]["close_position"])
 
+    def test_cancel_protective_by_hand(self):
+        # Bot tao thi user van phai huy duoc bang tay: huy that tren san
+        # + cap nhat local. Huy lenh khong ton tai hoac da xong thi bao loi.
+        state = make_state(live=True)
+        lifecycle = ExecutionLifecycle(state)
+        lifecycle.protective.append({"order_type": "STOP_MARKET", "side": "SELL",
+                                     "status": "NEW", "client_order_id": "p-hand",
+                                     "order_id": None, "position_side": "BOTH"})
+        state.binance_api.cancel_order = __import__("unittest.mock", fromlist=["Mock"]).Mock(
+            return_value=(True, {"status": "CANCELED"}))
+        ok, _ = lifecycle.cancel_protective("p-hand", "test")
+        self.assertTrue(ok)
+        self.assertEqual(lifecycle.protective[0]["status"], "CANCELED")
+        ok2, _ = lifecycle.cancel_protective("p-hand", "test")
+        self.assertFalse(ok2)
+        ok3, _ = lifecycle.cancel_protective("p-nope", "test")
+        self.assertFalse(ok3)
+
     def test_stale_protective_blocker_clears_when_no_position(self):
         # Dot dap SL/TP that bai (vi du dot lenh 449) de lai blocker ket,
         # moi lenh moi veto vinh vien o Stage 1 du san da sach. Nay tu don
