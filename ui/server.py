@@ -669,11 +669,10 @@ class LiveTradingState:
             pass
 
     def refresh_mark_price(self):
-        # Goi moi ~10s tu vong decision cycle: giu mark tuoi ke ca khi WS mark stream chet.
-        # REST nhe (1 call premiumIndex), co throttle trong fetch_binance_funding? Khong -
-        # dung timer rieng de khong phu thuoc chu ky funding 30s.
+        # Goi moi ~3s tu vong decision cycle: giu mark tuoi ke ca khi WS mark stream chet.
+        # REST nhe (1 call premiumIndex ~700ms), dung timer rieng de khong phu thuoc chu ky funding 30s.
         now = time.time()
-        if now - getattr(self, "_last_mark_refresh", 0.0) < 10.0:
+        if now - getattr(self, "_last_mark_refresh", 0.0) < 3.0:
             return
         self._last_mark_refresh = now
         try:
@@ -696,7 +695,7 @@ class LiveTradingState:
             pass
 
     def sync_exchange_balance(self, force: bool = False) -> None:
-        """Đồng bộ vốn live theo số dư ví THẬT từ sàn (poll mỗi 30s khi live).
+        """Đồng bộ vốn live theo số dư ví THẬT từ sàn (poll mỗi 10s khi live).
 
         Bot nghe số tiền server: current_balance = wallet sàn, mọi sizing phía
         sau dùng vốn thật. Sai số >10% vẫn sync nhưng cắm cờ drift để execution
@@ -712,7 +711,7 @@ class LiveTradingState:
         except Exception:
             pass
         now = time.time()
-        if not force and now - getattr(self, "_last_exchange_sync", 0.0) < 30.0:
+        if not force and now - getattr(self, "_last_exchange_sync", 0.0) < 10.0:
             return
         self._last_exchange_sync = now
         try:

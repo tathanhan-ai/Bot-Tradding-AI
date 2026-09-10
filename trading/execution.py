@@ -1119,7 +1119,7 @@ class ExecutionLifecycle:
                     "executedQty": order.units, "avgPrice": order.price})
             self.persist()
             return
-        if time.time() - self.last_reconcile < 1.0:
+        if time.time() - self.last_reconcile < 0.5:
             return
         self.last_reconcile = time.time()
         # Realtime sync 1: UPNL theo san moi tick. Goi positionRisk nhe de lay
@@ -1202,6 +1202,37 @@ class ExecutionLifecycle:
                 ok, response = s.binance_api.query_order(order.symbol, **self.query_ref(ref))
                 if ok:
                     self.apply_response(order, response)
+        # Realtime sync 4 (moi 5s): doi chieu lenh cho local voi san.
+        # Lenh local treo PENDING/ACTIVE qua 30s ma san khong co (khong ma san,
+        # query bao khong ton tai) thi huy local de UI khong hien lenh ao.
+        # Nguoc lai lenh san co ma local thieu thi chi log canh bao (khong tu
+        # nhan vi the ngoai luong de tranh double-count).
+        try:
+            if self.live and time.time() - getattr(self, "_last_order_audit", 0.0) >= 5.0:
+                self._last_order_audit = time.time()
+                ok, opens = s.binance_api._send_request(
+                    "GET", "/fapi/v1/openOrders", {"symbol": s.symbol})
+                if ok and isinstance(opens, list):
+                    exch_ids = {str(o.get("orderId")) for o in opens}
+                    exch_clis = {str(o.get("clientOrderId")) for o in opens}
+                    for order in list(s.order_manager.pending_orders):
+                        if order.status not in ("PENDING", "ACTIVE"):
+                            continue
+                        age = time.time() - float(getattr(order, "due_at", 0.0) or 0.0)
+                        if not order.exchange_order_id and not order.exchange_status and age > 30.0:
+                            hit = (str(order.client_order_id) in exch_clis
+                                   if order.client_order_id else False)
+                            if not hit:
+                                s.order_manager.cancel_order(
+                                    order.order_id,
+                                    "Sàn không có lệnh này sau 30s — hủy hiển thị ảo, chờ tín hiệu mới")
+                    try:
+                        print(f"[ORDER AUDIT] san {len(exch_ids)} lenh mo / local "
+                              f"{len(s.order_manager.pending_orders)} lenh cho", flush=True)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         self.reconcile_close_barrier()
         self.ensure_protection()
         inventory_verified = self.verify_startup_inventory()
