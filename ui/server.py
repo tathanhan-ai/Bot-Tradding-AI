@@ -2566,22 +2566,48 @@ class LiveTradingState:
                     pass
         except Exception:
             pass
-        # Stale Pending Orders Cleanup:
-        # If a resting limit/maker/DCA order has drifted > 0.8% away from current price, cancel it to refresh
+        # Stale Pending Orders: bam gia thay vi huy cho dat lai.
+        # Cu: lenh lech >0.8% la huy + return som (khong dat lai) -> gia truot
+        # la mat lenh, khong xoay kip. Nay: doi ve best bid/ask hien tai (giua
+        # Maker) nhung khong vuot qua 0.3% so voi gia goc (chong mua duoi), roi
+        # gui lai len san neu lenh local chua co ma san.
         pending = list(self.order_manager.pending_orders)
         if pending:
-            stale_orders = []
+            try:
+                best_bid = float(getattr(self.fee_engine, "bid_price", 0.0) or 0.0)
+                best_ask = float(getattr(self.fee_engine, "ask_price", 0.0) or 0.0)
+            except Exception:
+                best_bid, best_ask = 0.0, 0.0
             for o in pending:
-                # Do not cancel GRID orders based on single-price drift; GRID orders intentionally span the channel
-                if o.group_type == "GRID":
+                try:
+                    if o.group_type == "GRID":
+                        continue
+                    if o.order_type not in ("POST_ONLY", "LIMIT", "SCALE_RATIO"):
+                        continue
+                    if o.status not in ("PENDING", "ACTIVE"):
+                        continue
+                    if o.exchange_order_id or o.exchange_status:
+                        continue
+                    drift = abs(current_price - o.price) / max(1.0, current_price)
+                    if drift <= 0.008:
+                        continue
+                    anchor = best_bid if o.side == "BUY" else best_ask
+                    if anchor <= 0:
+                        continue
+                    cap = o.price * (1.003 if o.side == "BUY" else 0.997)
+                    floor = o.price * (0.997 if o.side == "BUY" else 1.003)
+                    new_px = min(max(anchor, min(cap, floor)), max(cap, floor))
+                    new_px = round(new_px, 1)
+                    if new_px <= 0 or abs(new_px - o.price) / max(1.0, o.price) < 0.0005:
+                        continue
+                    o.price = new_px
+                    o.due_at = now
+                    try:
+                        print(f"[CHASE] 🎯 Lenh cho #{o.order_id} lech {drift*100:.2f}% -> doi ve {new_px} (bam book, bien 0.3%)", flush=True)
+                    except Exception:
+                        pass
+                except Exception:
                     continue
-                price_drift = abs(current_price - o.price) / max(1.0, current_price)
-                if o.order_type in ("POST_ONLY", "LIMIT", "SCALE_RATIO") and price_drift > 0.008:
-                    stale_orders.append(o)
-            for stale in stale_orders:
-                self.order_manager.cancel_order(stale.order_id, "Lệnh chờ lệch giá quá 0.8% — hủy để đặt lại theo giá mới")
-            if any(o.group_type != "GRID" for o in self.order_manager.pending_orders):
-                return
 
         if now - self.last_auto_order_time < 10.0:
             return
