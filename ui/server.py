@@ -2430,6 +2430,35 @@ class LiveTradingState:
                         self.execution.request_close(min(1.0, remaining / pos["units"]), f"{stage.upper()} staged exit", tp_stage=stage)
                         return
             self.update_indicators()
+            # Peak-lock (strategy.peak_lock): chot lai 3 tang theo % DINH, khong
+            # doi TP goc xa. 8 lenh live chi giu 14% dinh vi TP dat theo RR 2-3.5
+            # khong bao gio cham truoc khi gia quay dau. Chay TRUOC AI cu.
+            try:
+                from strategy.peak_lock import peak_action
+                pact, pinfo = peak_action(pos, price)
+                if pact == "lock1":
+                    pos.setdefault("peak_flags", {})["lock1"] = True
+                    pos["peak_lock_price"] = pinfo.get("peak", price)
+                    self.execution.request_close(
+                        pinfo.get("ratio", 0.30),
+                        f"CHỐT ĐỈNH 30% 💰 (+0.30% net, SL về entry risk-free)")
+                    self.execution.replace_protection(sl=pos["entry_price"])
+                    pos["ai_action_status"] = "💰 Chốt đỉnh 30% + SL về entry"
+                elif pact == "lock2":
+                    pos.setdefault("peak_flags", {})["lock2"] = True
+                    pos["peak_lock_price"] = pinfo.get("peak", price)
+                    self.execution.request_close(
+                        pinfo.get("ratio", 0.30),
+                        f"CHỐT ĐỈNH THÊM 30% 💰 (+0.50% net, SL lên +0.25%)")
+                    self.execution.replace_protection(sl=pinfo.get("lock_sl"))
+                    pos["ai_action_status"] = "💰 Chốt đỉnh 60% + SL +0.25%"
+                elif pact == "giveback_exit":
+                    self.execution.request_close(
+                        1.0, f"CHỐT PHẦN CÒN LẠI 🛡️ (tụt {pinfo.get('giveback', 0)*100:.2f}% từ đỉnh)")
+                    pos["ai_action_status"] = "🛡️ Chốt nốt khi tụt đỉnh"
+                    return
+            except Exception:
+                pass
             decision = self.ai_coordinator.evaluate_position(pos=pos, current_price=price, indicators=self.indicators, ai_verdict=self.ai_verdict, fee_engine=self.fee_engine)
             pos["ai_action_status"] = decision.status_display
             if decision.action in ("LOCK_BREAKEVEN", "EXPAND_TAKE_PROFIT", "UPDATE_TRAILING"):

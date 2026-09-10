@@ -139,11 +139,14 @@ class PositionIntentTests(unittest.TestCase):
         state.ai_coordinator = self.coordinator
         state.update_indicators = lambda: None
         state.indicators = {"atr": 1, "rsi": 60}
+        # Peak-lock (strategy.peak_lock) co mat trong tick that: entry 100
+        # len 112 la +12%, vuot moc lock1 (+0.30%) nen chot 30% truoc
+        # (0.01 -> 0.007). Sau do staged TP1 chot 0.004 tren so con lai.
         state.process_execution_tick(112)
-        self.assertEqual(pos["units"], .01)
+        self.assertAlmostEqual(pos["units"], .007)
         state.on_tick(115)
         state.process_execution_tick(115)
-        self.assertAlmostEqual(pos["units"], .006)
+        self.assertAlmostEqual(pos["units"], .003, places=4)
         self.assertAlmostEqual(pos["tp_stage_filled"]["tp1"], .004)
 
     def test_paper_partial_close_applies_persisted_stop_followup(self):

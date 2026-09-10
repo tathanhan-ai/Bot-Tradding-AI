@@ -78,22 +78,24 @@ class DynamicLeverageEngine:
         if horizon in ("SHORT_TERM", "LONG_TERM"):
             eff_horizon = horizon
 
-        # 2. Continuous Volatility Factor (ATR / Price)
+        # 2. Continuous Volatility Factor (ATR / Price) — dieu phoi theo
+        # strategy.peak_lock (ATR thap -> don bay cao toi 10x; ATR cao -> 3x).
+        # Lenh nho von $100 can don bay tot de phi khoi bao mon lai.
         atr_pct = (atr / current_price) if current_price > 0 else 0.01
-        if atr_pct <= 0.0035:
+        try:
+            from strategy.peak_lock import leverage_for_atr as _lev_for_atr
+            base_lev = int(_lev_for_atr(atr_pct, self.max_leverage))
+        except Exception:
             base_lev = 8
+        if atr_pct <= 0.0035:
             vol_note = f"Biến động siêu thấp (ATR={atr_pct*100:.2f}%)"
         elif atr_pct <= 0.0065:
-            base_lev = 6
             vol_note = f"Biến động thấp ổn định (ATR={atr_pct*100:.2f}%)"
         elif atr_pct <= 0.0110:
-            base_lev = 4
             vol_note = f"Biến động trung bình (ATR={atr_pct*100:.2f}%)"
         elif atr_pct <= 0.0180:
-            base_lev = 3
             vol_note = f"Biến động cao (ATR={atr_pct*100:.2f}%)"
         else:
-            base_lev = 2
             vol_note = f"Biến động mạnh/cực đại (ATR={atr_pct*100:.2f}%)"
 
         lev = base_lev

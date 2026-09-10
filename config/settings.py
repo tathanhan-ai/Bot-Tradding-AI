@@ -18,7 +18,9 @@ class RiskConfig:
     default_leverage: int = 3          # Default leverage 3x (safe zone)
     # TRAN CUNG DUY NHAT toan he thong: dynamic engine, governor profile, sizing gate
     # deu phai min(ket qua, max_leverage). Doi o day la doi khap noi, hien thi trong UI.
-    max_leverage: int = 5              # Hard cap leverage (single source of truth)
+    # Nang 5 -> 10 de lenh von nho co don bay tot (phi khoi bao mon); thanh ly
+    # van duoc giu cach SL >= 3x nho leverage_with_liq_floor + governor cap.
+    max_leverage: int = 10             # Hard cap leverage (single source of truth)
     daily_max_loss_pct: float = 0.04   # Circuit breaker: stop bot if daily loss >= 4%
 
 @dataclass
