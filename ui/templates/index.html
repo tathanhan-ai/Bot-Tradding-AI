@@ -4684,6 +4684,11 @@
                 const badge = isStop
                   ? `<span class="px-1.5 py-0.5 rounded bg-rose-950 text-rose-300 border border-rose-800 text-[10px] font-bold">SL SÀN</span>`
                   : `<span class="px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 text-[10px] font-bold">TP SÀN</span>`;
+                // CHIỀU hien theo VI THE duoc bao ve (LONG 🟢), khong theo
+                // huong lenh ban (side SELL) — tranh hieu lam dang SHORT.
+                // SL/TP dong vi the: side nguoc voi huong vi the.
+                const posSide = (data.position && data.position.direction === -1) ? 'SHORT' : 'LONG';
+                const posLong = posSide === 'LONG';
                 const trig = Number(p.trigger || 0);
                 const distP = price > 0 ? (((trig - price) / price) * 100).toFixed(2) : 0;
                 return `
@@ -4691,7 +4696,7 @@
                   <td class="p-2 font-bold text-gray-300">${data.symbol || ''} <span class="text-[10px] text-gray-500 font-normal">${p.order_id || ''}</span></td>
                   <td class="p-2"><span class="px-1.5 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700 text-[10px] mono font-bold">SÀN</span></td>
                   <td class="p-2">${badge}</td>
-                  <td class="p-2 text-rose-400 font-bold">${p.side === 'BUY' ? 'LONG' : 'SHORT'}</td>
+                  <td class="p-2 font-bold ${posLong ? 'text-emerald-400' : 'text-rose-400'}">${posLong ? 'LONG 🟢' : 'SHORT 🔴'} <span class="text-[10px] text-gray-500 font-normal">đóng</span></td>
                   <td class="p-2 font-bold text-white mono">ĐK $${trig.toLocaleString('en-US', {minimumFractionDigits: 1})}</td>
                   <td class="p-2 text-gray-300 mono">${Number(p.quantity || 0).toFixed(3)}</td>
                   <td class="p-2 text-gray-500 mono">--</td>
