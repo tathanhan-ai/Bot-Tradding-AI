@@ -129,10 +129,11 @@ class LiveExecutionIntegrationTest(unittest.TestCase):
         self.assertNotEqual(state.current_position["protective_order_ids"], first_ids)
         self.assertTrue(lifecycle.protective[1]["cancel_requested"])
 
-    def test_oneway_stop_sends_close_position_without_reduce_only(self):
-        # Loi lenh #65: STOP full-vi-the gui kem reduceOnly -> san tu choi
-        # (-2 closePosition khong duoc dung cung reduceOnly) -> dap SL/TP
-        # that bai -> dong ca vi the + dung blocker.
+    def test_oneway_stop_uses_quantity_not_close_position(self):
+        # Loi lenh 66-68: STOP dung closePosition -> san chi cho 1 lenh moi
+        # huong (-4130), STOP cu chet khong dung luc la STOP moi rot theo ->
+        # dap SL/TP that bai -> dong ca vi the oan. Nay STOP dung quantity +
+        # reduceOnly, khong bao gio dung closePosition.
         state = make_state(live=True)
         lifecycle = ExecutionLifecycle(state)
         entry(state, lifecycle)
@@ -149,8 +150,30 @@ class LiveExecutionIntegrationTest(unittest.TestCase):
         lifecycle.ensure_protection()
         stops = [c for c in sent if c["order_type"] == "STOP_MARKET"]
         self.assertTrue(stops)
-        self.assertTrue(stops[0].get("close_position"))
-        self.assertNotIn("reduceOnly", {k for k in stops[0] if "reduce" in k.lower()})
+        self.assertFalse(stops[0].get("close_position"))
+        self.assertEqual(stops[0].get("quantity"), state.current_position["units"])
+        self.assertTrue(stops[0].get("reduce_only"))
+
+    def test_protection_revision_cancels_old_orders_on_exchange(self):
+        # Dung lai bao ve phai huy lenh cu TREN SAN truoc khi dat moi,
+        # neu khong STOP moi dinh -4130 chac chan.
+        state = make_state(live=True)
+        lifecycle = ExecutionLifecycle(state)
+        entry(state, lifecycle)
+        lifecycle.ensure_protection()
+        old_stop = next(p for p in lifecycle.protective if p["order_type"] == "STOP_MARKET")
+        old_stop["status"] = "NEW"
+        old_stop["order_id"] = "algo:111"
+        state.current_position.pop("protected_signature", None)
+        state.binance_api.place_order_live.side_effect = lambda *a, **k: (
+            True, {"orderId": "p-new", "status": "NEW", "executedQty": "0", "avgPrice": "0"})
+        state.binance_api.cancel_order = __import__("unittest.mock", fromlist=["Mock"]).Mock(
+            return_value=(True, {"status": "CANCELED"}))
+        state.binance_api.query_order = __import__("unittest.mock", fromlist=["Mock"]).Mock(
+            return_value=(False, {"code": -2013}))
+        lifecycle.ensure_protection()
+        self.assertTrue(old_stop.get("cancel_requested"))
+        self.assertTrue(state.binance_api.cancel_order.called)
 
     def test_exit_receipts_reject_nonfinite_and_replayed_updates(self):
         state = make_state()
@@ -366,10 +389,11 @@ class LiveExecutionIntegrationTest(unittest.TestCase):
 
         calls = state.binance_api.place_order_live.call_args_list
         self.assertEqual(len(calls), 4)  # stop, TP1, TP2, residual TP
-        self.assertTrue(calls[0].kwargs["close_position"])
-        self.assertFalse(calls[1].kwargs["close_position"])
-        self.assertFalse(calls[2].kwargs["close_position"])
-        self.assertFalse(calls[3].kwargs["close_position"])
+        # Tat ca dung quantity (ke ca STOP): closePosition moi huong chi
+        # duoc 1 lenh tren san, dung la STOP moi dinh -4130 khi lenh cu
+        # chet khong dung luc (lenh live 66-68).
+        for c in calls:
+            self.assertFalse(c.kwargs["close_position"])
         self.assertAlmostEqual(calls[1].args[3], .004)
         self.assertAlmostEqual(calls[2].args[3], .003)
 

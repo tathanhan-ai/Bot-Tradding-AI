@@ -690,6 +690,21 @@ class ExecutionLifecycle:
             s.execution_blocker = "Protective order acknowledgement unresolved"
             return
         old = [p for p in self.protective if p.get("position_side", "BOTH") == position_side and p.get("status") in ("NEW", "PARTIALLY_FILLED", "PENDING_TRIGGER")]
+        # Huy lenh bao ve CU TREN SAN truoc khi dat moi: san chi cho 1
+        # STOP/TP closePosition moi huong (ma -4130). Neu cu van NEW tren
+        # san thi STOP moi chac chan bi tu choi -> dap ca vi the oan
+        # (lenh 66-68 chet vi loi nay).
+        for previous in old:
+            try:
+                ref = self.query_ref(previous)
+                ok, response = s.binance_api.cancel_order(s.symbol, **ref)
+                if not ok:
+                    ok, response = s.binance_api.query_order(s.symbol, **ref)
+                if ok and isinstance(response, dict) and response.get("status") in ("CANCELED", "EXPIRED", "REJECTED", "FILLED"):
+                    previous["status"] = response.get("status")
+                previous["cancel_requested"] = True
+            except Exception:
+                previous["cancel_requested"] = True
         revision = pos.get("protection_revision", 0) + 1
         pos["protection_revision"] = revision
         side = "SELL" if pos["direction"] == 1 else "BUY"
@@ -715,7 +730,11 @@ class ExecutionLifecycle:
                 break
             intent = dict(client_order_id=f"p-{uuid.uuid4().hex[:22]}", order_type=kind, side=side, quantity=values["quantity"], trigger=values["price"], status="CREATED", applied=0.0, quote_applied=0.0,
                 reason=f"{tp_stage.upper()} staged exit" if tp_stage else "Protective SL/TP", tp_stage=tp_stage, position_side=position_side,
-                close_position=(kind == "STOP_MARKET" and quantity >= pos["units"] - 1e-10))
+                # STOP dung quantity + reduceOnly, KHONG dung closePosition:
+                # closePosition moi huong chi duoc 1 lenh tren san (ma -4130),
+                # STOP cu chet khong dung luc la STOP moi rot theo. Quantity
+                # bang full vi the van bao ve du, khong can primitive all-in.
+                close_position=False)
             self.protective.append(intent)
             if not self.send_reduce(intent):
                 break
