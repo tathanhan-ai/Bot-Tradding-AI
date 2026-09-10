@@ -250,9 +250,16 @@ class LiveExecutionIntegrationTest(unittest.TestCase):
         state.order_manager.mark_submit_unknown(unknown.order_id)
         state.order_manager.place_order("BTCUSDT", "LIMIT", "BUY", 60000, 100, 3,
             stop_loss=59000, take_profit=62000, client_order_id="next-1")
+        # Luong gui moi: hoi san (reconcile) truoc khi gui. Query that bai
+        # (ma -2013) thi lenh unknown van treo -> chan gui tiep.
         lifecycle.tick()
-        state.binance_api.query_order.assert_called_once()
-        state.binance_api.place_order_live.assert_not_called()
+        self.assertGreaterEqual(state.binance_api.query_order.call_count, 1)
+        # Query thanh cong -> unknown duoc go, lenh tiep theo moi duoc gui.
+        state.binance_api.query_order = __import__("unittest.mock", fromlist=["Mock"]).Mock(
+            return_value=(True, {"orderId": "99", "status": "NEW", "executedQty": "0", "avgPrice": "0"}))
+        lifecycle.last_reconcile = 0.0
+        lifecycle.tick()
+        self.assertTrue(state.binance_api.place_order_live.called)
 
     def test_notional_clamp_reserves_other_children(self):
         state = make_state(live=True)
@@ -457,6 +464,36 @@ class LiveExecutionIntegrationTest(unittest.TestCase):
         })
         lifecycle.restore()
         self.assertEqual([x["id"] for x in state.trades], [65])
+
+    def test_tick_syncs_upnl_from_exchange_snapshot(self):
+        # UPNL bot tu tinh lech san: tick lay so san khi chenh > nguong.
+        state = make_state(live=True)
+        lifecycle = ExecutionLifecycle(state)
+        entry(state, lifecycle)
+        state.current_position["unrealized_pnl"] = -99.0
+        state.binance_api.get_position_snapshot = __import__("unittest.mock", fromlist=["Mock"]).Mock(
+            return_value={"success": True, "positions": [
+                {"position_side": "BOTH", "amount": 0.01, "entry_price": 60000.0,
+                 "unrealized_pnl": -0.5, "leverage": 3}]})
+        state.binance_api.query_order = __import__("unittest.mock", fromlist=["Mock"]).Mock(
+            return_value=(False, {"code": -2013}))
+        lifecycle.last_reconcile = 0.0
+        lifecycle.tick()
+        self.assertAlmostEqual(state.current_position["unrealized_pnl"], -0.5)
+
+    def test_tick_clears_bad_close_position_flag(self):
+        # STOP BOTH mang close_position se bi send_reduce gui kem reduceOnly
+        # -> san tu choi. Tick tu bo co truoc khi gui.
+        state = make_state(live=True)
+        lifecycle = ExecutionLifecycle(state)
+        lifecycle.protective.append({"order_type": "STOP_MARKET", "status": "NEW",
+                                     "close_position": True, "position_side": "BOTH",
+                                     "client_order_id": "p-test", "order_id": None})
+        state.binance_api.get_position_snapshot = __import__("unittest.mock", fromlist=["Mock"]).Mock(
+            return_value={"success": True, "positions": []})
+        lifecycle.last_reconcile = 0.0
+        lifecycle.tick()
+        self.assertFalse(lifecycle.protective[0]["close_position"])
 
     def test_stale_protective_blocker_clears_when_no_position(self):
         # Dot dap SL/TP that bai (vi du dot lenh 449) de lai blocker ket,

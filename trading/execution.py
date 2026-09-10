@@ -1122,6 +1122,63 @@ class ExecutionLifecycle:
         if time.time() - self.last_reconcile < 1.0:
             return
         self.last_reconcile = time.time()
+        # Realtime sync 1: UPNL theo san moi tick. Goi positionRisk nhe de lay
+        # UPNL chuan san (tinh theo mark, khong lech nhu tu tinh tu live/mid).
+        # Chi goi khi co vi the mo de khong phi request.
+        try:
+            if self.live and (s.current_position or getattr(s, "hedge_positions", {})):
+                snap = s.binance_api.get_position_snapshot(s.symbol)
+                if snap.get("success"):
+                    for item in snap.get("positions", []):
+                        amt = float(item.get("amount", 0.0) or 0.0)
+                        if abs(amt) <= 0:
+                            continue
+                        side = str(item.get("position_side", "BOTH")).upper()
+                        tgt = None
+                        if side in ("LONG", "SHORT"):
+                            tgt = getattr(s, "hedge_positions", {}).get(side)
+                        else:
+                            tgt = s.current_position
+                        if tgt is not None:
+                            srv = float(item.get("unrealized_pnl", 0.0) or 0.0)
+                            loc = float(tgt.get("unrealized_pnl", 0.0) or 0.0)
+                            # Chenh > $0.05 hoac > 20% thi lay so san (san luon dung).
+                            if abs(srv - loc) > max(0.05, abs(srv) * 0.2):
+                                tgt["unrealized_pnl"] = round(srv, 2)
+                                fee = s.fee_engine.calculate_fee(
+                                    abs(amt) * float(tgt.get("entry_price", 0.0) or 0.0), is_maker=False)
+                                tgt["net_upnl"] = round(srv - fee, 2)
+                                initm = tgt.get("initial_margin", tgt.get("margin", 0.0)) or tgt.get("margin", 0.0)
+                                if initm:
+                                    tgt["roe_pct"] = round(srv / initm * 100.0, 2)
+        except Exception:
+            pass
+        # Realtime sync 2: lenh cho PENDING/ACTIVE chua co ma san thi gui ngay
+        # trong tick (khong doi chu ky quyet dinh). Day la duong lenh live
+        # that su di — truoc day chi submit trong tick nhung thieu log.
+        try:
+            if self.live and not getattr(s, "execution_blocker", "") and not self.entry_exit_barrier:
+                for order in list(s.order_manager.due_orders()):
+                    if order.status in ("PENDING", "ACTIVE") and not order.exchange_order_id and not order.exchange_status:
+                        self.submit(order)
+                        if order.status in ("SUBMIT_PENDING", "SUBMIT_UNKNOWN"):
+                            break
+        except Exception:
+            pass
+        # Realtime sync 3: STOP mang close_position o che do BOTH se bi
+        # send_reduce gui kem reduceOnly -> san tu choi chac chan (lenh #65).
+        # Tu bo co ngay khi phat hien, thay vi doi toi dot dung lai rot.
+        try:
+            if self.live:
+                for p in list(self.protective):
+                    if (p.get("status") not in ("FILLED", "CANCELED", "EXPIRED", "REJECTED")
+                            and p.get("order_type") == "STOP_MARKET"
+                            and p.get("close_position")
+                            and str(p.get("position_side", "BOTH")).upper() == "BOTH"):
+                        p["close_position"] = False
+                        self.persist()
+        except Exception:
+            pass
         for intent in self.protective + self.exits:
             if intent.get("status") in ("FILLED", "CANCELED", "EXPIRED", "REJECTED"):
                 continue
