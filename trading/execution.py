@@ -527,6 +527,90 @@ class ExecutionLifecycle:
         self.trace(order.parent_intent_id, "Execution / Exchange", "PASS" if quantity else "PENDING", str(response.get("status", "ACK")), exchange_order_id=order.exchange_order_id, filled_quantity=order.applied_quantity)
         self.persist()
 
+    def apply_user_fill(self, evt: dict) -> bool:
+        """Fill ve tuc thi tu user-data stream (<1s), khong doi reconcile.
+        Tra True neu khop duoc lenh local nao."""
+        s = self.state
+        try:
+            symbol = str(evt.get("symbol", "") or "")
+            if symbol and symbol != s.symbol:
+                return False
+            oid = str(evt.get("order_id", "") or "")
+            cli = str(evt.get("client_order_id", "") or "")
+            status = str(evt.get("status", "") or "").upper()
+            qty = float(evt.get("executed_qty", 0.0) or 0.0)
+            quote = float(evt.get("cum_quote", 0.0) or 0.0)
+            avg = float(evt.get("avg_price", 0.0) or 0.0)
+            if quote <= 0 and qty > 0 and avg > 0:
+                quote = qty * avg
+            target = None
+            for o in s.order_manager.orders:
+                if oid and str(o.exchange_order_id) == oid:
+                    target = o
+                    break
+                if cli and (str(o.client_order_id) == cli or str(o.client_order_id) == "algo:" + cli):
+                    target = o
+                    break
+            if target is None:
+                try:
+                    print(f"[USERDATA] fill ngoai luong: {symbol} {oid}/{cli} {status} x{qty}", flush=True)
+                except Exception:
+                    pass
+                return False
+            ok = s.order_manager.record_exchange_update(target.order_id, {
+                "orderId": target.exchange_order_id or oid,
+                "status": status or "NEW",
+                "executedQty": qty, "avgPrice": avg, "cumQuote": quote,
+            })
+            if not ok:
+                return False
+            quantity, price = s.order_manager.pending_fill(target.order_id)
+            if quantity > 0:
+                self.apply_entry(target, quantity, price)
+                s.order_manager.mark_fill_applied(target.order_id)
+                self.ensure_protection()
+            self.trace(target.parent_intent_id, "Execution / UserData", "PASS" if quantity else "PENDING",
+                       f"fill tuc thi {status} x{qty}", exchange_order_id=target.exchange_order_id)
+            self.persist()
+            return True
+        except Exception:
+            return False
+
+    def apply_user_account(self, evt: dict) -> bool:
+        """UPNL/vi the theo san tuc thi tu ACCOUNT_UPDATE."""
+        s = self.state
+        try:
+            touched = False
+            for item in evt.get("positions", []) or []:
+                if str(item.get("symbol", "") or "") != s.symbol:
+                    continue
+                amt = float(item.get("amount", 0.0) or 0.0)
+                if abs(amt) <= 0:
+                    continue
+                tgt = s.current_position
+                if tgt is None:
+                    continue
+                srv = float(item.get("unrealized_pnl", 0.0) or 0.0)
+                tgt["unrealized_pnl"] = round(srv, 2)
+                fee = s.fee_engine.calculate_fee(
+                    abs(amt) * float(tgt.get("entry_price", 0.0) or 0.0), is_maker=False)
+                tgt["net_upnl"] = round(srv - fee, 2)
+                initm = tgt.get("initial_margin", tgt.get("margin", 0.0)) or tgt.get("margin", 0.0)
+                if initm:
+                    tgt["roe_pct"] = round(srv / initm * 100.0, 2)
+                touched = True
+            bals = evt.get("balances", {}) or {}
+            if "USDT" in bals:
+                try:
+                    s.exchange_wallet = float(bals["USDT"])
+                except Exception:
+                    pass
+            if touched:
+                self.persist()
+            return touched
+        except Exception:
+            return False
+
     def apply_entry(self, order, quantity, price):
         s = self.state
         if not math.isfinite(price) or price <= 0:

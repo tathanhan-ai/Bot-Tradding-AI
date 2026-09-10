@@ -498,6 +498,11 @@ class LiveTradingState:
 
         # Real-time public market stream & order-flow CVD.
         self.ws_engine = None
+        # User-data stream (fill ve tuc thi <1s): chi chay khi live Binance.
+        self.userdata_stream = None
+        self.userdata_events = 0
+        self.userdata_last_at = 0.0
+        self.userdata_error = ""
         self.visual_hft = VisualHFTMicrostructureEngine(bucket_size_btc=10.0, num_buckets=30)
         self.order_flow_engine = OrderFlowCVDEngine(max_ticks=3000, window_seconds=60)
         self.order_flow_verdict: Optional[OrderFlowVerdict] = None
@@ -618,6 +623,58 @@ class LiveTradingState:
                 **callbacks, on_book_ticker=on_book_ticker,
                 is_testnet=self.binance_api.is_live_enabled and self.binance_api.is_testnet,
             )
+
+    def start_user_data_stream(self) -> bool:
+        """Fill ve tuc thi (<1s) qua user-data stream. Chi live Binance."""
+        try:
+            self.stop_user_data_stream()
+        except Exception:
+            pass
+        if not (self.active_exchange == "binance" and self.binance_api.is_live_enabled):
+            return False
+        try:
+            from data.binance_userdata_stream import BinanceUserDataStream
+
+            def on_order(evt: dict) -> None:
+                try:
+                    with self.decision_lock:
+                        self.userdata_events += 1
+                        self.userdata_last_at = time.time()
+                        self.execution.apply_user_fill(evt)
+                except Exception:
+                    pass
+
+            def on_account(evt: dict) -> None:
+                try:
+                    with self.decision_lock:
+                        self.userdata_events += 1
+                        self.userdata_last_at = time.time()
+                        self.execution.apply_user_account(evt)
+                except Exception:
+                    pass
+
+            stream = BinanceUserDataStream(
+                api_manager=self.binance_api,
+                on_order_update=on_order, on_account_update=on_account)
+            if not stream.start():
+                self.userdata_error = getattr(stream, "last_error", "khong mo duoc stream")
+                return False
+            self.userdata_stream = stream
+            self.userdata_error = ""
+            print("[USERDATA] da mo stream fill tuc thi", flush=True)
+            return True
+        except Exception as exc:
+            self.userdata_error = type(exc).__name__
+            return False
+
+    def stop_user_data_stream(self) -> None:
+        try:
+            stream = getattr(self, "userdata_stream", None)
+            if stream is not None:
+                stream.stop()
+        except Exception:
+            pass
+        self.userdata_stream = None
 
     async def restart_market_data(self):
         """Replace every market input as one unit; mixed-venue snapshots are invalid."""
@@ -3089,6 +3146,14 @@ class LiveTradingState:
                           else "paper")),
                 "stream_errors": dict(self.ws_engine.last_error) if self.ws_engine else {},
                 "clock_offset_ms": self.ws_engine.clock_offset_ms if self.ws_engine else None,
+                "user_data": {
+                    "connected": bool(getattr(self, "userdata_stream", None) is not None
+                                      and getattr(self.userdata_stream, "is_running", False)),
+                    "events": int(getattr(self, "userdata_events", 0) or 0),
+                    "last_at_age_s": (round(max(0.0, now - float(getattr(self, "userdata_last_at", 0.0) or 0.0)), 1)
+                                      if float(getattr(self, "userdata_last_at", 0.0) or 0.0) > 0 else None),
+                    "error": str(getattr(self, "userdata_error", "") or ""),
+                },
                 "source_age_seconds": {
                     source: (round(max(0.0, now - timestamp), 2) if timestamp else None)
                     for source, timestamp in self.market_source_times.items()
@@ -3222,6 +3287,10 @@ async def startup_event():
     await asyncio.to_thread(state.initialize_history)
     state.init_ws_engine()
     await state.ws_engine.start()
+    try:
+        await asyncio.to_thread(state.start_user_data_stream)
+    except Exception:
+        pass
     asyncio.create_task(state_broadcast_loop())
     asyncio.create_task(ai_quant_background_loop())
 
@@ -4254,6 +4323,15 @@ def toggle_trading_mode(payload: dict, session: UserSession = Depends(require_ro
 
     state.storage.save_setting("is_live_enabled", live_enabled)
     state.storage.save_setting("mainnet_confirmed", bool(state.binance_api.mainnet_confirmed))
+    # User-data stream theo che do: live mo fill tuc thi, paper tat de
+    # khoi phi listenKey va request thua.
+    try:
+        if live_enabled:
+            state.start_user_data_stream()
+        else:
+            state.stop_user_data_stream()
+    except Exception:
+        pass
     if state.binance_api.is_live_enabled and state.binance_api.is_testnet:
         mode_text = "BINANCE TESTNET"
     elif state.binance_api.is_live_enabled:

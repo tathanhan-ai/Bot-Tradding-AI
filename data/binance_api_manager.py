@@ -597,3 +597,38 @@ class BinanceAPIManager:
             normalized["orderId"] = f"algo:{response['algoId']}"
             normalized["actualOrderId"] = response["actualOrderId"]
         return True, normalized
+
+    # -------------------------------------------------------------
+    # User-data stream (fill ve tuc thi, khong doi reconcile 0.5s).
+    # listenKey song 60 phut, gia han moi 30 phut. Stream day
+    # ORDER_TRADE_UPDATE (fill/huy) + ACCOUNT_UPDATE (vi the/UPNL).
+    # -------------------------------------------------------------
+    def create_listen_key(self) -> Tuple[bool, Any]:
+        error = self._write_error()
+        if error:
+            return False, error
+        return self._send_request("POST", "/fapi/v1/listenKey", {}, signed=False)
+
+    def keepalive_listen_key(self, listen_key: str) -> Tuple[bool, Any]:
+        if not listen_key:
+            return False, {"code": -2, "msg": "Thieu listenKey."}
+        error = self._write_error()
+        if error:
+            return False, error
+        return self._put_listen_key(listen_key)
+
+    def _put_listen_key(self, listen_key: str) -> Tuple[bool, Any]:
+        import urllib.request as _url
+        url = f"{self.base_url}/fapi/v1/listenKey"
+        body = f"listenKey={listen_key}".encode()
+        headers = {"X-MBX-APIKEY": self.api_key} if self.api_key else {}
+        req = _url.Request(url, data=body, headers=headers, method="PUT")
+        try:
+            with _url.urlopen(req, timeout=5.0) as resp:
+                return True, json.loads(resp.read().decode("utf-8") or "{}")
+        except Exception as exc:
+            return False, {"code": -999, "msg": f"listenKey keepalive: {exc}"}
+
+    def user_data_stream_url(self, listen_key: str) -> str:
+        host = "wss://stream.binancefuture.com" if self.is_testnet else "wss://fstream.binance.com"
+        return f"{host}/ws/{listen_key}"
